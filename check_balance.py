@@ -1,46 +1,55 @@
-"""
-Verifica balance on-chain y en CLOB de Polymarket
-"""
-import os
+from web3 import Web3
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+from py_clob_client.constants import POLYGON
 from dotenv import load_dotenv
+import os, requests
 load_dotenv()
 
-from web3 import Web3
+ALCHEMY_KEY = os.getenv("ALCHEMY_KEY", "Jfo7UHHxiaq3qduY1XKhW")
+w3 = Web3(Web3.HTTPProvider(f"https://polygon-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"))
+wallet = Web3.to_checksum_address(os.getenv("WALLET_ADDRESS"))
 
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
-RPC = "https://polygon-mainnet.g.alchemy.com/v2/Jfo7UHHxiaq3qduY1XKhW"
+# 1. USDC nativo on-chain
+USDC = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+abi = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
+usdc = w3.eth.contract(address=USDC, abi=abi)
+bal_usdc = usdc.functions.balanceOf(wallet).call()
+print(f"USDC on-chain:     ${bal_usdc/1e6:.4f}")
 
-USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-USDC_ABI = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
-
-w3 = Web3(Web3.HTTPProvider(RPC))
-
-print(f"✅ Conectado: bloque {w3.eth.block_number}")
-print(f"📍 Wallet: {WALLET_ADDRESS}\n")
-
-# Balance MATIC
-matic = w3.eth.get_balance(WALLET_ADDRESS)
-print(f"⛽ MATIC: {w3.from_wei(matic, 'ether'):.4f}")
-
-# Balance USDC on-chain
-usdc = w3.eth.contract(address=Web3.to_checksum_address(USDC_ADDRESS), abi=USDC_ABI)
-balance = usdc.functions.balanceOf(Web3.to_checksum_address(WALLET_ADDRESS)).call()
-print(f"💰 USDC on-chain: {balance / 1e6:.2f}")
-
-# Balance CLOB
+# 2. pUSD (token colateral Polymarket)
+PUSD = Web3.to_checksum_address("0x4Fabb145d64652a948d72533023f6E7A623C7C53")
 try:
-    from py_clob_client.client import ClobClient
-    from py_clob_client.constants import POLYGON
-    
-    client = ClobClient(
-        host="https://clob.polymarket.com",
-        chain_id=POLYGON,
-        key=PRIVATE_KEY,
-        signature_type=2,
-        funder=WALLET_ADDRESS
-    )
-    clob_balance = client.get_balance()
-    print(f"📊 USDC en CLOB: {clob_balance}")
+    pusd = w3.eth.contract(address=PUSD, abi=abi)
+    bal_pusd = pusd.functions.balanceOf(wallet).call()
+    print(f"pUSD on-chain:     ${bal_pusd/1e6:.4f}")
 except Exception as e:
-    print(f"❌ CLOB error: {e}")
+    print(f"pUSD error: {e}")
+
+# 3. USDC.e (bridged)
+USDCe = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+try:
+    usdce = w3.eth.contract(address=USDCe, abi=abi)
+    bal_usdce = usdce.functions.balanceOf(wallet).call()
+    print(f"USDC.e on-chain:   ${bal_usdce/1e6:.4f}")
+except Exception as e:
+    print(f"USDC.e error: {e}")
+
+# 4. CLOB balance via API
+creds = ApiCreds(api_key=os.getenv("CLOB_API_KEY"), api_secret=os.getenv("CLOB_SECRET"), api_passphrase=os.getenv("CLOB_PASS"))
+client = ClobClient(host="https://clob.polymarket.com", key=os.getenv("PRIVATE_KEY"), chain_id=POLYGON, creds=creds)
+try:
+    bal = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+    print(f"CLOB balance:      {bal}")
+except Exception as e:
+    print(f"CLOB error: {e}")
+
+# 5. Collateral token del CLOB
+try:
+    col_addr = client.get_collateral_address()
+    print(f"Collateral token:  {col_addr}")
+    col = w3.eth.contract(address=Web3.to_checksum_address(col_addr), abi=abi)
+    bal_col = col.functions.balanceOf(wallet).call()
+    print(f"Collateral bal:    ${bal_col/1e6:.4f}")
+except Exception as e:
+    print(f"Collateral error: {e}")
