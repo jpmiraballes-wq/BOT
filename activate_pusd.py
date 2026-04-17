@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Deposita USDC nativo a Polymarket via Bridge API oficial
-Convierte automaticamente USDC -> pUSD sin necesitar la web
+y aprueba los contratos necesarios para operar en el CLOB
 """
 import os
 import time
@@ -17,18 +17,73 @@ RPC = "https://polygon-mainnet.g.alchemy.com/v2/Jfo7UHHxiaq3qduY1XKhW"
 
 w3 = Web3(Web3.HTTPProvider(RPC))
 
-USDC_NATIVE = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
-PUSD        = Web3.to_checksum_address("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
+# Contratos oficiales
+USDC_NATIVE  = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+PUSD         = Web3.to_checksum_address("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
+CTF          = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
+CTF_EXCHANGE = Web3.to_checksum_address("0xE111180000d2663C0091e4f400237545B87B996B")
+NEG_RISK_EX  = Web3.to_checksum_address("0xe2222d279d744050d28e00520010520000310F59")
+NEG_RISK_AD  = Web3.to_checksum_address("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296")
+
+MAX_UINT = 2**256 - 1
 
 ERC20_ABI = [
     {"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
     {"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
     {"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+    {"inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
 ]
 
-TRANSFER_ABI = [
-    {"inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},
-] + ERC20_ABI
+# CTF es ERC1155 - usa setApprovalForAll, no approve
+CTF_ABI = [
+    {"inputs":[{"name":"operator","type":"address"},{"name":"approved","type":"bool"}],"name":"setApprovalForAll","outputs":[],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"name":"account","type":"address"},{"name":"operator","type":"address"}],"name":"isApprovedForAll","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},
+]
+
+def approve_erc20(token_addr, spender_addr, name, wallet, account):
+    """Aprueba un token ERC20 estandar"""
+    token = w3.eth.contract(address=token_addr, abi=ERC20_ABI)
+    try:
+        allowance = token.functions.allowance(wallet, spender_addr).call()
+        balance = token.functions.balanceOf(wallet).call()
+        print(f"  {name}: balance={balance/1e6:.4f}, allowance={allowance/1e6:.4f}")
+        if allowance >= MAX_UINT // 2:
+            print(f"  {name} ya aprobado (MAX)")
+            return
+        print(f"  Aprobando {name}...")
+        nonce = w3.eth.get_transaction_count(wallet)
+        tx = token.functions.approve(spender_addr, MAX_UINT).build_transaction({
+            "from": wallet, "nonce": nonce, "gas": 100000,
+            "gasPrice": w3.eth.gas_price, "chainId": 137,
+        })
+        signed = account.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+        print(f"  OK! TX: {tx_hash.hex()[:20]}...")
+    except Exception as e:
+        print(f"  Error en {name}: {e}")
+
+def approve_erc1155(token_addr, operator_addr, name, wallet, account):
+    """Aprueba un token ERC1155 (CTF) con setApprovalForAll"""
+    token = w3.eth.contract(address=token_addr, abi=CTF_ABI)
+    try:
+        is_approved = token.functions.isApprovedForAll(wallet, operator_addr).call()
+        print(f"  CTF -> {name}: approved={is_approved}")
+        if is_approved:
+            print(f"  CTF -> {name} ya aprobado")
+            return
+        print(f"  Aprobando CTF para {name}...")
+        nonce = w3.eth.get_transaction_count(wallet)
+        tx = token.functions.setApprovalForAll(operator_addr, True).build_transaction({
+            "from": wallet, "nonce": nonce, "gas": 100000,
+            "gasPrice": w3.eth.gas_price, "chainId": 137,
+        })
+        signed = account.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+        print(f"  OK! TX: {tx_hash.hex()[:20]}...")
+    except Exception as e:
+        print(f"  Error en CTF -> {name}: {e}")
 
 def main():
     if not w3.is_connected():
@@ -40,99 +95,97 @@ def main():
     wallet = Web3.to_checksum_address(WALLET_ADDRESS)
     account = w3.eth.account.from_key(PRIVATE_KEY)
 
-    usdc = w3.eth.contract(address=USDC_NATIVE, abi=TRANSFER_ABI)
+    usdc = w3.eth.contract(address=USDC_NATIVE, abi=ERC20_ABI)
     pusd = w3.eth.contract(address=PUSD, abi=ERC20_ABI)
 
     usdc_bal = usdc.functions.balanceOf(wallet).call()
     pusd_bal = pusd.functions.balanceOf(wallet).call()
 
-    print(f"Balance actual:")
+    print(f"Balances actuales:")
     print(f"  USDC nativo: {usdc_bal/1e6:.4f}")
     print(f"  pUSD:        {pusd_bal/1e6:.4f}\n")
 
+    # --- PASO 1: Depositar USDC -> pUSD via Bridge API si no tenemos pUSD ---
     if pusd_bal > 1_000_000:
-        print(f"Ya tienes {pusd_bal/1e6:.2f} pUSD. Listo para operar.\n")
-        print("Corre: python3 main.py")
-        return
+        print(f"Ya tienes {pusd_bal/1e6:.2f} pUSD. Saltando deposito.\n")
+    elif usdc_bal > 1_000_000:
+        print("Paso 1: Obteniendo direccion de deposito via Bridge API...")
+        try:
+            resp = requests.post(
+                "https://bridge.polymarket.com/deposit",
+                json={"address": wallet},
+                timeout=15
+            )
+            data = resp.json()
+            print(f"  Respuesta Bridge: {data}")
 
-    if usdc_bal < 1_000_000:
-        print("ERROR: necesitas al menos 1 USDC nativo")
-        return
+            # Buscar direccion EVM
+            deposit_address = None
+            if isinstance(data, dict):
+                deposit_address = (data.get("evm") or 
+                                   data.get("polygon") or
+                                   (data.get("addresses") or {}).get("evm") or
+                                   (data.get("addresses") or {}).get("polygon"))
 
-    # Paso 1: Obtener direccion de deposito del Bridge API
-    print("Paso 1: Obteniendo direccion de deposito del Bridge API...")
-    try:
-        resp = requests.post(
-            "https://bridge.polymarket.com/deposit",
-            json={"address": wallet},
-            timeout=15
-        )
-        print(f"  Bridge API response: {resp.status_code}")
-        data = resp.json()
-        print(f"  Data: {data}")
-    except Exception as e:
-        print(f"  Error Bridge API: {e}")
-        data = {}
+            if deposit_address:
+                amount = int(usdc_bal * 0.95)
+                print(f"\n  Enviando {amount/1e6:.2f} USDC a {deposit_address}...")
+                nonce = w3.eth.get_transaction_count(wallet)
+                tx = usdc.functions.transfer(
+                    Web3.to_checksum_address(deposit_address), amount
+                ).build_transaction({
+                    "from": wallet, "nonce": nonce, "gas": 100000,
+                    "gasPrice": w3.eth.gas_price, "chainId": 137,
+                })
+                signed = account.sign_transaction(tx)
+                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                print(f"  TX: {tx_hash.hex()}")
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
+                print(f"  Status: {receipt['status']}")
 
-    # Buscar la direccion EVM de deposito
-    deposit_address = None
-    if "evm" in data:
-        deposit_address = data["evm"]
-    elif "addresses" in data:
-        deposit_address = data["addresses"].get("evm") or data["addresses"].get("polygon")
-    elif isinstance(data, dict):
-        for key in ["evm", "polygon", "address"]:
-            if key in data:
-                deposit_address = data[key]
-                break
-
-    if not deposit_address:
-        print(f"\nNo se pudo obtener direccion. Respuesta completa: {data}")
-        print("\nPlan B: enviando USDC directamente a tu misma wallet para activar pUSD...")
-        # Intento alternativo: usar el contrato Onramp correcto
-        # segun docs, USDC se convierte a pUSD automaticamente al enviarlo
-        print("\nConsulta la documentacion en: https://docs.polymarket.com/trading/bridge/deposit")
-        return
-
-    print(f"\n  Direccion de deposito EVM: {deposit_address}")
-
-    # Paso 2: Enviar USDC a la direccion de deposito
-    amount = int(usdc_bal * 0.95)  # 95% dejando gas
-    print(f"\nPaso 2: Enviando {amount/1e6:.2f} USDC a la direccion de deposito...")
-
-    nonce = w3.eth.get_transaction_count(wallet)
-    tx = usdc.functions.transfer(
-        Web3.to_checksum_address(deposit_address),
-        amount
-    ).build_transaction({
-        "from": wallet,
-        "nonce": nonce,
-        "gas": 100000,
-        "gasPrice": w3.eth.gas_price,
-        "chainId": 137,
-    })
-    signed = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    print(f"TX enviada: {tx_hash.hex()}")
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
-    print(f"Confirmada! Status: {receipt['status']}")
-
-    if receipt['status'] == 1:
-        print(f"\nUSDA enviado. Esperando conversion a pUSD (puede tardar 1-2 min)...")
-        for i in range(6):
-            time.sleep(20)
-            pusd_nuevo = pusd.functions.balanceOf(wallet).call()
-            print(f"  [{i+1}/6] pUSD: {pusd_nuevo/1e6:.4f}")
-            if pusd_nuevo > 1_000_000:
-                print(f"\npUSD recibido! {pusd_nuevo/1e6:.2f} pUSD")
-                print("Ahora corre: python3 main.py")
-                return
-
-        print("\nEl bridge puede tardar unos minutos mas.")
-        print("Verifica en: https://bridge.polymarket.com/status/" + wallet)
-        print("Cuando tengas pUSD, corre: python3 main.py")
+                if receipt['status'] == 1:
+                    print("  Esperando conversion a pUSD (2 min max)...")
+                    for i in range(6):
+                        time.sleep(20)
+                        pusd_bal = pusd.functions.balanceOf(wallet).call()
+                        print(f"  [{i+1}/6] pUSD: {pusd_bal/1e6:.4f}")
+                        if pusd_bal > 1_000_000:
+                            break
+            else:
+                print(f"  No se obtuvo direccion de deposito. Data: {data}")
+        except Exception as e:
+            print(f"  Error: {e}")
     else:
-        print("ERROR: la transaccion fallo")
+        print("ERROR: no hay suficiente USDC ni pUSD")
+        return
+
+    # Recheck pUSD
+    pusd_bal = pusd.functions.balanceOf(wallet).call()
+    print(f"\npUSD disponible: {pusd_bal/1e6:.4f}")
+
+    # --- PASO 2: Aprobaciones para trading ---
+    print("\nPaso 2: Aprobaciones para trading...")
+
+    # pUSD -> CTF (ERC20 approve)
+    approve_erc20(PUSD, CTF, "pUSD->CTF", wallet, account)
+    time.sleep(2)
+
+    # CTF -> CTF_EXCHANGE (ERC1155 setApprovalForAll)
+    approve_erc1155(CTF, CTF_EXCHANGE, "CTF_Exchange", wallet, account)
+    time.sleep(2)
+
+    # CTF -> NEG_RISK_EX (ERC1155 setApprovalForAll)
+    approve_erc1155(CTF, NEG_RISK_EX, "NegRisk_Exchange", wallet, account)
+    time.sleep(2)
+
+    # CTF -> NEG_RISK_AD (ERC1155 setApprovalForAll)
+    approve_erc1155(CTF, NEG_RISK_AD, "NegRisk_Adapter", wallet, account)
+    time.sleep(2)
+
+    print("\n=== Setup completo ===")
+    pusd_final = pusd.functions.balanceOf(wallet).call()
+    print(f"pUSD final: {pusd_final/1e6:.4f}")
+    print("\nAhora corre: python3 main.py")
 
 if __name__ == "__main__":
     main()
