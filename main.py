@@ -47,34 +47,30 @@ def get_clob_client():
         return None
 
 def get_clob_balance(client):
-    """Obtiene balance real del CLOB (custodial)"""
     try:
-        # Metodo 1: via client
-        bal = client.get_balance()
-        if bal and float(bal) > 0:
-            return float(bal)
-    except:
-        pass
-    try:
-        # Metodo 2: via API directa con firma
-        from py_clob_client.headers.builder import create_level_2_headers
-        ts = str(int(time.time()))
-        headers = create_level_2_headers(
-            secret=CLOB_SECRET,
-            credentials={"key": CLOB_API_KEY, "passphrase": CLOB_PASS},
-            method="GET", request_path="/balance-allowance",
-            body="", timestamp=ts
-        )
-        res = requests.get(f"{CLOB_URL}/balance-allowance", headers={
-            **headers,
-            "POLY-API-KEY": CLOB_API_KEY,
-        }, timeout=10)
-        data = res.json()
-        bal = float(data.get("balance", 0))
-        return bal
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        bal = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+        raw = bal.get("balance", "0")
+        return float(raw) / 1e6
     except Exception as e:
-        print(f"[WARN] get_clob_balance fallback: {e}")
-    return 0.0
+        print(f"[WARN] get_clob_balance: {e}")
+        return 0.0
+
+def get_onchain_usdc():
+    """Fallback: lee USDC nativo on-chain"""
+    try:
+        from web3 import Web3
+        ALCHEMY_KEY = os.getenv("ALCHEMY_KEY", "Jfo7UHHxiaq3qduY1XKhW")
+        w3 = Web3(Web3.HTTPProvider(f"https://polygon-mainnet.g.alchemy.com/v2/{ALCHEMY_KEY}"))
+        wallet = Web3.to_checksum_address(WALLET_ADDRESS)
+        USDC = Web3.to_checksum_address("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+        abi = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
+        usdc = w3.eth.contract(address=USDC, abi=abi)
+        bal = usdc.functions.balanceOf(wallet).call()
+        return float(bal) / 1e6
+    except Exception as e:
+        print(f"[WARN] get_onchain_usdc: {e}")
+        return 0.0
 
 def scan_markets():
     try:
@@ -113,14 +109,10 @@ def place_order(client, market, balance_usdc):
         token_id = market["yes_token"]
         if not token_id:
             return None
-
-        # Usar maximo 20% del balance disponible por orden, minimo $1
         size_usdc = max(1.0, min(balance_usdc * 0.20, 4.0))
         price = round(min(max(market["best_bid"] + 0.01, 0.02), 0.97), 2)
         size = round(size_usdc / price, 1)
-
-        print(f"[INFO] Intentando orden: {size} shares @ {price} (~${size_usdc:.2f}) | balance: ${balance_usdc:.2f}")
-
+        print(f"[INFO] Orden: {size} shares @ {price} (~${size_usdc:.2f}) | balance: ${balance_usdc:.2f}")
         signed_order = client.create_order(OrderArgs(token_id=token_id, price=price, size=size, side=BUY))
         resp = client.post_order(signed_order, OrderType.GTC)
         log("INFO", f"Orden OK {size}@{price} | {market['market_title'][:50]}")
@@ -130,31 +122,31 @@ def place_order(client, market, balance_usdc):
         return None
 
 def main():
-    print("[INFO] Bot v2.8 arrancando...")
+    print("[INFO] Bot v2.9 arrancando...")
     client = get_clob_client()
     if not client:
         print("[ERROR] No se pudo conectar al CLOB")
         return
     print("[INFO] Conectado al CLOB OK")
-
     cycle = 0
     deployed = 0
-
     while True:
         cycle += 1
         print(f"\n=== Ciclo #{cycle} ===")
 
-        # Verificar balance real del CLOB
+        # Intentar balance CLOB primero
         balance = get_clob_balance(client)
-        print(f"[INFO] Balance CLOB: ${balance:.2f}")
+        print(f"[INFO] Balance CLOB: ${balance:.4f}")
+
+        # Si CLOB dice 0, usar on-chain como referencia
+        if balance < 1.0:
+            onchain = get_onchain_usdc()
+            print(f"[INFO] Balance on-chain USDC: ${onchain:.4f}")
+            balance = onchain
 
         if balance < 1.0:
-            print("[WARN] Balance insuficiente en CLOB. Esperando...")
-            update_system_state({
-                "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "mode": "waiting_funds",
-                "capital_total": balance
-            })
+            print("[WARN] Balance insuficiente. Esperando...")
+            update_system_state({"last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "waiting_funds", "capital_total": balance})
             time.sleep(60)
             continue
 
@@ -166,13 +158,7 @@ def main():
             if result:
                 deployed += balance * 0.20
 
-        update_system_state({
-            "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "uptime_hours": round(cycle * 30 / 3600, 2),
-            "capital_deployed": deployed,
-            "capital_total": balance,
-            "mode": "live"
-        })
+        update_system_state({"last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"), "uptime_hours": round(cycle * 30 / 3600, 2), "capital_deployed": deployed, "capital_total": balance, "mode": "live"})
         time.sleep(30)
 
 if __name__ == "__main__":
