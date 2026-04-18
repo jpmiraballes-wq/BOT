@@ -15,7 +15,7 @@ HEADERS = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 CLOB_URL = "https://clob.polymarket.com"
 
 # ID del registro SystemState (uno solo, fijo)
-SYSTEM_STATE_ID = None
+SYSTEM_STATE_ID = "69e2cc3c311147ecf99b38fd"  # fallback fijo
 
 # Stats sesion
 stats = {"wins": 0, "losses": 0, "total_pnl": 0.0, "orders": 0}
