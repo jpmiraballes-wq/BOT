@@ -1,6 +1,9 @@
 """order_manager.py - Gestion de ordenes en Polymarket CLOB (v2).
 
-En BUY_ONLY_MODE solo coloca la orden BUY (sin intentar vender el lado contrario).
+Cambios v2.1:
+  - Integra PositionTracker: registra cada BUY exitoso en Base44.
+  - En BUY_ONLY_MODE sigue colocando solo BUY, pero el tracker se encarga
+    del cierre cuando la posicion alcanza PROFIT_TARGET_PCT.
 """
 
 import logging
@@ -16,11 +19,12 @@ from config import (
     MAX_CONCURRENT_MARKETS, ORDER_MAX_AGE_SECONDS, MIN_SPREAD_PCT,
 )
 try:
-    from config import BUY_ONLY_MODE  # flag v2
+    from config import BUY_ONLY_MODE
 except ImportError:
     BUY_ONLY_MODE = False
 
 from decision_logger import log_decision, log_warning
+from position_tracker import PositionTracker
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,7 @@ class OrderManager:
         self.client = None
         self.creds = None
         self._orders = {}
+        self.tracker = PositionTracker()
 
     def connect(self):
         logger.info("Inicializando ClobClient en %s (chain=%d)",
@@ -98,7 +103,6 @@ class OrderManager:
             logger.info("Size 0 en %s (Kelly/filtro).", market_id)
             return []
 
-        # En BUY_ONLY, todo el capital va al lado BUY.
         if BUY_ONLY_MODE:
             size_per_side = self._round_size(position_size_usdc / mid)
         else:
@@ -109,13 +113,13 @@ class OrderManager:
             return []
 
         edge = float(opportunity.get("spread_pct", 0.0)) / 2.0
+        question = opportunity.get("question") or market_id
         log_decision(
             reason="place_pair" if not BUY_ONLY_MODE else "place_buy_only",
-            market=opportunity.get("question") or market_id,
-            strategy="market_maker", edge=edge, size=position_size_usdc,
+            market=question, strategy="market_maker",
+            edge=edge, size=position_size_usdc,
             extra={"mid": mid, "bid": bid_price, "ask": ask_price,
-                   "size_per_side": size_per_side,
-                   "buy_only": BUY_ONLY_MODE},
+                   "size_per_side": size_per_side, "buy_only": BUY_ONLY_MODE},
         )
 
         if BUY_ONLY_MODE:
@@ -141,6 +145,13 @@ class OrderManager:
                     logger.info("Orden %s %s @ %.3f x %.2f en %s -> %s",
                                 side, token_id[:10], price, size_per_side,
                                 market_id, order_id)
+                    # Registrar la posicion en el tracker (solo BUY).
+                    if side == BUY:
+                        self.tracker.register_buy(
+                            market_id=market_id, token_id=token_id,
+                            question=question, entry_price=price,
+                            size_tokens=size_per_side, order_id=order_id,
+                        )
                 else:
                     logger.warning("Respuesta sin orderID: %s", resp)
             except Exception as exc:
@@ -185,6 +196,14 @@ class OrderManager:
             return count
         except Exception as exc:
             logger.error("cancel_all fallo: %s", exc)
+            return 0
+
+    def close_profitable_positions(self):
+        """Invoca el tracker para cerrar posiciones que alcanzan el target."""
+        try:
+            return self.tracker.check_and_close(self.client)
+        except Exception as exc:
+            logger.error("close_profitable_positions fallo: %s", exc)
             return 0
 
     def refresh(self, opportunities, size_fn):
