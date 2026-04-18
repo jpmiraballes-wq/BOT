@@ -8,7 +8,8 @@ from pathlib import Path
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
 # Usado por base44_client.py para reportar LogEvent / Opportunity / etc.
-BASE44_BASE_URL = "https://api.base44.com/api"
+# (el cliente ya anade "/api/apps/..." por su cuenta, no incluir "/api" aqui)
+BASE44_BASE_URL = "https://app.base44.com"
 
 # Polymarket CLOB
 CLOB_API_URL = os.environ.get("CLOB_API_URL", "https://clob.polymarket.com")
