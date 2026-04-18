@@ -14,7 +14,7 @@ BASE_URL = f"https://app.base44.com/api/apps/{BASE44_APP_ID}/entities"
 HEADERS = {"Authorization": "Bearer " + (BASE44_API_KEY or ""), "Content-Type": "application/json"}
 CLOB_URL = "https://clob.polymarket.com"
 
-SYSTEM_STATE_ID = "69e37f3e23cc71d8fdd8e425"
+SYSTEM_STATE_ID = "69e3913b7bf43d5f4cdcaccf"
 BOT_CONFIG_ID = "69e390e012342d274c8ebbf5"
 
 stats = {"wins": 0, "losses": 0, "total_pnl": 0.0, "orders": 0}
