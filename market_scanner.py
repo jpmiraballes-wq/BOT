@@ -1,21 +1,20 @@
 import requests
 import logging
-from config import GAMMA_API, MIN_SPREAD_PCT
 
 logger = logging.getLogger(__name__)
 
-def get_top_markets(limit=10):
-    """Escanea Polymarket y devuelve top mercados por oportunidad."""
+GAMMA_API = "https://gamma-api.polymarket.com"
+MIN_SPREAD = 0.001
+MIN_VOLUME = 500
+MIN_LIQUIDITY = 50
+
+
+def scan_markets(limit=10):
     try:
         resp = requests.get(
             f"{GAMMA_API}/markets",
-            params={
-                "active": True,
-                "closed": False,
-                "limit": 100,
-                "order": "volume24hr",
-                "ascending": False
-            },
+            params={"active": True, "closed": False, "limit": 100,
+                    "order": "volume24hr", "ascending": False, "enableOrderBook": True},
             timeout=10
         )
         resp.raise_for_status()
@@ -27,47 +26,64 @@ def get_top_markets(limit=10):
     opportunities = []
     for m in markets:
         try:
-            volume = float(m.get("volume24hr", 0) or 0)
-            liquidity = float(m.get("liquidity", 0) or 0)
-            tokens = m.get("tokens", [])
-
-            if len(tokens) < 2 or volume < 10000 or liquidity < 1000:
+            vol = float(m.get("volume24hr") or 0)
+            liq = float(m.get("liquidityClob") or m.get("liquidity") or 0)
+            bid = float(m.get("bestBid") or 0)
+            ask = float(m.get("bestAsk") or 0)
+            accepting = m.get("acceptingOrders", False)
+            if not accepting:
                 continue
-
-            yes_price = float(tokens[0].get("price", 0) or 0)
-            no_price = float(tokens[1].get("price", 0) or 0)
-
-            if yes_price <= 0 or no_price <= 0:
+            if vol < MIN_VOLUME:
                 continue
-
-            spread = abs(1.0 - yes_price - no_price)
-            if spread < MIN_SPREAD_PCT:
+            if liq < MIN_LIQUIDITY:
                 continue
-
-            # Score compuesto
-            score = (spread * 0.5) + (min(volume / 100000, 1.0) * 0.3) + (min(liquidity / 50000, 1.0) * 0.2)
-
+            if bid <= 0 or ask <= 0:
+                continue
+            if ask <= bid:
+                continue
+            spread = ask - bid
+            if spread < MIN_SPREAD:
+                continue
+            mid = (bid + ask) / 2.0
+            if mid < 0.005 or mid > 0.995:
+                continue
+            clob_ids = m.get("clobTokenIds", [])
+            outcome_prices = m.get("outcomePrices", [])
+            yes_price = float(outcome_prices[0]) if outcome_prices else mid
+            no_price = float(outcome_prices[1]) if len(outcome_prices) > 1 else (1.0 - mid)
+            score = (spread * 0.4) + (min(vol / 100000, 1.0) * 0.35) + (min(liq / 50000, 1.0) * 0.25)
             opportunities.append({
+                "market_id": m.get("conditionId") or m.get("id"),
                 "id": m.get("id"),
-                "slug": m.get("slug"),
+                "question": m.get("question", "")[:80],
                 "title": m.get("question", "")[:80],
                 "yes_price": yes_price,
                 "no_price": no_price,
+                "mid": mid,
+                "best_bid": bid,
+                "best_ask": ask,
                 "spread": spread,
-                "volume_24h": volume,
-                "liquidity": liquidity,
+                "spread_pct": spread,
+                "volume_24h": vol,
+                "liquidity": liq,
                 "score": score,
                 "condition_id": m.get("conditionId"),
-                "tokens": tokens
+                "end_date_iso": m.get("endDateIso") or m.get("endDate"),
+                "token_id_yes": clob_ids[0] if clob_ids else "",
+                "token_id_no": clob_ids[1] if len(clob_ids) > 1 else "",
+                "tokens": [
+                    {"token_id": clob_ids[0] if clob_ids else "", "outcome": "Yes", "price": yes_price},
+                    {"token_id": clob_ids[1] if len(clob_ids) > 1 else "", "outcome": "No", "price": no_price},
+                ]
             })
-
         except Exception as e:
             logger.debug(f"Error procesando mercado: {e}")
             continue
 
-    # Top por score
     opportunities.sort(key=lambda x: x["score"], reverse=True)
     top = opportunities[:limit]
-
     logger.info(f"Escaneados {len(markets)} mercados — {len(opportunities)} oportunidades — top {len(top)}")
     return top
+
+
+get_top_markets = scan_markets
