@@ -1,8 +1,9 @@
-"""main.py - Loop principal del bot de Polymarket (v2.1).
+"""main.py - Loop principal del bot de Polymarket (v2.4).
 
-Cambios v2.1:
-  - Llama a om.close_profitable_positions() cada ciclo para cerrar
-    posiciones que alcanzan PROFIT_TARGET_PCT (+15% por defecto).
+Cambios v2.4:
+  - Lee BotConfig de Base44 al inicio de cada ciclo.
+  - Si paused=true: salta la iteracion sin cerrar nada (mantiene posiciones).
+  - Si emergency_stop=true: cancela TODAS las ordenes abiertas y pausa.
 """
 
 import logging
@@ -13,6 +14,7 @@ import time
 import traceback
 from typing import Any, Dict, List
 
+from bot_config_reader import fetch_bot_config
 from circuit_breakers import CircuitBreakers
 from config import (
     CAPITAL_USDC, LOG_PATH, MAIN_LOOP_INTERVAL_SECONDS,
@@ -100,8 +102,7 @@ def build_size_fn(sizer, rm, cb, deployed_fn):
         final = kelly_size * factor
         if factor < 1.0:
             log_warning(
-                "size_reducido_precio_extremo",
-                module="market_maker",
+                "size_reducido_precio_extremo", module="market_maker",
                 extra={"market": opp.get("question"), "mid": mid,
                        "factor": factor, "size": final},
             )
@@ -112,7 +113,7 @@ def build_size_fn(sizer, rm, cb, deployed_fn):
 def main() -> int:
     setup_logging()
     logger.info("=" * 60)
-    logger.info("Polymarket Market Maker v2.1 - position tracking activado")
+    logger.info("Polymarket Market Maker v2.4 - remote control activado")
     logger.info("=" * 60)
 
     try:
@@ -146,22 +147,62 @@ def main() -> int:
     size_fn = build_size_fn(sizer, rm, cb, _current_deployed)
 
     iteration = 0
+    _emergency_handled = False
     while not _stop_requested:
         iteration += 1
         loop_started = time.time()
         try:
+            # --- Remote control (dashboard) ---------------------------------
+            # Lee BotConfig al inicio de cada ciclo para honrar pausa y
+            # emergency_stop disparados desde el dashboard.
+            bot_cfg = fetch_bot_config()
+            remote_paused = bool(bot_cfg.get("paused"))
+            emergency_stop = bool(bot_cfg.get("emergency_stop"))
+
+            if emergency_stop and not _emergency_handled:
+                logger.critical("EMERGENCY STOP recibido desde dashboard. "
+                                "Cancelando todas las ordenes.")
+                try:
+                    om.cancel_all()
+                except Exception as exc:
+                    logger.error("cancel_all en emergency fallo: %s", exc)
+                _emergency_handled = True
+                reporter.report(build_snapshot(
+                    "stopped", rm, om, notes="emergency_stop_remote"
+                ), force=True)
+
+            if not emergency_stop:
+                _emergency_handled = False
+
+            if remote_paused:
+                logger.info("Bot pausado remotamente (BotConfig.paused=true). "
+                            "Saltando iteracion %d.", iteration)
+                reporter.report(build_snapshot(
+                    "paused", rm, om, notes="remote_paused"
+                ))
+                # Duerme y sigue sin cerrar nada.
+                elapsed = time.time() - loop_started
+                sleep_for = max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed)
+                slept = 0.0
+                while slept < sleep_for and not _stop_requested:
+                    chunk = min(1.0, sleep_for - slept)
+                    time.sleep(chunk)
+                    slept += chunk
+                continue
+
+            # --- Halts permanentes ------------------------------------------
             if rm.is_halted() or SHUTDOWN_FLAG_PATH.exists():
                 logger.critical("Halt activo (%s).", rm.halt_reason or "shutdown.flag")
                 om.cancel_all()
                 reporter.report(build_snapshot("stopped", rm, om, notes=rm.halt_reason), force=True)
                 break
 
+            # --- Circuit breaker intradia -----------------------------------
             cb.update_equity(rm.current_equity)
             if cb.is_paused():
                 remaining = cb.seconds_until_resume()
                 logger.warning("Pausa intradia (%ds restantes).", remaining)
                 om.cancel_stale_orders()
-                # Aun en pausa, intentamos cerrar posiciones rentables.
                 om.close_profitable_positions()
                 reporter.report(build_snapshot(
                     "paused", rm, om,
@@ -171,7 +212,7 @@ def main() -> int:
                 time.sleep(max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed))
                 continue
 
-            # NUEVO v2.1: cerrar posiciones que alcancen PROFIT_TARGET_PCT.
+            # --- Gestion normal ---------------------------------------------
             om.close_profitable_positions()
 
             try:
@@ -181,7 +222,8 @@ def main() -> int:
                         reason="logical_arb_detected",
                         market="%d groups" % len(arb_opps),
                         strategy="logical_arb",
-                        extra={"groups": [o["group_key"] for o in arb_opps][:5]},
+                        extra={"groups": [o.get("group_key") or o.get("market_id")
+                                          for o in arb_opps][:5]},
                     )
             except Exception as exc:
                 logger.error("logical_arb fallo: %s", exc)
