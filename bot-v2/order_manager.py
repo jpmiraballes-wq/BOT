@@ -1,14 +1,14 @@
-"""order_manager.py - Gestion de ordenes en Polymarket CLOB (v2).
+"""order_manager.py - Gestion de ordenes en Polymarket CLOB (v2.2).
 
-Cambios v2.1:
-  - Integra PositionTracker: registra cada BUY exitoso en Base44.
-  - En BUY_ONLY_MODE sigue colocando solo BUY, pero el tracker se encarga
-    del cierre cuando la posicion alcanza PROFIT_TARGET_PCT.
+Cambios v2.2:
+  - Limite duro de MAX_ORDERS_PER_MARKET ordenes abiertas por market_id
+    para evitar concentrar capital en un solo mercado.
 """
 
 import logging
 import os
 import time
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional
 
 from py_clob_client.client import ClobClient
@@ -23,6 +23,11 @@ try:
     from config import BUY_ONLY_MODE
 except ImportError:
     BUY_ONLY_MODE = False
+
+try:
+    from config import MAX_ORDERS_PER_MARKET
+except ImportError:
+    MAX_ORDERS_PER_MARKET = 2
 
 from decision_logger import log_decision, log_warning
 from position_tracker import PositionTracker
@@ -48,22 +53,18 @@ class OrderManager:
         )
         self.creds = self.create_or_derive_api_creds()
         self.client.set_api_creds(self.creds)
-        logger.info("ClobClient listo. API key: %s... | BUY_ONLY_MODE=%s",
-                    self.creds.api_key[:8], BUY_ONLY_MODE)
+        logger.info("ClobClient listo. API key: %s... | BUY_ONLY_MODE=%s | MAX_ORDERS/MKT=%d",
+                    self.creds.api_key[:8], BUY_ONLY_MODE, MAX_ORDERS_PER_MARKET)
 
     def create_or_derive_api_creds(self):
-        # 1) Preferir credenciales ya provisionadas en el entorno (.env).
         env_key = os.getenv("CLOB_API_KEY", "").strip()
         env_secret = os.getenv("CLOB_SECRET", "").strip()
         env_pass = os.getenv("CLOB_PASS", "").strip()
         if env_key and env_secret and env_pass:
             logger.info("Usando credenciales CLOB del entorno (.env).")
             return ApiCreds(
-                api_key=env_key,
-                api_secret=env_secret,
-                api_passphrase=env_pass,
+                api_key=env_key, api_secret=env_secret, api_passphrase=env_pass,
             )
-        # 2) Fallback: derivar o crear via L1 signature.
         try:
             creds = self.client.derive_api_key()
             logger.info("Credenciales API derivadas.")
@@ -88,13 +89,17 @@ class OrderManager:
             logger.error("Error obteniendo ordenes: %s", exc)
             return []
 
-    def get_active_market_ids(self):
-        ids = set()
+    def get_orders_per_market(self):
+        """Retorna Counter(market_id -> numero de ordenes abiertas)."""
+        counts = Counter()
         for order in self.get_open_orders():
             mid = order.get("market") or order.get("market_id")
             if mid:
-                ids.add(mid)
-        return list(ids)
+                counts[mid] += 1
+        return counts
+
+    def get_active_market_ids(self):
+        return list(self.get_orders_per_market().keys())
 
     def place_market_making_pair(self, opportunity, position_size_usdc):
         market_id = opportunity["market_id"]
@@ -158,7 +163,6 @@ class OrderManager:
                     logger.info("Orden %s %s @ %.3f x %.2f en %s -> %s",
                                 side, token_id[:10], price, size_per_side,
                                 market_id, order_id)
-                    # Registrar la posicion en el tracker (solo BUY).
                     if side == BUY:
                         self.tracker.register_buy(
                             market_id=market_id, token_id=token_id,
@@ -212,7 +216,6 @@ class OrderManager:
             return 0
 
     def close_profitable_positions(self):
-        """Invoca el tracker para cerrar posiciones que alcanzan el target."""
         try:
             return self.tracker.check_and_close(self.client)
         except Exception as exc:
@@ -221,20 +224,30 @@ class OrderManager:
 
     def refresh(self, opportunities, size_fn):
         self.cancel_stale_orders()
-        active_markets = set(self.get_active_market_ids())
+
+        orders_per_market = self.get_orders_per_market()
+        active_markets = set(orders_per_market.keys())
         free_slots = MAX_CONCURRENT_MARKETS - len(active_markets)
-        if free_slots <= 0:
-            logger.info("Slots llenos (%d/%d).", len(active_markets), MAX_CONCURRENT_MARKETS)
-            return
+
         for opp in opportunities:
-            if free_slots <= 0:
-                break
-            if opp["market_id"] in active_markets:
+            market_id = opp["market_id"]
+            # Bloqueo por concentracion: max N ordenes por mercado.
+            if orders_per_market.get(market_id, 0) >= MAX_ORDERS_PER_MARKET:
+                logger.info("Mercado %s ya tiene %d ordenes (max %d); saltando.",
+                            market_id, orders_per_market[market_id],
+                            MAX_ORDERS_PER_MARKET)
+                continue
+            # Si el mercado es nuevo y no hay slot libre, saltar.
+            if market_id not in active_markets and free_slots <= 0:
                 continue
             size = size_fn(opp)
             if size <= 0:
                 continue
             created = self.place_market_making_pair(opp, size)
             if created:
-                active_markets.add(opp["market_id"])
-                free_slots -= 1
+                if market_id not in active_markets:
+                    active_markets.add(market_id)
+                    free_slots -= 1
+                orders_per_market[market_id] = (
+                    orders_per_market.get(market_id, 0) + len(created)
+                )
