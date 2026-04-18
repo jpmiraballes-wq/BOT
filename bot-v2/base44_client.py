@@ -13,7 +13,8 @@ REQUEST_TIMEOUT = 15
 
 
 def _endpoint(entity):
-    return "%s/api/apps/%s/entities/%s/records" % (BASE44_BASE_URL, BASE44_APP_ID, entity)
+    # Endpoint correcto: /api/apps/{app_id}/entities/{entity}
+    return "%s/api/apps/%s/entities/%s" % (BASE44_BASE_URL, BASE44_APP_ID, entity)
 
 
 def _headers():
