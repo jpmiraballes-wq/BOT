@@ -1,67 +1,113 @@
-"""
-market_scanner.py - Escaner de mercados Polymarket via Gamma API (v2).
+"""market_scanner.py - Escaner de mercados en Polymarket via Gamma API.
 
-Filtra mercados por volumen, liquidez y spread minimos, y puntua las
-oportunidades mas prometedoras para market making. Devuelve una lista
-ordenada con toda la informacion necesaria para el OrderManager.
-
-Thresholds pensados para cartera pequena (30 USDC):
-  MIN_SPREAD     = 0.001  (0.1%)
-  MIN_VOLUME     = 500    USDC
-  MIN_LIQUIDITY  = 50     USDC
-
-Cada entrada devuelta contiene:
-  - market_id, question, category
-  - bid, ask, mid, spread_pct
-  - volume, liquidity
-  - token_ids  (clobTokenIds)
-  - score      (heuristica de ranking)
-  - raw        (payload completo para filtros posteriores, p.ej. circuit breakers)
+Filtra mercados activos por volumen (>=50k), liquidez y spread, y devuelve
+las mejores oportunidades ordenadas por un score compuesto.
 """
 
-import json
 import logging
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from config import GAMMA_API_URL
+from config import GAMMA_API_URL, MIN_SPREAD_PCT
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Umbrales
-# ---------------------------------------------------------------------------
-MIN_SPREAD = 0.001      # 0.1% spread minimo
-MIN_VOLUME = 500.0      # USDC
-MIN_LIQUIDITY = 50.0    # USDC
-EXTREME_LOW = 0.05      # descartar mercados con mid fuera de [0.05, 0.95]
-EXTREME_HIGH = 0.95
-DEFAULT_LIMIT = 500
+# Filtros minimos para considerar un mercado.
+MIN_VOLUME_USDC = 50_000.0   # evita mercados ilquidos / de baja actividad
+MIN_LIQUIDITY_USDC = 5_000.0
 TOP_N = 20
 REQUEST_TIMEOUT = 15
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _safe_float(v, default=0.0):
+def _safe_float(value, default=0.0):
     try:
-        return float(v) if v is not None else default
+        if value is None:
+            return default
+        return float(value)
     except (TypeError, ValueError):
         return default
 
 
-def _parse_token_ids(market):
-    """Extrae clobTokenIds como lista de strings."""
-    raw = market.get("clobTokenIds") or market.get("clob_token_ids")
-    if not raw:
+def _fetch_active_markets(limit=500):
+    url = "%s/markets" % GAMMA_API_URL
+    params = {
+        "active": "true", "closed": "false", "archived": "false",
+        "limit": limit, "order": "volume", "ascending": "false",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict) and "data" in data:
+            return data["data"]
+        if isinstance(data, list):
+            return data
         return []
-    if isinstance(raw, list):
-        return [str(t) for t in raw if t]
-    if isinstance(raw, str):
+    except requests.RequestException as exc:
+        logger.error("Gamma API error: %s", exc)
+        return []
+
+
+def _extract_prices(market):
+    best_bid = _safe_float(market.get("bestBid"))
+    best_ask = _safe_float(market.get("bestAsk"))
+    if best_bid <= 0 or best_ask <= 0:
+        outcome_prices = market.get("outcomePrices")
+        if isinstance(outcome_prices, str):
+            try:
+                import json as _json
+                parsed = _json.loads(outcome_prices)
+                if isinstance(parsed, list) and parsed:
+                    price = _safe_float(parsed[0])
+                    if 0 < price < 1:
+                        best_bid = max(0.01, price - 0.01)
+                        best_ask = min(0.99, price + 0.01)
+            except (ValueError, TypeError):
+                pass
+    if best_bid <= 0 or best_ask <= 0 or best_ask <= best_bid:
+        return None
+    mid = (best_bid + best_ask) / 2.0
+    spread_abs = best_ask - best_bid
+    return {"bid": best_bid, "ask": best_ask, "mid": mid,
+            "spread_abs": spread_abs,
+            "spread_pct": spread_abs / mid if mid > 0 else 0.0}
+
+
+def _passes_filters(market, prices):
+    volume = _safe_float(market.get("volume") or market.get("volumeNum"))
+    liquidity = _safe_float(market.get("liquidity") or market.get("liquidityNum"))
+    if volume < MIN_VOLUME_USDC:
+        return False
+    if liquidity < MIN_LIQUIDITY_USDC:
+        return False
+    if prices["spread_pct"] < MIN_SPREAD_PCT:
+        return False
+    if prices["mid"] < 0.05 or prices["mid"] > 0.95:
+        return False
+    return True
+
+
+def _score(market, prices):
+    volume = _safe_float(market.get("volume") or market.get("volumeNum"))
+    liquidity = _safe_float(market.get("liquidity") or market.get("liquidityNum"))
+    mid_balance = 1.0 - abs(prices["mid"] - 0.5) * 2.0
+    spread_component = prices["spread_pct"] * 100.0
+    liquidity_component = liquidity / 1000.0
+    return (spread_component * 0.5
+            + min(liquidity_component, 100.0) * 0.3
+            + mid_balance * 20.0 * 0.2
+            + volume / 100_000.0)
+
+
+def _extract_token_ids(market):
+    token_ids_raw = market.get("clobTokenIds")
+    if isinstance(token_ids_raw, list):
+        return [str(t) for t in token_ids_raw if t]
+    if isinstance(token_ids_raw, str):
         try:
-            parsed = json.loads(raw)
+            import json as _json
+            parsed = _json.loads(token_ids_raw)
             if isinstance(parsed, list):
                 return [str(t) for t in parsed if t]
         except (ValueError, TypeError):
@@ -69,133 +115,35 @@ def _parse_token_ids(market):
     return []
 
 
-def _extract_prices(market):
-    """Devuelve (bid, ask, mid) usando bestBid/bestAsk de la Gamma API."""
-    bid = _safe_float(market.get("bestBid"))
-    ask = _safe_float(market.get("bestAsk"))
-
-    # Fallback a outcomePrices si no hay best bid/ask.
-    if (bid <= 0 or ask <= 0 or ask < bid):
-        op = market.get("outcomePrices")
-        if isinstance(op, str):
-            try:
-                parsed = json.loads(op)
-                if isinstance(parsed, list) and parsed:
-                    yes = _safe_float(parsed[0])
-                    if 0 < yes < 1:
-                        spread = 0.01
-                        bid = max(0.01, yes - spread / 2)
-                        ask = min(0.99, yes + spread / 2)
-            except (ValueError, TypeError):
-                pass
-
-    if bid <= 0 or ask <= 0 or ask < bid:
-        return 0.0, 0.0, 0.0
-    mid = (bid + ask) / 2.0
-    return bid, ask, mid
-
-
-def _passes_filters(bid, ask, mid, volume, liquidity):
-    if bid <= 0 or ask <= 0 or mid <= 0:
-        return False
-    if mid < EXTREME_LOW or mid > EXTREME_HIGH:
-        return False
-    if volume < MIN_VOLUME:
-        return False
-    if liquidity < MIN_LIQUIDITY:
-        return False
-    spread_pct = (ask - bid) / mid
-    if spread_pct < MIN_SPREAD:
-        return False
-    return True
-
-
-def _score(spread_pct, liquidity, mid):
-    """Heuristica simple: premia spread amplio, liquidez y mercados balanceados."""
-    balance_bonus = 1.0 - abs(mid - 0.5) * 2.0  # 1.0 en 0.5, 0.0 en 0 o 1
-    return (spread_pct * 100.0) * (liquidity / 100.0) * (0.5 + balance_bonus / 2.0)
-
-
-# ---------------------------------------------------------------------------
-# Gamma API
-# ---------------------------------------------------------------------------
-def _fetch_markets(limit=DEFAULT_LIMIT):
-    url = GAMMA_API_URL.rstrip("/") + "/markets"
-    params = {
-        "active": "true",
-        "closed": "false",
-        "archived": "false",
-        "limit": limit,
-        "order": "volume",
-        "ascending": "false",
-    }
-    try:
-        r = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-        return data if isinstance(data, list) else []
-    except requests.RequestException as exc:
-        logger.error("Gamma API error: %s", exc)
-        return []
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-def scan_markets(limit=DEFAULT_LIMIT, top_n=TOP_N):
-    """
-    Escanea la Gamma API y devuelve hasta `top_n` oportunidades validas.
-    """
-    markets = _fetch_markets(limit=limit)
-    logger.info("Gamma API: %d mercados descargados", len(markets))
+def scan_markets():
+    raw_markets = _fetch_active_markets()
+    logger.info("Gamma API: %d mercados descargados", len(raw_markets))
 
     opportunities = []
-    for m in markets:
-        try:
-            bid, ask, mid = _extract_prices(m)
-            volume = _safe_float(m.get("volume") or m.get("volumeNum"))
-            liquidity = _safe_float(m.get("liquidity") or m.get("liquidityNum"))
-
-            if not _passes_filters(bid, ask, mid, volume, liquidity):
-                continue
-
-            token_ids = _parse_token_ids(m)
-            if not token_ids:
-                continue
-
-            spread_pct = (ask - bid) / mid
-            opportunities.append({
-                "market_id": str(m.get("id") or m.get("conditionId") or m.get("slug")),
-                "question": m.get("question") or m.get("slug") or "",
-                "category": m.get("category") or "",
-                "bid": bid,
-                "ask": ask,
-                "mid": mid,
-                "spread_pct": spread_pct,
-                "volume": volume,
-                "liquidity": liquidity,
-                "token_ids": token_ids,
-                "score": _score(spread_pct, liquidity, mid),
-                "raw": m,
-            })
-        except Exception as exc:
-            logger.debug("Mercado descartado por error: %s", exc)
+    for market in raw_markets:
+        prices = _extract_prices(market)
+        if not prices:
             continue
+        if not _passes_filters(market, prices):
+            continue
+        token_ids = _extract_token_ids(market)
+        if not token_ids:
+            continue
+        opportunities.append({
+            "market_id": market.get("id") or market.get("conditionId"),
+            "condition_id": market.get("conditionId"),
+            "question": market.get("question") or market.get("slug"),
+            "bid": prices["bid"], "ask": prices["ask"], "mid": prices["mid"],
+            "spread_pct": prices["spread_pct"],
+            "volume": _safe_float(market.get("volume") or market.get("volumeNum")),
+            "liquidity": _safe_float(market.get("liquidity") or market.get("liquidityNum")),
+            "token_ids": token_ids,
+            "score": _score(market, prices),
+            "raw": market,
+        })
 
-    opportunities.sort(key=lambda o: o["score"], reverse=True)
-    top = opportunities[:top_n]
-    logger.info(
-        "Oportunidades validas: %d (top %d devueltas)",
-        len(opportunities), len(top),
-    )
+    opportunities.sort(key=lambda x: x["score"], reverse=True)
+    top = opportunities[:TOP_N]
+    logger.info("Oportunidades validas: %d (top %d devueltas)",
+                len(opportunities), len(top))
     return top
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    for opp in scan_markets():
-        print("%.4f spread | vol=%.0f liq=%.0f | %s" % (
-            opp["spread_pct"], opp["volume"], opp["liquidity"], opp["question"][:60],
-        ))
