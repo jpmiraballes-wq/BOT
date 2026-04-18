@@ -1,3 +1,11 @@
+# ---------------------------------------------------------------------------
+# Endpoints externos (requeridos por los modulos v2)
+# ---------------------------------------------------------------------------
+# Usado por market_scanner.py y logical_arb.py
+GAMMA_API_URL = "https://gamma-api.polymarket.com"
+
+# Usado por base44_client.py para reportar LogEvent / Opportunity / etc.
+BASE44_BASE_URL = "https://api.base44.com/api"
 
 # ---------------------------------------------------------------------------
 # Circuit breakers (v2)
