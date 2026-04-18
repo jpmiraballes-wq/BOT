@@ -1,31 +1,26 @@
-import os
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Endpoints externos (requeridos por los modulos v2)
+# Endpoints externos (v2)
 # ---------------------------------------------------------------------------
-# Usado por market_scanner.py y logical_arb.py
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
-
-# Usado por base44_client.py para reportar LogEvent / Opportunity / etc.
-# (el cliente ya anade "/api/apps/..." por su cuenta, no incluir "/api" aqui)
 BASE44_BASE_URL = "https://app.base44.com"
-
-# Polymarket CLOB
-CLOB_API_URL = os.environ.get("CLOB_API_URL", "https://clob.polymarket.com")
-POLYGON_CHAIN_ID = int(os.environ.get("POLYGON_CHAIN_ID", "137"))
+CLOB_API_URL = "https://clob.polymarket.com"
+POLYGON_CHAIN_ID = 137
 
 # ---------------------------------------------------------------------------
-# Order manager / loop (v2)
+# Limites de ejecucion (v2)
 # ---------------------------------------------------------------------------
-MAX_CONCURRENT_MARKETS = int(os.environ.get("MAX_CONCURRENT_MARKETS", "3"))
-ORDER_MAX_AGE_SECONDS = int(os.environ.get("ORDER_MAX_AGE_SECONDS", "300"))
-MIN_SPREAD_PCT = float(os.environ.get("MIN_SPREAD_PCT", "0.02"))
-MAIN_LOOP_INTERVAL_SECONDS = int(os.environ.get("MAIN_LOOP_INTERVAL_SECONDS", "60"))
+MAX_CONCURRENT_MARKETS = 5
+ORDER_MAX_AGE_SECONDS = 2 * 60 * 60
+MIN_SPREAD_PCT = 0.02
+MAIN_LOOP_INTERVAL_SECONDS = 60
 
-# Rutas (se pueden sobreescribir con variables de entorno)
-LOG_PATH = Path(os.environ.get("LOG_PATH", str(Path.home() / "Desktop" / "bot" / "bot.log")))
-SHUTDOWN_FLAG_PATH = Path(os.environ.get("SHUTDOWN_FLAG_PATH", str(Path.home() / "Desktop" / "bot" / "shutdown.flag")))
+# ---------------------------------------------------------------------------
+# Paths (v2)
+# ---------------------------------------------------------------------------
+from pathlib import Path as _Path
+LOG_PATH = _Path(__file__).resolve().parent / "bot.log"
+SHUTDOWN_FLAG_PATH = _Path(__file__).resolve().parent / "shutdown.flag"
 
 # ---------------------------------------------------------------------------
 # Circuit breakers (v2)
@@ -49,3 +44,10 @@ KELLY_MIN_VARIANCE = 1e-4
 # ---------------------------------------------------------------------------
 LOGICAL_ARB_OVER_THRESHOLD = 1.02
 LOGICAL_ARB_UNDER_THRESHOLD = 0.97
+
+# ---------------------------------------------------------------------------
+# Modo solo-BUY (v2)
+# Si True, el order_manager NO intenta vender el lado contrario.
+# Util cuando la wallet tiene USDC pero aun no posee tokens YES/NO.
+# ---------------------------------------------------------------------------
+BUY_ONLY_MODE = True
