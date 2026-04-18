@@ -14,25 +14,22 @@ BASE_URL = f"https://app.base44.com/api/apps/{BASE44_APP_ID}/entities"
 HEADERS = {"Authorization": "Bearer " + (BASE44_API_KEY or ""), "Content-Type": "application/json"}
 CLOB_URL = "https://clob.polymarket.com"
 
-SYSTEM_STATE_ID = "69e2cc3c311147ecf99b38fd"
+SYSTEM_STATE_ID = "69e37b6d619bec8376f68f53"
 BOT_CONFIG_ID = "69e19150519da83ec0682e87"
 
-# Stats sesion
 stats = {"wins": 0, "losses": 0, "total_pnl": 0.0, "orders": 0}
 start_time = time.time()
 
-# Config activa (se refresca cada ciclo desde Base44)
 config = {
     "paused": False,
     "min_spread_pct": 2.0,
-    "max_position_pct": 20.0,
-    "max_open_orders": 3,
+    "max_position_pct": 7.0,
+    "max_open_orders": 5,
     "rebalance_interval_sec": 30,
-    "max_order_usdc": 2.5,
+    "max_order_usdc": 15.0,
 }
 
 def fetch_config():
-    """Lee BotConfig desde Base44 y actualiza config global"""
     global config
     try:
         r = requests.get(f"{BASE_URL}/BotConfig/{BOT_CONFIG_ID}", headers=HEADERS, timeout=5)
@@ -40,11 +37,10 @@ def fetch_config():
             data = r.json()
             config["paused"] = bool(data.get("paused", False))
             config["min_spread_pct"] = float(data.get("min_spread_pct", 2.0))
-            config["max_position_pct"] = float(data.get("max_position_pct", 20.0))
-            config["max_open_orders"] = int(data.get("max_open_orders", 3)) if data.get("max_open_orders") else 3
+            config["max_position_pct"] = float(data.get("max_position_pct", 7.0))
+            config["max_open_orders"] = int(data.get("max_open_orders", 5)) if data.get("max_open_orders") else 5
             config["rebalance_interval_sec"] = int(data.get("rebalance_interval_sec", 30))
-            # max_order_usdc lo derivamos del capital y max_position_pct
-            capital = float(data.get("capital_usdc", 300))
+            capital = float(data.get("capital_usdc", 213))
             config["max_order_usdc"] = round(capital * config["max_position_pct"] / 100, 2)
             mode = data.get("mode", "live")
             print(f"[CONFIG] paused={config['paused']} | spread_min={config['min_spread_pct']}% | max_ord={config['max_open_orders']} | size_max=${config['max_order_usdc']} | mode={mode}")
@@ -71,6 +67,7 @@ def get_balance(client):
 def update_dashboard(balance, open_orders):
     uptime = round((time.time() - start_time) / 3600, 2)
     winrate = round(stats["wins"] / max(stats["wins"] + stats["losses"], 1) * 100, 1)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     try:
         r = requests.put(f"{BASE_URL}/SystemState/{SYSTEM_STATE_ID}", json={
             "mode": "live",
@@ -82,11 +79,11 @@ def update_dashboard(balance, open_orders):
             "total_trades": stats["orders"],
             "open_positions": open_orders,
             "uptime_hours": uptime,
-            "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "last_heartbeat": now,
             "bot_version": "3.2"
         }, headers=HEADERS, timeout=5)
         if r.status_code == 200:
-            print(f"[INFO] ✅ Heartbeat OK")
+            print(f"[INFO] Heartbeat OK")
         else:
             print(f"[WARN] Heartbeat HTTP {r.status_code}: {r.text[:100]}")
     except Exception as e:
@@ -101,7 +98,7 @@ def save_trade(market, price, size_usdc, order_id):
             "size_usdc": size_usdc,
             "strategy": "market_making",
             "status": "open",
-            "entry_time": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "entry_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "notes": f"order_id:{order_id}"
         }, headers=HEADERS, timeout=5)
         return r.json().get("id")
@@ -114,7 +111,7 @@ def close_trade(trade_id, pnl, status):
         requests.put(f"{BASE_URL}/Trade/{trade_id}", json={
             "status": status,
             "pnl": round(pnl, 4),
-            "exit_time": time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            "exit_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         }, headers=HEADERS, timeout=5)
     except:
         pass
@@ -168,11 +165,11 @@ def place_order(client, opp, balance):
         max_usdc = config["max_order_usdc"]
         size_usdc = min(balance * (config["max_position_pct"] / 100.0), max_usdc)
         price = round(min(max(opp["best_bid"] + 0.01, 0.02), 0.97), 2)
-        size = round(size_usdc / price, 1)
+        size = max(round(size_usdc / price, 1), 5.0)
         signed = client.create_order(OrderArgs(token_id=opp["yes_token"], price=price, size=size, side=BUY))
         resp = client.post_order(signed, OrderType.GTC)
         order_id = resp.get("orderID") or resp.get("id", "")
-        print(f"[INFO] ✅ Orden OK {size}@{price} (${size_usdc:.2f}) | {opp['title'][:50]}")
+        print(f"[INFO] Orden OK {size}@{price} (${size_usdc:.2f}) | {opp['title'][:50]}")
         return order_id, size_usdc
     except Exception as e:
         print(f"[ERROR] place_order: {e}")
@@ -191,7 +188,7 @@ def check_pending(client, pending):
                 stats["wins"] += 1
                 stats["total_pnl"] += pnl
                 stats["orders"] += 1
-                log_event("WIN", f"✅ GANASTE ${pnl:.3f} | {title[:50]}")
+                log_event("WIN", f"GANASTE ${pnl:.3f} | {title[:50]}")
                 close_trade(tid, pnl, "filled")
             elif status in ["CANCELLED", "EXPIRED"]:
                 stats["losses"] += 1
@@ -211,12 +208,10 @@ def main():
 
     balance = get_balance(client)
     print(f"[INFO] Balance inicial: ${balance:.4f}")
-    print(f"[INFO] SystemState: {SYSTEM_STATE_ID}")
+    print(f"[INFO] SystemState ID: {SYSTEM_STATE_ID}")
 
-    # Cargar config inicial
     fetch_config()
 
-    # Cancelar ordenes viejas al arrancar
     try:
         resp = client.cancel_all()
         cancelled = len(resp.get("canceled", []))
@@ -232,12 +227,10 @@ def main():
         cycle += 1
         print(f"\n=== Ciclo #{cycle} ===")
 
-        # Refrescar config desde Base44 cada ciclo
         fetch_config()
 
-        # Si está pausado, esperar
         if config["paused"]:
-            print("[INFO] ⏸️  Bot PAUSADO desde el dashboard. Esperando...")
+            print("[INFO] Bot PAUSADO desde el dashboard. Esperando...")
             update_dashboard(balance, len(pending))
             time.sleep(config["rebalance_interval_sec"])
             continue
@@ -251,33 +244,24 @@ def main():
             time.sleep(60)
             continue
 
-        # Revisar pendientes
         if pending:
             pending = check_pending(client, pending)
             print(f"[INFO] Ordenes abiertas: {len(pending)}")
 
-        # Solo operar si hay espacio
         max_orders = config["max_open_orders"]
         if len(pending) < max_orders:
             opps = scan_markets()
-            print(f"[INFO] {len(opps)} oportunidades encontradas (spread_min={config['min_spread_pct']}%)")
+            print(f"[INFO] {len(opps)} oportunidades encontradas")
             if opps:
                 best = sorted(opps, key=lambda x: x["spread_pct"], reverse=True)[0]
-                print(f"[INFO] Mejor: {best['spread_pct']}% | {best['title']}")
+                print(f"[INFO] Mejor: {best['spread_pct']}% | {best['title'][:60]}")
                 oid, sz = place_order(client, best, balance)
                 if oid:
                     tid = save_trade(best["title"], best["best_bid"], sz, oid)
                     pending.append((oid, tid, best["best_bid"], sz, best["title"]))
+                    stats["orders"] += 1
         else:
-            print(f"[INFO] Max ordenes abiertas ({max_orders}), esperando...")
-
-        # Stats
-        winrate = round(stats["wins"] / max(stats["wins"] + stats["losses"], 1) * 100, 1)
-        print(f"\n{'='*50}")
-        print(f"  💰 Balance: ${balance:.2f} | 📈 PnL: ${stats['total_pnl']:.4f}")
-        print(f"  ✅ Wins: {stats['wins']} | ❌ Losses: {stats['losses']} | 🎯 Aciertos: {winrate}%")
-        print(f"  📋 Ordenes abiertas: {len(pending)}/{max_orders}")
-        print(f"{'='*50}")
+            print(f"[INFO] Max ordenes alcanzado ({len(pending)}/{max_orders})")
 
         update_dashboard(balance, len(pending))
         time.sleep(config["rebalance_interval_sec"])
