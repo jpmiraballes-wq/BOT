@@ -7,6 +7,7 @@ Cambios v2.1:
 """
 
 import logging
+import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -51,6 +52,18 @@ class OrderManager:
                     self.creds.api_key[:8], BUY_ONLY_MODE)
 
     def create_or_derive_api_creds(self):
+        # 1) Preferir credenciales ya provisionadas en el entorno (.env).
+        env_key = os.getenv("CLOB_API_KEY", "").strip()
+        env_secret = os.getenv("CLOB_SECRET", "").strip()
+        env_pass = os.getenv("CLOB_PASS", "").strip()
+        if env_key and env_secret and env_pass:
+            logger.info("Usando credenciales CLOB del entorno (.env).")
+            return ApiCreds(
+                api_key=env_key,
+                api_secret=env_secret,
+                api_passphrase=env_pass,
+            )
+        # 2) Fallback: derivar o crear via L1 signature.
         try:
             creds = self.client.derive_api_key()
             logger.info("Credenciales API derivadas.")
