@@ -200,7 +200,7 @@ input[type=number] { background:#0f172a; border:1px solid #334155; color:#e2e8f0
 <script>
 const APP_ID = '69e189f649c5d21cd42536bc';
 const BASE_URL = 'https://app.base44.com/api/apps/' + APP_ID + '/entities';
-const TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZTBhZDM3Ni1iMTdiLTQ5MmEtYTZhMS0yMGI1M2U2ZjIyMzciLCJjbGllbnRfaWQiOiJiZTBhZDM3Ni1iMTdiLTQ5MmEtYTZhMS0yMGI1M2U2ZjIyMzciLCJhcHBfaWQiOiI2OWUxODlmNjQ5YzVkMjFjZDQyNTM2YmMiLCJhdWQiOiJiYXNlNDRfYXBpIiwic2NvcGUiOiJhcHAuYWNjZXNzIiwiZXhwIjoxNzc2NDc5ODI5LCJpYXQiOjE3NzY0NzYyMjl9.F-BF5qMW3f46w-7ue4ZGqROFQBAUixeLDxfMb0d8pZ0';
+const TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZTBhZDM3Ni1iMTdiLTQ5MmEtYTZhMS0yMGI1M2U2ZjIyMzciLCJjbGllbnRfaWQiOiJiZTBhZDM3Ni1iMTdiLTQ5MmEtYTZhMS0yMGI1M2U2ZjIyMzciLCJhcHBfaWQiOiI2OWUxODlmNjQ5YzVkMjFjZDQyNTM2YmMiLCJhdWQiOiJiYXNlNDRfYXBpIiwic2NvcGUiOiJhcHAuYWNjZXNzIiwiZXhwIjoxNzc2NDgwMDU2LCJpYXQiOjE3NzY0NzY0NTZ9.8YCQZPl5jyqCQlJ2xCMfOKZYF7Ax2D1Hef43QySwPx0';
 const BOT_CONFIG_ID = '69e19150519da83ec0682e87';
 const SYSTEM_STATE_ID = '69e2cc3c311147ecf99b38fd';
 const HEADERS = { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' };
@@ -251,7 +251,7 @@ async function refresh() {
     const s = states[0];
     if (s) {
       const hb = new Date(s.last_heartbeat);
-      const online = (Date.now() - hb.getTime()) < 90000;
+      const online = (Date.now() - hb.getTime()) < 180000;
       const statusEl = document.getElementById('bot-status');
       statusEl.textContent = online ? '● ONLINE' : '● OFFLINE';
       statusEl.className = 'badge ' + (online ? 'badge-green' : 'badge-red');
