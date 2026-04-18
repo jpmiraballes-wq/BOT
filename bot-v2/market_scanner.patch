@@ -1,0 +1,7 @@
+--- market_scanner.py
++++ market_scanner.py
+@@
+             "token_ids": token_ids,
+             "score": _score(market, prices),
++            "raw": market,
+         })
