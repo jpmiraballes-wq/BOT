@@ -72,6 +72,8 @@ class PositionTracker:
             "entry_price": float(entry_price),
             "current_price": float(entry_price),
             "size_usdc": float(entry_price) * float(size_tokens),
+            "size_tokens": float(size_tokens),
+            "token_id": token_id,
             "pnl_unrealized": 0.0,
             "status": "open",
         }
@@ -165,7 +167,17 @@ class PositionTracker:
 
     # ----------------------------------------------------------------- close
     def _extract_token_id(self, position):
-        """Las posiciones en Base44 no guardan token_id; lo resolvemos desde cache."""
+        """Obtiene token_id y size_tokens. Prioriza los campos persistidos en
+        Base44 para que sobrevivan a un reinicio del bot; si faltan, cae al
+        cache local de la sesion actual.
+        """
+        token_id = position.get("token_id")
+        size_tokens = position.get("size_tokens")
+        if token_id and size_tokens:
+            try:
+                return token_id, float(size_tokens)
+            except (TypeError, ValueError):
+                pass
         pid = position.get("id")
         cached = self._cache.get(pid)
         if cached:
