@@ -40,7 +40,12 @@ def init_system_state(balance):
     global SYSTEM_STATE_ID
     try:
         res = requests.get(f"{BASE_URL}/SystemState", headers=HEADERS, timeout=5)
-        records = res.json()
+        raw = res.json()
+        # La API puede devolver lista o dict con key "records"
+        if isinstance(raw, dict):
+            records = raw.get("records", raw.get("data", []))
+        else:
+            records = raw
         if isinstance(records, list) and len(records) > 0:
             SYSTEM_STATE_ID = records[0]["id"]
             print(f"[INFO] SystemState encontrado: {SYSTEM_STATE_ID}")
@@ -52,7 +57,8 @@ def init_system_state(balance):
                     "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "bot_version": "3.1"}
             r = requests.post(f"{BASE_URL}/SystemState", json=data, headers=HEADERS, timeout=5)
-            SYSTEM_STATE_ID = r.json()["id"]
+            rj = r.json()
+            SYSTEM_STATE_ID = rj.get("id") or (rj[0]["id"] if isinstance(rj,list) else None)
             print(f"[INFO] SystemState creado: {SYSTEM_STATE_ID}")
     except Exception as e:
         print(f"[ERROR] init_system_state: {e}")
