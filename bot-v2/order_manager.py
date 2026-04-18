@@ -1,8 +1,10 @@
-"""order_manager.py - Gestion de ordenes en Polymarket CLOB (v2.2).
+"""order_manager.py - Gestion de ordenes en Polymarket CLOB (v2.3).
 
-Cambios v2.2:
-  - Limite duro de MAX_ORDERS_PER_MARKET ordenes abiertas por market_id
-    para evitar concentrar capital en un solo mercado.
+Cambios v2.3:
+  - Obtiene maker_fee_rate del mercado via client.get_market(token_id)
+    antes de construir la orden, evitando el error
+    "invalid fee rate (0), current market's maker fee: 1000".
+  - Cache de fee_rate por token_id para no consultar en cada ciclo.
 """
 
 import logging
@@ -42,6 +44,7 @@ class OrderManager:
         self.client = None
         self.creds = None
         self._orders = {}
+        self._fee_cache = {}  # token_id -> maker_fee_rate (int basis points)
         self.tracker = PositionTracker()
 
     def connect(self):
@@ -73,6 +76,39 @@ class OrderManager:
             logger.warning("No se pudieron derivar (%s). Creando nuevas.", exc)
             return self.client.create_api_key()
 
+    # -------------------------------------------------------------- fee rate
+    def get_maker_fee_rate(self, token_id):
+        """Devuelve el maker_fee_rate del mercado (basis points, int).
+
+        Polymarket exige que la orden firme con el mismo fee_rate que expone
+        el mercado. Cacheamos para evitar consultar cada ciclo.
+        """
+        if token_id in self._fee_cache:
+            return self._fee_cache[token_id]
+        fee = 0
+        try:
+            market = self.client.get_market(token_id) or {}
+            # El campo puede venir como 'maker_fee_rate_bps', 'makerFeeRate',
+            # o anidado bajo 'fee' / 'fees'. Intentamos varias claves.
+            candidates = [
+                market.get("maker_fee_rate_bps"),
+                market.get("makerFeeRate"),
+                market.get("maker_fee_rate"),
+                (market.get("fee") or {}).get("maker") if isinstance(market.get("fee"), dict) else None,
+            ]
+            for c in candidates:
+                if c is not None:
+                    fee = int(c)
+                    break
+        except Exception as exc:
+            logger.warning("No se pudo obtener fee_rate para %s (%s); usando 0",
+                           token_id[:10], exc)
+            fee = 0
+        self._fee_cache[token_id] = fee
+        logger.info("Fee rate %s: %d bps", token_id[:10], fee)
+        return fee
+
+    # ----------------------------------------------------------------- utils
     @staticmethod
     def _round_price(price):
         price = max(0.01, min(0.99, price))
@@ -90,7 +126,6 @@ class OrderManager:
             return []
 
     def get_orders_per_market(self):
-        """Retorna Counter(market_id -> numero de ordenes abiertas)."""
         counts = Counter()
         for order in self.get_open_orders():
             mid = order.get("market") or order.get("market_id")
@@ -101,6 +136,20 @@ class OrderManager:
     def get_active_market_ids(self):
         return list(self.get_orders_per_market().keys())
 
+    # --------------------------------------------------------------- builder
+    def _build_order_args(self, *, token_id, price, size, side):
+        """Construye OrderArgs incluyendo fee_rate_bps si el SDK lo soporta."""
+        fee = self.get_maker_fee_rate(token_id)
+        try:
+            return OrderArgs(
+                token_id=token_id, price=price, size=size, side=side,
+                fee_rate_bps=fee,
+            )
+        except TypeError:
+            # SDK antiguo sin fee_rate_bps; degradamos sin fee.
+            return OrderArgs(token_id=token_id, price=price, size=size, side=side)
+
+    # ----------------------------------------------------------------- place
     def place_market_making_pair(self, opportunity, position_size_usdc):
         market_id = opportunity["market_id"]
         token_ids = opportunity.get("token_ids") or []
@@ -140,16 +189,14 @@ class OrderManager:
                    "size_per_side": size_per_side, "buy_only": BUY_ONLY_MODE},
         )
 
-        if BUY_ONLY_MODE:
-            sides = ((BUY, bid_price),)
-        else:
-            sides = ((BUY, bid_price), (SELL, ask_price))
+        sides = ((BUY, bid_price),) if BUY_ONLY_MODE else ((BUY, bid_price), (SELL, ask_price))
 
         created = []
         for side, price in sides:
             try:
-                args = OrderArgs(token_id=token_id, price=price,
-                                 size=size_per_side, side=side)
+                args = self._build_order_args(
+                    token_id=token_id, price=price, size=size_per_side, side=side,
+                )
                 signed = self.client.create_order(args)
                 resp = self.client.post_order(signed, OrderType.GTC)
                 order_id = (resp or {}).get("orderID") or (resp or {}).get("orderId")
@@ -224,20 +271,17 @@ class OrderManager:
 
     def refresh(self, opportunities, size_fn):
         self.cancel_stale_orders()
-
         orders_per_market = self.get_orders_per_market()
         active_markets = set(orders_per_market.keys())
         free_slots = MAX_CONCURRENT_MARKETS - len(active_markets)
 
         for opp in opportunities:
             market_id = opp["market_id"]
-            # Bloqueo por concentracion: max N ordenes por mercado.
             if orders_per_market.get(market_id, 0) >= MAX_ORDERS_PER_MARKET:
                 logger.info("Mercado %s ya tiene %d ordenes (max %d); saltando.",
                             market_id, orders_per_market[market_id],
                             MAX_ORDERS_PER_MARKET)
                 continue
-            # Si el mercado es nuevo y no hay slot libre, saltar.
             if market_id not in active_markets and free_slots <= 0:
                 continue
             size = size_fn(opp)
