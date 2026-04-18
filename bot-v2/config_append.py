@@ -47,7 +47,13 @@ LOGICAL_ARB_UNDER_THRESHOLD = 0.97
 
 # ---------------------------------------------------------------------------
 # Modo solo-BUY (v2)
-# Si True, el order_manager NO intenta vender el lado contrario.
-# Util cuando la wallet tiene USDC pero aun no posee tokens YES/NO.
 # ---------------------------------------------------------------------------
 BUY_ONLY_MODE = True
+
+# ---------------------------------------------------------------------------
+# Gestion de posiciones / salidas (v2.1)
+# PROFIT_TARGET_PCT: cierra la posicion si pnl >= este porcentaje (0.15 = +15%)
+# STOP_LOSS_PCT:     cierra la posicion si pnl <= este porcentaje (-0.30 = -30%)
+# ---------------------------------------------------------------------------
+PROFIT_TARGET_PCT = 0.15
+STOP_LOSS_PCT = -0.30
