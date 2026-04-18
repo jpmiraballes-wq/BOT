@@ -1,9 +1,12 @@
-"""market_scanner.py - Escaner de mercados en Polymarket via Gamma API.
+"""market_scanner.py - Escaner de mercados + arbitraje logico intra-mercado.
 
-Filtra mercados activos por volumen (>=50k), liquidez y spread, y devuelve
-las mejores oportunidades ordenadas por un score compuesto.
+Funciones principales:
+  - scan_markets(): oportunidades de market-making (volumen >= 50k).
+  - scan_logical_arb(): detecta mercados donde YES + NO < 0.97, que permite
+    comprar ambos lados y cobrar la diferencia cuando converjan a 1.0.
 """
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -13,11 +16,15 @@ from config import GAMMA_API_URL, MIN_SPREAD_PCT
 
 logger = logging.getLogger(__name__)
 
-# Filtros minimos para considerar un mercado.
-MIN_VOLUME_USDC = 50_000.0   # evita mercados ilquidos / de baja actividad
+MIN_VOLUME_USDC = 50_000.0
 MIN_LIQUIDITY_USDC = 5_000.0
 TOP_N = 20
 REQUEST_TIMEOUT = 15
+
+# Umbral de arbitraje logico: sum(YES+NO) debe ser menor a este valor.
+LOGICAL_ARB_THRESHOLD = 0.97
+LOGICAL_ARB_MIN_VOLUME = 20_000.0
+LOGICAL_ARB_TOP_N = 10
 
 
 def _safe_float(value, default=0.0):
@@ -31,10 +38,8 @@ def _safe_float(value, default=0.0):
 
 def _fetch_active_markets(limit=500):
     url = "%s/markets" % GAMMA_API_URL
-    params = {
-        "active": "true", "closed": "false", "archived": "false",
-        "limit": limit, "order": "volume", "ascending": "false",
-    }
+    params = {"active": "true", "closed": "false", "archived": "false",
+              "limit": limit, "order": "volume", "ascending": "false"}
     try:
         resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
@@ -56,8 +61,7 @@ def _extract_prices(market):
         outcome_prices = market.get("outcomePrices")
         if isinstance(outcome_prices, str):
             try:
-                import json as _json
-                parsed = _json.loads(outcome_prices)
+                parsed = json.loads(outcome_prices)
                 if isinstance(parsed, list) and parsed:
                     price = _safe_float(parsed[0])
                     if 0 < price < 1:
@@ -72,6 +76,23 @@ def _extract_prices(market):
     return {"bid": best_bid, "ask": best_ask, "mid": mid,
             "spread_abs": spread_abs,
             "spread_pct": spread_abs / mid if mid > 0 else 0.0}
+
+
+def _extract_yes_no_prices(market):
+    """Devuelve (yes_ask, no_ask) desde outcomePrices si es binario."""
+    raw = market.get("outcomePrices")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    if not (isinstance(raw, list) and len(raw) == 2):
+        return None
+    yes = _safe_float(raw[0])
+    no = _safe_float(raw[1])
+    if yes <= 0 or no <= 0:
+        return None
+    return yes, no
 
 
 def _passes_filters(market, prices):
@@ -92,22 +113,19 @@ def _score(market, prices):
     volume = _safe_float(market.get("volume") or market.get("volumeNum"))
     liquidity = _safe_float(market.get("liquidity") or market.get("liquidityNum"))
     mid_balance = 1.0 - abs(prices["mid"] - 0.5) * 2.0
-    spread_component = prices["spread_pct"] * 100.0
-    liquidity_component = liquidity / 1000.0
-    return (spread_component * 0.5
-            + min(liquidity_component, 100.0) * 0.3
+    return (prices["spread_pct"] * 100.0 * 0.5
+            + min(liquidity / 1000.0, 100.0) * 0.3
             + mid_balance * 20.0 * 0.2
             + volume / 100_000.0)
 
 
 def _extract_token_ids(market):
-    token_ids_raw = market.get("clobTokenIds")
-    if isinstance(token_ids_raw, list):
-        return [str(t) for t in token_ids_raw if t]
-    if isinstance(token_ids_raw, str):
+    raw = market.get("clobTokenIds")
+    if isinstance(raw, list):
+        return [str(t) for t in raw if t]
+    if isinstance(raw, str):
         try:
-            import json as _json
-            parsed = _json.loads(token_ids_raw)
+            parsed = json.loads(raw)
             if isinstance(parsed, list):
                 return [str(t) for t in parsed if t]
         except (ValueError, TypeError):
@@ -146,4 +164,54 @@ def scan_markets():
     top = opportunities[:TOP_N]
     logger.info("Oportunidades validas: %d (top %d devueltas)",
                 len(opportunities), len(top))
+    return top
+
+
+# ---------------------------------------------------------------------------
+# Arbitraje logico intra-mercado (YES + NO < 0.97)
+# ---------------------------------------------------------------------------
+def scan_logical_arb():
+    """Detecta mercados binarios donde YES + NO < LOGICAL_ARB_THRESHOLD.
+
+    Estrategia: comprar ambos lados (YES y NO) y esperar que sumen 1.0 al
+    resolver. Profit por 100 USDC desplegados = (1 - total) / total * 100.
+    """
+    raw_markets = _fetch_active_markets()
+    opportunities = []
+
+    for market in raw_markets:
+        volume = _safe_float(market.get("volume") or market.get("volumeNum"))
+        if volume < LOGICAL_ARB_MIN_VOLUME:
+            continue
+        yn = _extract_yes_no_prices(market)
+        if not yn:
+            continue
+        yes_price, no_price = yn
+        total = yes_price + no_price
+        if total >= LOGICAL_ARB_THRESHOLD or total <= 0:
+            continue
+        token_ids = _extract_token_ids(market)
+        if len(token_ids) < 2:
+            continue
+
+        profit_per_100 = (1.0 - total) / total * 100.0
+        opportunities.append({
+            "market_id": market.get("id") or market.get("conditionId"),
+            "question": market.get("question") or market.get("slug"),
+            "arb_type": "logical_arb",
+            "action": "buy_both_sides",
+            "yes_price": yes_price,
+            "no_price": no_price,
+            "total": total,
+            "spread_pct": round(1.0 - total, 4),
+            "profit_per_100": round(profit_per_100, 3),
+            "volume": volume,
+            "token_ids": token_ids,  # [yes_token_id, no_token_id]
+            "raw": market,
+        })
+
+    opportunities.sort(key=lambda x: x["profit_per_100"], reverse=True)
+    top = opportunities[:LOGICAL_ARB_TOP_N]
+    logger.info("Arbitraje logico: %d mercados con YES+NO < %.2f (top %d)",
+                len(opportunities), LOGICAL_ARB_THRESHOLD, len(top))
     return top
