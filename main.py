@@ -80,6 +80,7 @@ def update_dashboard(balance, open_orders):
             "open_positions": open_orders,
             "uptime_hours": uptime,
             "last_heartbeat": now,
+            "heartbeat_at": now,
             "bot_version": "3.2"
         }, headers=HEADERS, timeout=5)
         if r.status_code == 200:
