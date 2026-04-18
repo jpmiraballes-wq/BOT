@@ -1,4 +1,7 @@
-"""order_manager.py - Gestion de ordenes en Polymarket CLOB (v2)."""
+"""order_manager.py - Gestion de ordenes en Polymarket CLOB (v2).
+
+En BUY_ONLY_MODE solo coloca la orden BUY (sin intentar vender el lado contrario).
+"""
 
 import logging
 import time
@@ -12,6 +15,11 @@ from config import (
     CLOB_API_URL, POLYGON_CHAIN_ID, PRIVATE_KEY, WALLET_ADDRESS,
     MAX_CONCURRENT_MARKETS, ORDER_MAX_AGE_SECONDS, MIN_SPREAD_PCT,
 )
+try:
+    from config import BUY_ONLY_MODE  # flag v2
+except ImportError:
+    BUY_ONLY_MODE = False
+
 from decision_logger import log_decision, log_warning
 
 logger = logging.getLogger(__name__)
@@ -34,7 +42,8 @@ class OrderManager:
         )
         self.creds = self.create_or_derive_api_creds()
         self.client.set_api_creds(self.creds)
-        logger.info("ClobClient listo. API key: %s...", self.creds.api_key[:8])
+        logger.info("ClobClient listo. API key: %s... | BUY_ONLY_MODE=%s",
+                    self.creds.api_key[:8], BUY_ONLY_MODE)
 
     def create_or_derive_api_creds(self):
         try:
@@ -89,22 +98,33 @@ class OrderManager:
             logger.info("Size 0 en %s (Kelly/filtro).", market_id)
             return []
 
-        size_per_side = self._round_size((position_size_usdc / 2.0) / mid)
+        # En BUY_ONLY, todo el capital va al lado BUY.
+        if BUY_ONLY_MODE:
+            size_per_side = self._round_size(position_size_usdc / mid)
+        else:
+            size_per_side = self._round_size((position_size_usdc / 2.0) / mid)
+
         if size_per_side < 5.0:
             logger.info("Tamano pequeno (%.2f) en %s.", size_per_side, market_id)
             return []
 
         edge = float(opportunity.get("spread_pct", 0.0)) / 2.0
         log_decision(
-            reason="place_pair",
+            reason="place_pair" if not BUY_ONLY_MODE else "place_buy_only",
             market=opportunity.get("question") or market_id,
             strategy="market_maker", edge=edge, size=position_size_usdc,
             extra={"mid": mid, "bid": bid_price, "ask": ask_price,
-                   "size_per_side": size_per_side},
+                   "size_per_side": size_per_side,
+                   "buy_only": BUY_ONLY_MODE},
         )
 
+        if BUY_ONLY_MODE:
+            sides = ((BUY, bid_price),)
+        else:
+            sides = ((BUY, bid_price), (SELL, ask_price))
+
         created = []
-        for side, price in ((BUY, bid_price), (SELL, ask_price)):
+        for side, price in sides:
             try:
                 args = OrderArgs(token_id=token_id, price=price,
                                  size=size_per_side, side=side)
