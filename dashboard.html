@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🤖 TradingBot Dashboard</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0f172a; color:#e2e8f0; font-family:'Segoe UI',sans-serif; min-height:100vh; }
+.header { background:#1e293b; border-bottom:1px solid #334155; padding:16px 24px; display:flex; align-items:center; justify-content:space-between; }
+.header h1 { font-size:1.4rem; font-weight:700; }
+.badge { padding:3px 10px; border-radius:20px; font-size:0.75rem; font-weight:700; }
+.badge-green { background:rgba(34,197,94,0.15); color:#22c55e; border:1px solid rgba(34,197,94,0.3); }
+.badge-red { background:rgba(239,68,68,0.15); color:#ef4444; border:1px solid rgba(239,68,68,0.3); }
+.badge-yellow { background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3); }
+.kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; padding:20px 24px; }
+@media(max-width:768px){ .kpis { grid-template-columns:repeat(2,1fr); } }
+.kpi { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:18px; }
+.kpi-label { color:#94a3b8; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px; }
+.kpi-value { font-size:1.8rem; font-weight:700; }
+.kpi-sub { color:#64748b; font-size:0.72rem; margin-top:4px; }
+.green { color:#22c55e; } .red { color:#ef4444; } .yellow { color:#eab308; } .blue { color:#60a5fa; }
+.main { display:grid; grid-template-columns:1fr 320px; gap:16px; padding:0 24px 24px; }
+@media(max-width:1024px){ .main { grid-template-columns:1fr; } }
+.panel { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:20px; margin-bottom:16px; }
+.panel h3 { font-size:0.9rem; font-weight:600; margin-bottom:16px; color:#cbd5e1; display:flex; align-items:center; gap:8px; }
+table { width:100%; border-collapse:collapse; font-size:0.82rem; }
+th { background:#0f172a; color:#64748b; font-size:0.68rem; text-transform:uppercase; padding:8px 12px; text-align:left; }
+td { padding:10px 12px; border-top:1px solid #0f172a; }
+tr:hover td { background:#243044; }
+.empty { text-align:center; padding:32px; color:#475569; font-size:0.85rem; }
+
+/* CONTROL PANEL */
+.control-panel { position:sticky; top:16px; }
+.ctrl-section { margin-bottom:20px; }
+.ctrl-section h4 { font-size:0.75rem; text-transform:uppercase; color:#64748b; letter-spacing:0.05em; margin-bottom:12px; }
+.ctrl-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+.ctrl-label { font-size:0.82rem; color:#94a3b8; }
+.ctrl-value { font-size:0.85rem; font-weight:600; color:#e2e8f0; min-width:40px; text-align:right; }
+input[type=range] { width:100%; accent-color:#3b82f6; margin:6px 0; }
+input[type=number] { background:#0f172a; border:1px solid #334155; color:#e2e8f0; padding:6px 10px; border-radius:6px; width:80px; font-size:0.85rem; text-align:center; }
+.toggle-btn { width:100%; padding:12px; border-radius:8px; border:none; font-size:0.9rem; font-weight:700; cursor:pointer; transition:all 0.2s; }
+.btn-pause { background:rgba(234,179,8,0.15); color:#eab308; border:1px solid rgba(234,179,8,0.3); }
+.btn-pause:hover { background:rgba(234,179,8,0.25); }
+.btn-resume { background:rgba(34,197,94,0.15); color:#22c55e; border:1px solid rgba(34,197,94,0.3); }
+.btn-resume:hover { background:rgba(34,197,94,0.25); }
+.btn-save { width:100%; padding:10px; border-radius:8px; border:none; background:#3b82f6; color:white; font-size:0.85rem; font-weight:600; cursor:pointer; margin-top:8px; transition:all 0.2s; }
+.btn-save:hover { background:#2563eb; }
+.btn-save:disabled { background:#334155; color:#64748b; cursor:not-allowed; }
+.save-msg { text-align:center; font-size:0.75rem; margin-top:6px; height:18px; }
+
+/* LOGS */
+.log-line { display:flex; gap:10px; padding:6px 12px; border-bottom:1px solid #0f172a; font-family:monospace; font-size:0.75rem; }
+.log-time { color:#475569; min-width:60px; }
+.log-WIN { color:#22c55e; }
+.log-INFO { color:#60a5fa; }
+.log-WARN { color:#eab308; }
+.log-ERROR { color:#ef4444; }
+.tabs { display:flex; gap:4px; padding:0 24px; border-bottom:1px solid #334155; margin-bottom:0; }
+.tab { padding:10px 14px; font-size:0.82rem; cursor:pointer; border-bottom:2px solid transparent; color:#94a3b8; background:none; border-top:none; border-left:none; border-right:none; }
+.tab.active { border-bottom-color:#3b82f6; color:#60a5fa; }
+.content { padding:20px 24px; }
+.hidden { display:none; }
+.pulse { animation:pulse 2s infinite; }
+@keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:0.5; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div style="display:flex;align-items:center;gap:12px">
+    <span style="font-size:1.4rem">🤖</span>
+    <h1>TradingBot</h1>
+    <span id="bot-status" class="badge badge-red">● OFFLINE</span>
+  </div>
+  <div style="font-size:0.75rem;color:#64748b">
+    Heartbeat: <span id="heartbeat">—</span> &nbsp;|&nbsp; Uptime: <span id="uptime">—</span> &nbsp;|&nbsp; v<span id="version">—</span>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi">
+    <div class="kpi-label">Capital Total</div>
+    <div class="kpi-value blue" id="capital">$—</div>
+    <div class="kpi-sub">Desplegado: <span id="deployed">—</span></div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">PnL Total</div>
+    <div class="kpi-value green" id="pnl-total">$0.00</div>
+    <div class="kpi-sub">Hoy: <span id="pnl-daily">—</span></div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Win Rate</div>
+    <div class="kpi-value green" id="winrate">0%</div>
+    <div class="kpi-sub">Trades: <span id="total-trades">0</span></div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Posiciones Abiertas</div>
+    <div class="kpi-value yellow" id="open-pos">0</div>
+    <div class="kpi-sub">Drawdown: <span id="drawdown">0%</span></div>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="showTab('overview',this)">📊 Overview</button>
+  <button class="tab" onclick="showTab('trades',this)">💼 Trades</button>
+  <button class="tab" onclick="showTab('logs',this)">📋 Logs</button>
+</div>
+
+<div class="content">
+  <div class="main">
+    <div>
+      <!-- OVERVIEW -->
+      <div id="tab-overview">
+        <div class="panel">
+          <h3>💼 Últimos Trades</h3>
+          <table>
+            <thead><tr><th>Mercado</th><th>Precio</th><th>Tamaño</th><th>PnL</th><th>Estado</th></tr></thead>
+            <tbody id="trades-mini"><tr><td colspan="5" class="empty">Sin trades aún</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h3>📋 Logs Recientes</h3>
+          <div id="logs-mini"><div class="empty">Sin logs</div></div>
+        </div>
+      </div>
+
+      <!-- TRADES -->
+      <div id="tab-trades" class="hidden">
+        <div class="panel">
+          <h3>💼 Historial de Trades</h3>
+          <table>
+            <thead><tr><th>Mercado</th><th>Estrategia</th><th>Entrada</th><th>Tamaño</th><th>PnL</th><th>Estado</th><th>Hora</th></tr></thead>
+            <tbody id="trades-full"><tr><td colspan="7" class="empty">Sin trades</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- LOGS -->
+      <div id="tab-logs" class="hidden">
+        <div class="panel" style="padding:0;overflow:hidden">
+          <div id="logs-full"><div class="empty" style="padding:40px">Sin logs</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PANEL DE CONTROL -->
+    <div class="control-panel">
+      <div class="panel">
+        <h3>⚙️ Control del Bot</h3>
+
+        <div class="ctrl-section">
+          <button id="pause-btn" class="toggle-btn btn-pause" onclick="togglePause()">⏸️ PAUSAR BOT</button>
+        </div>
+
+        <div class="ctrl-section">
+          <div class="ctrl-section h4" style="font-size:0.75rem;text-transform:uppercase;color:#64748b;letter-spacing:0.05em;margin-bottom:12px;">Agresividad</div>
+
+          <div class="ctrl-row">
+            <span class="ctrl-label">% por orden</span>
+            <span class="ctrl-value" id="pos-pct-val">20%</span>
+          </div>
+          <input type="range" id="pos-pct" min="5" max="50" step="5" value="20" oninput="document.getElementById('pos-pct-val').textContent=this.value+'%'">
+
+          <div class="ctrl-row" style="margin-top:10px">
+            <span class="ctrl-label">Máx órdenes</span>
+            <input type="number" id="max-orders" min="1" max="10" value="3">
+          </div>
+        </div>
+
+        <div class="ctrl-section">
+          <div style="font-size:0.75rem;text-transform:uppercase;color:#64748b;letter-spacing:0.05em;margin-bottom:12px;">Filtros</div>
+
+          <div class="ctrl-row">
+            <span class="ctrl-label">Spread mínimo</span>
+            <span class="ctrl-value" id="spread-val">2%</span>
+          </div>
+          <input type="range" id="spread-min" min="1" max="20" step="0.5" value="2" oninput="document.getElementById('spread-val').textContent=this.value+'%'">
+
+          <div class="ctrl-row" style="margin-top:10px">
+            <span class="ctrl-label">Intervalo (seg)</span>
+            <input type="number" id="interval" min="10" max="300" step="10" value="30">
+          </div>
+        </div>
+
+        <button class="btn-save" id="save-btn" onclick="saveConfig()">💾 Guardar Cambios</button>
+        <div class="save-msg" id="save-msg"></div>
+      </div>
+
+      <div class="panel">
+        <h3>📊 Config Activa</h3>
+        <div id="config-display" style="font-size:0.82rem;line-height:1.8">
+          <div style="color:#64748b">Cargando...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const APP_ID = '69e189f649c5d21cd42536bc';
+const BASE_URL = 'https://app.base44.com/api/apps/' + APP_ID + '/entities';
+const TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZTBhZDM3Ni1iMTdiLTQ5MmEtYTZhMS0yMGI1M2U2ZjIyMzciLCJjbGllbnRfaWQiOiJiZTBhZDM3Ni1iMTdiLTQ5MmEtYTZhMS0yMGI1M2U2ZjIyMzciLCJhcHBfaWQiOiI2OWUxODlmNjQ5YzVkMjFjZDQyNTM2YmMiLCJhdWQiOiJiYXNlNDRfYXBpIiwic2NvcGUiOiJhcHAuYWNjZXNzIiwiZXhwIjoxNzc2NDc5ODI5LCJpYXQiOjE3NzY0NzYyMjl9.F-BF5qMW3f46w-7ue4ZGqROFQBAUixeLDxfMb0d8pZ0';
+const BOT_CONFIG_ID = '69e19150519da83ec0682e87';
+const SYSTEM_STATE_ID = '69e2cc3c311147ecf99b38fd';
+const HEADERS = { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' };
+
+let currentConfig = {};
+let isPaused = false;
+
+const fmt = (n, d=2) => n != null ? Number(n).toFixed(d) : '—';
+const pnlCls = (n) => Number(n) >= 0 ? 'green' : 'red';
+
+function showTab(name, btn) {
+  document.querySelectorAll('[id^="tab-"]').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.remove('hidden');
+  if(btn) btn.classList.add('active');
+}
+
+async function apiFetch(entity, params='') {
+  const r = await fetch(`${BASE_URL}/${entity}/records?${params}`, { headers: HEADERS });
+  const d = await r.json();
+  return d.records || [];
+}
+
+async function apiPut(entity, id, data) {
+  const r = await fetch(`${BASE_URL}/${entity}/${id}`, {
+    method: 'PUT',
+    headers: HEADERS,
+    body: JSON.stringify(data)
+  });
+  return r.json();
+}
+
+function statusBadge(s) {
+  const map = { open:'badge-yellow', filled:'badge-green', cancelled:'badge-red', win:'badge-green', loss:'badge-red' };
+  return `<span class="badge ${map[s]||'badge-yellow'}">${s?.toUpperCase()||'—'}</span>`;
+}
+
+async function refresh() {
+  try {
+    const [states, trades, logs, configs] = await Promise.all([
+      apiFetch('SystemState', 'limit=1&sort=-updated_date'),
+      apiFetch('Trade', 'limit=20&sort=-created_date'),
+      apiFetch('LogEvent', 'limit=50&sort=-created_date'),
+      apiFetch('BotConfig', 'limit=1')
+    ]);
+
+    // System State
+    const s = states[0];
+    if (s) {
+      const hb = new Date(s.last_heartbeat);
+      const online = (Date.now() - hb.getTime()) < 90000;
+      const statusEl = document.getElementById('bot-status');
+      statusEl.textContent = online ? '● ONLINE' : '● OFFLINE';
+      statusEl.className = 'badge ' + (online ? 'badge-green' : 'badge-red');
+      document.getElementById('heartbeat').textContent = hb.toLocaleTimeString('es-ES');
+      document.getElementById('uptime').textContent = fmt(s.uptime_hours,1) + 'h';
+      document.getElementById('version').textContent = s.bot_version || '—';
+      document.getElementById('capital').textContent = '$' + fmt(s.capital_total);
+      document.getElementById('deployed').textContent = '$' + fmt(s.capital_deployed);
+      const pnl = s.total_pnl || 0;
+      const pnlEl = document.getElementById('pnl-total');
+      pnlEl.textContent = '$' + fmt(pnl);
+      pnlEl.className = 'kpi-value ' + pnlCls(pnl);
+      document.getElementById('pnl-daily').textContent = '$' + fmt(s.daily_pnl);
+      document.getElementById('winrate').textContent = fmt(s.win_rate,1) + '%';
+      document.getElementById('total-trades').textContent = s.total_trades || 0;
+      document.getElementById('open-pos').textContent = s.open_positions || 0;
+      document.getElementById('drawdown').textContent = fmt(s.drawdown_pct,2) + '%';
+    }
+
+    // Config
+    const c = configs[0];
+    if (c) {
+      currentConfig = c;
+      isPaused = c.paused;
+      // Actualizar sliders
+      document.getElementById('pos-pct').value = c.max_position_pct || 20;
+      document.getElementById('pos-pct-val').textContent = (c.max_position_pct || 20) + '%';
+      document.getElementById('spread-min').value = c.min_spread_pct || 2;
+      document.getElementById('spread-val').textContent = (c.min_spread_pct || 2) + '%';
+      document.getElementById('max-orders').value = c.max_open_orders || 3;
+      document.getElementById('interval').value = c.rebalance_interval_sec || 30;
+      // Botón pausa
+      const btn = document.getElementById('pause-btn');
+      if (c.paused) {
+        btn.textContent = '▶️ REANUDAR BOT';
+        btn.className = 'toggle-btn btn-resume';
+      } else {
+        btn.textContent = '⏸️ PAUSAR BOT';
+        btn.className = 'toggle-btn btn-pause';
+      }
+      // Config display
+      document.getElementById('config-display').innerHTML = `
+        <div><span style="color:#64748b">Spread mín:</span> <b>${c.min_spread_pct}%</b></div>
+        <div><span style="color:#64748b">% por orden:</span> <b>${c.max_position_pct}%</b></div>
+        <div><span style="color:#64748b">Máx órdenes:</span> <b>${c.max_open_orders || 3}</b></div>
+        <div><span style="color:#64748b">Intervalo:</span> <b>${c.rebalance_interval_sec}s</b></div>
+        <div><span style="color:#64748b">Capital ref:</span> <b>$${c.capital_usdc}</b></div>
+        <div><span style="color:#64748b">Estado:</span> <b class="${c.paused?'red':'green'}">${c.paused?'PAUSADO':'ACTIVO'}</b></div>
+      `;
+    }
+
+    // Trades mini
+    const tradesMiniHtml = trades.length ? trades.slice(0,8).map(t => `
+      <tr>
+        <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.market||'—'}</td>
+        <td>${fmt(t.entry_price,3)}</td>
+        <td>$${fmt(t.size_usdc)}</td>
+        <td class="${pnlCls(t.pnl||0)}">$${fmt(t.pnl||0,3)}</td>
+        <td>${statusBadge(t.status)}</td>
+      </tr>`).join('') : '<tr><td colspan="5" class="empty">Sin trades aún</td></tr>';
+    document.getElementById('trades-mini').innerHTML = tradesMiniHtml;
+
+    // Trades full
+    const tradesFullHtml = trades.length ? trades.map(t => `
+      <tr>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.market||'—'}</td>
+        <td>${t.strategy||'—'}</td>
+        <td>${fmt(t.entry_price,3)}</td>
+        <td>$${fmt(t.size_usdc)}</td>
+        <td class="${pnlCls(t.pnl||0)}">$${fmt(t.pnl||0,3)}</td>
+        <td>${statusBadge(t.status)}</td>
+        <td style="color:#64748b">${t.entry_time ? new Date(t.entry_time).toLocaleTimeString('es-ES') : '—'}</td>
+      </tr>`).join('') : '<tr><td colspan="7" class="empty">Sin trades</td></tr>';
+    document.getElementById('trades-full').innerHTML = tradesFullHtml;
+
+    // Logs
+    const logsHtml = logs.map(l => `
+      <div class="log-line">
+        <span class="log-time">${l.created_date ? new Date(l.created_date).toLocaleTimeString('es-ES') : ''}</span>
+        <span class="log-${l.level||'INFO'}">[${l.level||'INFO'}]</span>
+        <span>${l.message||''}</span>
+      </div>`).join('');
+    const logsMini = logs.slice(0,10).map(l => `
+      <div class="log-line">
+        <span class="log-time">${l.created_date ? new Date(l.created_date).toLocaleTimeString('es-ES') : ''}</span>
+        <span class="log-${l.level||'INFO'}">[${l.level||'INFO'}]</span>
+        <span>${l.message||''}</span>
+      </div>`).join('');
+    document.getElementById('logs-full').innerHTML = logsHtml || '<div class="empty" style="padding:40px">Sin logs</div>';
+    document.getElementById('logs-mini').innerHTML = logsMini || '<div class="empty">Sin logs</div>';
+
+  } catch(e) {
+    console.error('refresh error:', e);
+  }
+}
+
+async function togglePause() {
+  const btn = document.getElementById('pause-btn');
+  btn.disabled = true;
+  const newPaused = !isPaused;
+  try {
+    await apiPut('BotConfig', BOT_CONFIG_ID, { paused: newPaused });
+    isPaused = newPaused;
+    if (newPaused) {
+      btn.textContent = '▶️ REANUDAR BOT';
+      btn.className = 'toggle-btn btn-resume';
+    } else {
+      btn.textContent = '⏸️ PAUSAR BOT';
+      btn.className = 'toggle-btn btn-pause';
+    }
+    showSaveMsg(newPaused ? '⏸️ Bot pausado' : '▶️ Bot reanudado', '#22c55e');
+  } catch(e) {
+    showSaveMsg('❌ Error al cambiar estado', '#ef4444');
+  }
+  btn.disabled = false;
+}
+
+async function saveConfig() {
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Guardando...';
+  try {
+    await apiPut('BotConfig', BOT_CONFIG_ID, {
+      max_position_pct: parseFloat(document.getElementById('pos-pct').value),
+      min_spread_pct: parseFloat(document.getElementById('spread-min').value),
+      max_open_orders: parseInt(document.getElementById('max-orders').value),
+      rebalance_interval_sec: parseInt(document.getElementById('interval').value),
+    });
+    showSaveMsg('✅ Guardado — se aplica en el próximo ciclo', '#22c55e');
+  } catch(e) {
+    showSaveMsg('❌ Error al guardar', '#ef4444');
+  }
+  btn.disabled = false;
+  btn.textContent = '💾 Guardar Cambios';
+}
+
+function showSaveMsg(msg, color) {
+  const el = document.getElementById('save-msg');
+  el.textContent = msg;
+  el.style.color = color;
+  setTimeout(() => { el.textContent = ''; }, 4000);
+}
+
+// Init
+refresh();
+setInterval(refresh, 8000);
+</script>
+</body>
+</html>
