@@ -11,10 +11,17 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from config import (
-    BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL,
-    BOT_VERSION, REPORT_INTERVAL_SECONDS,
-)
+from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL
+
+try:
+    from config import BOT_VERSION
+except ImportError:
+    BOT_VERSION = "v2"
+
+try:
+    from config import REPORT_INTERVAL_SECONDS
+except ImportError:
+    REPORT_INTERVAL_SECONDS = 30
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 15
