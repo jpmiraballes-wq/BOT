@@ -1,5 +1,8 @@
-"""
-main.py - Loop principal del bot de Polymarket (v2).
+"""main.py - Loop principal del bot de Polymarket (v2.1).
+
+Cambios v2.1:
+  - Llama a om.close_profitable_positions() cada ciclo para cerrar
+    posiciones que alcanzan PROFIT_TARGET_PCT (+15% por defecto).
 """
 
 import logging
@@ -109,7 +112,7 @@ def build_size_fn(sizer, rm, cb, deployed_fn):
 def main() -> int:
     setup_logging()
     logger.info("=" * 60)
-    logger.info("Polymarket Market Maker v2 - arrancando")
+    logger.info("Polymarket Market Maker v2.1 - position tracking activado")
     logger.info("=" * 60)
 
     try:
@@ -158,6 +161,8 @@ def main() -> int:
                 remaining = cb.seconds_until_resume()
                 logger.warning("Pausa intradia (%ds restantes).", remaining)
                 om.cancel_stale_orders()
+                # Aun en pausa, intentamos cerrar posiciones rentables.
+                om.close_profitable_positions()
                 reporter.report(build_snapshot(
                     "paused", rm, om,
                     notes="intraday_dd_pause (%ds left)" % remaining,
@@ -165,6 +170,9 @@ def main() -> int:
                 elapsed = time.time() - loop_started
                 time.sleep(max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed))
                 continue
+
+            # NUEVO v2.1: cerrar posiciones que alcancen PROFIT_TARGET_PCT.
+            om.close_profitable_positions()
 
             try:
                 arb_opps = scan_logical_arb()
