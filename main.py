@@ -39,23 +39,21 @@ def get_balance(client):
 def init_system_state(balance):
     global SYSTEM_STATE_ID
     try:
-        # Borrar todos los existentes
         res = requests.get(f"{BASE_URL}/SystemState", headers=HEADERS, timeout=5)
-        records = res.json() if isinstance(res.json(), list) else []
-        for r in records:
-            requests.delete(f"{BASE_URL}/SystemState/{r['id']}", headers=HEADERS, timeout=5)
-        # Crear uno nuevo
-        data = {
-            "mode": "live", "capital_total": balance, "capital_deployed": 0,
-            "capital_reserved": 0, "daily_pnl": 0, "total_pnl": 0,
-            "drawdown_pct": 0, "win_rate": 0, "open_positions": 0,
-            "total_trades": 0, "uptime_hours": 0,
-            "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "bot_version": "3.1"
-        }
-        r = requests.post(f"{BASE_URL}/SystemState", json=data, headers=HEADERS, timeout=5)
-        SYSTEM_STATE_ID = r.json().get("id")
-        print(f"[INFO] SystemState inicializado: {SYSTEM_STATE_ID}")
+        records = res.json()
+        if isinstance(records, list) and len(records) > 0:
+            SYSTEM_STATE_ID = records[0]["id"]
+            print(f"[INFO] SystemState encontrado: {SYSTEM_STATE_ID}")
+        else:
+            data = {"mode": "live", "capital_total": balance, "capital_deployed": 0,
+                    "capital_reserved": 0, "daily_pnl": 0, "total_pnl": 0,
+                    "drawdown_pct": 0, "win_rate": 0, "open_positions": 0,
+                    "total_trades": 0, "uptime_hours": 0,
+                    "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "bot_version": "3.1"}
+            r = requests.post(f"{BASE_URL}/SystemState", json=data, headers=HEADERS, timeout=5)
+            SYSTEM_STATE_ID = r.json()["id"]
+            print(f"[INFO] SystemState creado: {SYSTEM_STATE_ID}")
     except Exception as e:
         print(f"[ERROR] init_system_state: {e}")
 
