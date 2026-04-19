@@ -177,7 +177,7 @@ def _classify_with_llm(news_title: str, news_desc: str,
     """
     if not BASE44_API_KEY:
         return None
-    url = "https://69e189f649c5d21cd42536bc.base44.app/functions/invokeLLMProxy"
+    url = "https://app--tradingbot-app.base44.app/api/apps/69e1e225a40599eb44ced81e/functions/invokeLLMProxy/index"
 
     prompt = (
         "You are a prediction-market news analyst. Given a breaking-news headline "
