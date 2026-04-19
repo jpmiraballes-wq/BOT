@@ -385,13 +385,16 @@ def main() -> int:
                 except Exception as _exc:
                     logger.warning("portfolio_sync fallo: %s", _exc)
 
+            # Heartbeat ANTES de AutoClose para no quedar "offline" si el
+            # cierre masivo tarda. Si AutoClose cierra muchas, el siguiente
+            # ciclo emitira otro heartbeat.
+            reporter.report(build_snapshot("running", rm, om))
+
             if aclose is not None and iteration % AUTO_CLOSE_EVERY_N_ITERATIONS == 0:
                 try:
                     aclose.run()
                 except Exception as _exc:
                     logger.warning("auto_close fallo: %s", _exc)
-
-            reporter.report(build_snapshot("running", rm, om))
 
         except Exception as exc:
             logger.error("Error en iteracion %d: %s", iteration, exc)
