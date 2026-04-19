@@ -27,6 +27,13 @@ POLYMARKET_PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", WALLET_ADDRESS)
 POLYMARKET_SIGNATURE_TYPE = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "2"))
 
 # ---------------------------------------------------------------------------
+# Paper trading (dry-run). Corre en paralelo al bot real sin tocar la Safe.
+# ---------------------------------------------------------------------------
+DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() in ("1", "true", "yes")
+PAPER_CAPITAL_USDC = float(os.getenv("PAPER_CAPITAL_USDC", "2000"))
+PAPER_DURATION_DAYS = float(os.getenv("PAPER_DURATION_DAYS", "7"))
+
+# ---------------------------------------------------------------------------
 # Base44 (reporting API)
 # APP_ID hardcodeado para evitar desincronizacion entre VPS.
 # ---------------------------------------------------------------------------
