@@ -1,20 +1,7 @@
-"""resolution_snipe.py - Compra YES casi-garantizado tras resolucion externa.
+"""resolution_snipe.py - Resolution snipe con persistencia Base44.
 
-Logica:
-  1) Oracle externo detecta que un evento ya se resolvio:
-       - Deportes: ESPN scoreboard API (free, sin key) para NFL/NBA/MLB/soccer.
-       - Politica / noticias: pull de RSS (Reuters/AP) reutilizando los feeds
-         de news_trading. Buscamos keywords de resolucion definitiva
-         ("declared winner", "concedes", "official result", etc.)
-  2) Matching: crossea titulares/scores con mercados activos por keywords.
-  3) Si encontramos un outcome claramente ganador y el mercado sigue abierto
-     (active=true, closed=false) y el precio del YES ganador esta entre
-     ENTRY_MIN y ENTRY_MAX, compramos a limit.
-  4) Salida: cierra en MAX_HOLD_HOURS o cuando price >= TARGET_SELL.
-
-Capital estricto de StrategyCapital['resolution_snipe']. Tamaño por
-entrada MUY conservador ($20) porque si fallamos el match, quedamos largos
-en un mercado incorrecto.
+Compra YES casi-garantizado tras resolucion externa (ESPN / noticias).
+Las posiciones abiertas se cargan desde entity Position al arrancar.
 """
 
 import hashlib
@@ -28,16 +15,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from capital_allocator import CapitalAllocator
-from config import GAMMA_API_URL
+from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL, GAMMA_API_URL
 from decision_logger import log_decision, log_warning
 
 logger = logging.getLogger(__name__)
 
 STRATEGY = "resolution_snipe"
 REQUEST_TIMEOUT = 15
-
-# ENTRY RANGE: si YES ya vale >= 0.99, no hay edge. Si vale < 0.90, puede no
-# estar realmente resuelto. Sweet spot 0.92-0.98.
 ENTRY_MIN = 0.92
 ENTRY_MAX = 0.98
 TARGET_SELL = 0.995
@@ -53,17 +37,7 @@ ESPN_SCOREBOARDS = [
     "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard",
 ]
 
-RESOLUTION_KEYWORDS = [
-    r"declared\s+winner", r"concedes?", r"official\s+result",
-    r"projected\s+winner", r"defeated", r"wins?\s+election",
-    r"final\s+score", r"game\s+over",
-]
-RESOLUTION_RE = re.compile("|".join(RESOLUTION_KEYWORDS), re.IGNORECASE)
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _safe_float(v, default=0.0):
     try:
         if v is None:
@@ -114,18 +88,105 @@ def _extract_tokens(market) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Oracle: ESPN scoreboards
+# Persistencia Base44 - entity Position
+# ---------------------------------------------------------------------------
+def _b44_headers():
+    return {"api_key": BASE44_API_KEY or "", "Content-Type": "application/json"}
+
+
+def _b44_url(record_id: Optional[str] = None) -> str:
+    base = "%s/api/apps/%s/entities/Position" % (BASE44_BASE_URL, BASE44_APP_ID)
+    return "%s/%s" % (base, record_id) if record_id else base
+
+
+def _load_open_positions(strategy: str) -> Dict[str, Dict[str, Any]]:
+    if not BASE44_API_KEY:
+        return {}
+    try:
+        resp = requests.get(
+            _b44_url(),
+            params={"status": "open", "strategy": strategy},
+            headers=_b44_headers(), timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return {}
+        data = resp.json()
+        records = data["data"] if isinstance(data, dict) and "data" in data else data
+        if not isinstance(records, list):
+            return {}
+        positions = {}
+        for r in records:
+            market_id = r.get("market")
+            if not market_id:
+                continue
+            positions[market_id] = {
+                "_record_id": r.get("id"),
+                "token_id": r.get("token_id") or "",
+                "entry_price": _safe_float(r.get("entry_price")),
+                "size_tokens": _safe_float(r.get("size_tokens")),
+                "size_usdc": _safe_float(r.get("size_usdc")),
+                "opened_at": _safe_float(r.get("opened_at_ts"), time.time()),
+                "question": r.get("question") or "",
+            }
+        logger.info("res_snipe: %d posiciones open recuperadas de Base44", len(positions))
+        return positions
+    except requests.RequestException as exc:
+        logger.error("Position load fallo: %s", exc)
+        return {}
+
+
+def _persist_position_open(strategy: str, market_id: str, pos: Dict[str, Any]) -> Optional[str]:
+    if not BASE44_API_KEY:
+        return None
+    payload = {
+        "market": market_id,
+        "side": "BUY",
+        "entry_price": pos["entry_price"],
+        "current_price": pos["entry_price"],
+        "size_usdc": pos["size_usdc"],
+        "pnl_unrealized": 0.0,
+        "status": "open",
+        "strategy": strategy,
+        "token_id": pos["token_id"],
+        "size_tokens": pos["size_tokens"],
+        "opened_at_ts": pos["opened_at"],
+        "question": pos.get("question"),
+    }
+    try:
+        resp = requests.post(_b44_url(), json=payload,
+                             headers=_b44_headers(), timeout=REQUEST_TIMEOUT)
+        if resp.status_code >= 400:
+            return None
+        data = resp.json()
+        return data.get("id") or (data.get("data") or {}).get("id")
+    except requests.RequestException:
+        return None
+
+
+def _persist_position_close(record_id: Optional[str], exit_price: float) -> None:
+    if not record_id or not BASE44_API_KEY:
+        return
+    try:
+        requests.patch(
+            _b44_url(record_id),
+            json={"status": "closed", "current_price": exit_price},
+            headers=_b44_headers(), timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Oracle ESPN
 # ---------------------------------------------------------------------------
 def _fetch_espn_finals() -> List[Dict[str, str]]:
-    """Devuelve lista de {winner, loser, sport, score} para juegos finalizados."""
     finals = []
     for url in ESPN_SCOREBOARDS:
         try:
             resp = requests.get(url, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
-        except requests.RequestException as exc:
-            logger.debug("ESPN fetch fallo %s: %s", url, exc)
+        except requests.RequestException:
             continue
         events = data.get("events") or []
         for ev in events:
@@ -135,7 +196,7 @@ def _fetch_espn_finals() -> List[Dict[str, str]]:
             comp = comps[0]
             status = (comp.get("status") or {}).get("type") or {}
             if status.get("state") != "post":
-                continue  # no terminado
+                continue
             competitors = comp.get("competitors") or []
             if len(competitors) != 2:
                 continue
@@ -155,9 +216,6 @@ def _fetch_espn_finals() -> List[Dict[str, str]]:
     return finals
 
 
-# ---------------------------------------------------------------------------
-# Market fetch
-# ---------------------------------------------------------------------------
 def _fetch_active_markets() -> List[Dict[str, Any]]:
     url = "%s/markets" % GAMMA_API_URL
     params = {
@@ -170,13 +228,11 @@ def _fetch_active_markets() -> List[Dict[str, Any]]:
         data = resp.json()
         markets = data["data"] if isinstance(data, dict) and "data" in data else data
         return markets if isinstance(markets, list) else []
-    except requests.RequestException as exc:
-        logger.error("res_snipe gamma fetch fallo: %s", exc)
+    except requests.RequestException:
         return []
 
 
 def _match_sport_final(final: Dict[str, str], markets) -> Optional[Tuple[Dict[str, Any], int]]:
-    """Busca mercado + indice del outcome ganador."""
     winner_norm = _normalize(final["winner"])
     loser_norm = _normalize(final["loser"])
     if not winner_norm:
@@ -203,13 +259,14 @@ def _match_sport_final(final: Dict[str, str], markets) -> Optional[Tuple[Dict[st
 
 
 # ---------------------------------------------------------------------------
-# Core
+# ResolutionSniper
 # ---------------------------------------------------------------------------
 class ResolutionSniper:
     def __init__(self, order_manager, allocator: Optional[CapitalAllocator] = None):
         self.om = order_manager
         self.allocator = allocator or CapitalAllocator()
-        self.positions: Dict[str, Dict[str, Any]] = {}
+        # Cargar desde Base44
+        self.positions: Dict[str, Dict[str, Any]] = _load_open_positions(STRATEGY)
         self.seen_finals: set = set()
 
     def _final_key(self, final: Dict[str, str]) -> str:
@@ -250,7 +307,7 @@ class ResolutionSniper:
             return
         if not order_ids:
             return
-        self.positions[market_id] = {
+        pos = {
             "token_id": token_id,
             "entry_price": price,
             "size_tokens": size_tokens,
@@ -258,6 +315,8 @@ class ResolutionSniper:
             "opened_at": time.time(),
             "question": market.get("question"),
         }
+        pos["_record_id"] = _persist_position_open(STRATEGY, market_id, pos)
+        self.positions[market_id] = pos
         log_decision(reason="res_snipe_entry",
                      market=market.get("question"), strategy=STRATEGY,
                      edge=TARGET_SELL - price, size=POSITION_SIZE_USDC,
@@ -293,6 +352,8 @@ class ResolutionSniper:
             except Exception as exc:
                 logger.error("res_snipe close_position fallo: %s", exc)
                 continue
+            _persist_position_close(pos.get("_record_id"),
+                                    float(cur_price or pos["entry_price"]))
             log_decision(reason="res_snipe_exit_%s" % exit_reason,
                          market=pos.get("question"), strategy=STRATEGY,
                          extra={"age_h": round(age_h, 2),
