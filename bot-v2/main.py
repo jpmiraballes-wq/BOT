@@ -129,10 +129,11 @@ def _trade_stats():
     total_closed = 0
 
     for t in trades:
-        if _field(t, "status") != "closed":
+        raw_pnl = _field(t, "pnl")
+        if raw_pnl is None:
             continue
         try:
-            pnl = float(_field(t, "pnl") or 0.0)
+            pnl = float(raw_pnl)
         except (TypeError, ValueError):
             continue
         total_pnl += pnl
