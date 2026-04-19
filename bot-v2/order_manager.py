@@ -20,6 +20,7 @@ from py_clob_client.order_builder.constants import BUY, SELL
 from config import (
     CLOB_API_URL, POLYGON_CHAIN_ID, PRIVATE_KEY, WALLET_ADDRESS,
     MAX_CONCURRENT_MARKETS, ORDER_MAX_AGE_SECONDS, MIN_SPREAD_PCT,
+    POLYMARKET_FUNDER, POLYMARKET_SIGNATURE_TYPE,
 )
 try:
     from config import BUY_ONLY_MODE
@@ -48,11 +49,12 @@ class OrderManager:
         self.tracker = PositionTracker()
 
     def connect(self):
-        logger.info("Inicializando ClobClient en %s (chain=%d)",
-                    CLOB_API_URL, POLYGON_CHAIN_ID)
+        logger.info("Inicializando ClobClient en %s (chain=%d, sig_type=%d, funder=%s)",
+                    CLOB_API_URL, POLYGON_CHAIN_ID,
+                    POLYMARKET_SIGNATURE_TYPE, POLYMARKET_FUNDER)
         self.client = ClobClient(
             CLOB_API_URL, key=PRIVATE_KEY, chain_id=POLYGON_CHAIN_ID,
-            signature_type=0, funder=WALLET_ADDRESS,
+            signature_type=POLYMARKET_SIGNATURE_TYPE, funder=POLYMARKET_FUNDER,
         )
         self.creds = self.create_or_derive_api_creds()
         self.client.set_api_creds(self.creds)
