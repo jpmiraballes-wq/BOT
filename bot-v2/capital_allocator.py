@@ -105,8 +105,8 @@ class CapitalAllocator:
         rec = self.get(strategy)
         if not rec or not rec.get("enabled"):
             return 0.0
-        allocated = float(rec.get("allocated") or 0.0)
-        deployed = float(rec.get("deployed") or 0.0)
+        allocated = float(rec.get("allocated_usdc") or rec.get("allocated") or 0.0)
+        deployed = float(rec.get("deployed_usdc") or rec.get("deployed") or 0.0)
         return max(0.0, allocated - deployed)
 
     def list_enabled(self) -> List[Dict[str, Any]]:
