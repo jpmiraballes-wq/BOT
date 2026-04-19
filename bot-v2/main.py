@@ -90,14 +90,78 @@ def compute_capital_deployed(open_orders):
     return total
 
 
+_TRADE_STATS_CACHE = {"ts": 0.0, "data": None}
+_TRADE_STATS_TTL = 60.0
+
+
+def _trade_stats():
+    """Calcula daily_pnl/total_pnl/win_rate/total_trades desde tabla Trade.
+
+    Cache de 60s para no pegarle a Base44 en cada heartbeat.
+    """
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+
+    now = _time.time()
+    if _TRADE_STATS_CACHE["data"] is not None and (now - _TRADE_STATS_CACHE["ts"]) < _TRADE_STATS_TTL:
+        return _TRADE_STATS_CACHE["data"]
+
+    try:
+        from base44_client import list_records
+        trades = list_records("Trade", sort="-created_date", limit=1000) or []
+    except Exception as _exc:
+        logger.warning("trade_stats fallo: %s", _exc)
+        trades = []
+
+    today = _dt.now(_tz.utc).date()
+    total_pnl = 0.0
+    daily_pnl = 0.0
+    wins = 0
+    total_closed = 0
+
+    for t in trades:
+        if t.get("status") != "closed":
+            continue
+        try:
+            pnl = float(t.get("pnl") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        total_pnl += pnl
+        total_closed += 1
+        if pnl > 0:
+            wins += 1
+        exit_time = t.get("exit_time") or t.get("entry_time")
+        if exit_time:
+            try:
+                d = _dt.fromisoformat(exit_time.replace("Z", "+00:00")).date()
+                if d == today:
+                    daily_pnl += pnl
+            except (ValueError, AttributeError):
+                pass
+
+    data = {
+        "daily_pnl": round(daily_pnl, 4),
+        "total_pnl": round(total_pnl, 4),
+        "win_rate": round((wins / total_closed) * 100.0, 2) if total_closed else 0.0,
+        "total_trades": total_closed,
+    }
+    _TRADE_STATS_CACHE["ts"] = now
+    _TRADE_STATS_CACHE["data"] = data
+    return data
+
+
 def build_snapshot(mode, rm, om, notes=""):
     open_orders = om.get_open_orders() if om.client else []
     deployed = compute_capital_deployed(open_orders)
+    stats = _trade_stats()
     return {
         "mode": mode,
         "capital_total": rm.current_equity or CAPITAL_USDC,
         "capital_deployed": deployed,
-        "daily_pnl": rm.daily_pnl,
+        "daily_pnl": stats["daily_pnl"],
+        "total_pnl": stats["total_pnl"],
+        "win_rate": stats["win_rate"],
+        "total_trades": stats["total_trades"],
         "drawdown_pct": rm.drawdown_pct,
         "open_positions": len({o.get("market") or o.get("market_id")
                                for o in open_orders if o}),
