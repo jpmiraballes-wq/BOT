@@ -35,6 +35,9 @@ from risk_manager import RiskManager
 from bot_config_reader import fetch_bot_config  # dashboard control
 from strategies.umbrella_executor import run_umbrella_cycle
 from portfolio_sync import PortfolioSync
+from auto_close import AutoClose
+
+AUTO_CLOSE_EVERY_N_ITERATIONS = 2
 
 PORTFOLIO_SYNC_EVERY_N_ITERATIONS = 2
 
@@ -215,6 +218,14 @@ def main() -> int:
         logger.warning("No se pudo inicializar PortfolioSync: %s", _exc)
         psync = None
 
+    try:
+        aclose = AutoClose(om)
+        logger.info("AutoClose activo (cada %d iteraciones).",
+                    AUTO_CLOSE_EVERY_N_ITERATIONS)
+    except Exception as _exc:
+        logger.warning("No se pudo inicializar AutoClose: %s", _exc)
+        aclose = None
+
     iteration = 0
     while not _stop_requested:
         iteration += 1
@@ -373,6 +384,12 @@ def main() -> int:
                     psync.sync()
                 except Exception as _exc:
                     logger.warning("portfolio_sync fallo: %s", _exc)
+
+            if aclose is not None and iteration % AUTO_CLOSE_EVERY_N_ITERATIONS == 0:
+                try:
+                    aclose.run()
+                except Exception as _exc:
+                    logger.warning("auto_close fallo: %s", _exc)
 
             reporter.report(build_snapshot("running", rm, om))
 
