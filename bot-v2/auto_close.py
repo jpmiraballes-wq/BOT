@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 REQUEST_TIMEOUT = 8
+MAX_CLOSES_PER_RUN = 10
 
 
 def _iso_now():
