@@ -32,6 +32,7 @@ from market_scanner import scan_markets
 from order_manager import OrderManager
 from reporter import Reporter
 from risk_manager import RiskManager
+from bot_config_reader import fetch_bot_config  # dashboard control
 from strategies.umbrella_executor import run_umbrella_cycle
 
 
@@ -206,6 +207,38 @@ def main() -> int:
     while not _stop_requested:
         iteration += 1
         loop_started = time.time()
+        # ---- Control remoto desde dashboard (BotConfig) ----
+        try:
+            bot_cfg = fetch_bot_config() or {}
+        except Exception as _cfg_exc:
+            logger.warning("fetch_bot_config fallo: %s", _cfg_exc)
+            bot_cfg = {}
+        if bot_cfg.get("emergency_stop"):
+            logger.critical("EMERGENCY STOP desde dashboard (at=%s). Cancelando todo y saliendo.",
+                            bot_cfg.get("emergency_stop_at"))
+            try:
+                om.cancel_all()
+            except Exception as _e:
+                logger.error("cancel_all en emergency stop fallo: %s", _e)
+            _close = getattr(om, "close_all_positions", None)
+            if callable(_close):
+                try:
+                    _close()
+                except Exception as _e:
+                    logger.error("close_all_positions en emergency stop fallo: %s", _e)
+            reporter.report(build_snapshot("stopped", rm, om, notes="emergency_stop_dashboard"),
+                            force=True)
+            break
+        if bot_cfg.get("paused"):
+            logger.info("Bot pausado desde dashboard. Solo mantenimiento.")
+            try:
+                om.cancel_stale_orders()
+            except Exception as _e:
+                logger.error("cancel_stale_orders en pausa fallo: %s", _e)
+            reporter.report(build_snapshot("paused", rm, om, notes="paused_dashboard"))
+            elapsed = time.time() - loop_started
+            time.sleep(max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed))
+            continue
         try:
             if rm.is_halted() or SHUTDOWN_FLAG_PATH.exists():
                 logger.critical("Halt activo (%s).", rm.halt_reason or "shutdown.flag")
