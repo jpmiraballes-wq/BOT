@@ -20,6 +20,10 @@ WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "").strip()
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "").strip()
 BASE44_API_KEY = os.getenv("BASE44_API_KEY", "").strip()
 
+# Polymarket proxy/funder (para firmar ordenes CLOB). Default: WALLET_ADDRESS.
+POLYMARKET_FUNDER = os.getenv("POLYMARKET_FUNDER", WALLET_ADDRESS).strip()
+POLYMARKET_PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", WALLET_ADDRESS).strip()
+
 # ---------------------------------------------------------------------------
 # Base44 (reporting API)
 # APP_ID hardcodeado para evitar desincronizacion entre VPS.
