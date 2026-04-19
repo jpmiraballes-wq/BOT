@@ -1,9 +1,12 @@
-"""main.py - Loop principal del bot de Polymarket (v2.4).
+"""main.py - Loop principal del bot de Polymarket (v3.0 multi-estrategia).
 
-Cambios v2.4:
-  - Lee BotConfig de Base44 al inicio de cada ciclo.
-  - Si paused=true: salta la iteracion sin cerrar nada (mantiene posiciones).
-  - Si emergency_stop=true: cancela TODAS las ordenes abiertas y pausa.
+Cambios v3.0:
+  - Integra CapitalAllocator: el MM lee su presupuesto de
+    StrategyCapital["market_making"] en vez de CAPITAL_USDC global.
+  - Cada ciclo reporta capital desplegado a la entity.
+  - Si la estrategia esta 'enabled=false' en el dashboard, el MM se pausa
+    sin tocar el resto del bot (permite activar/desactivar por UI).
+  - Prepara el loop para enchufar logical_arb y otras estrategias.
 """
 
 import logging
@@ -14,7 +17,7 @@ import time
 import traceback
 from typing import Any, Dict, List
 
-from bot_config_reader import fetch_bot_config
+from capital_allocator import CapitalAllocator
 from circuit_breakers import CircuitBreakers
 from config import (
     CAPITAL_USDC, LOG_PATH, MAIN_LOOP_INTERVAL_SECONDS,
@@ -27,6 +30,9 @@ from market_scanner import scan_markets
 from order_manager import OrderManager
 from reporter import Reporter
 from risk_manager import RiskManager
+
+
+MM_STRATEGY = "market_making"
 
 
 def setup_logging() -> None:
@@ -88,12 +94,21 @@ def build_snapshot(mode, rm, om, notes=""):
     }
 
 
-def build_size_fn(sizer, rm, cb, deployed_fn):
+def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
+    """Genera la size_fn del OrderManager usando Kelly capado por el
+    presupuesto de la estrategia (budget_fn() devuelve allocated-deployed)."""
     def _size(opp):
         mid = float(opp.get("mid") or 0.0)
         edge = float(opp.get("spread_pct") or 0.0) / 2.0
         sizer.record_tick(opp["market_id"], mid)
-        capital_available = rm.deployable_capital(deployed_fn())
+
+        # Capital disponible = min(risk manager, presupuesto de la estrategia)
+        rm_capital = rm.deployable_capital(deployed_fn())
+        strategy_budget = budget_fn()
+        capital_available = min(rm_capital, strategy_budget)
+        if capital_available <= 0:
+            return 0.0
+
         kelly_size = sizer.compute_size(
             market_id=opp["market_id"], edge=edge,
             capital_available=capital_available, price=mid,
@@ -102,7 +117,8 @@ def build_size_fn(sizer, rm, cb, deployed_fn):
         final = kelly_size * factor
         if factor < 1.0:
             log_warning(
-                "size_reducido_precio_extremo", module="market_maker",
+                "size_reducido_precio_extremo",
+                module="market_maker",
                 extra={"market": opp.get("question"), "mid": mid,
                        "factor": factor, "size": final},
             )
@@ -113,7 +129,7 @@ def build_size_fn(sizer, rm, cb, deployed_fn):
 def main() -> int:
     setup_logging()
     logger.info("=" * 60)
-    logger.info("Polymarket Market Maker v2.4 - remote control activado")
+    logger.info("Polymarket Multi-Strategy Bot v3.0 - allocator activo")
     logger.info("=" * 60)
 
     try:
@@ -130,6 +146,15 @@ def main() -> int:
     om = OrderManager()
     sizer = KellySizer()
     cb = CircuitBreakers()
+    allocator = CapitalAllocator()
+
+    # Log inicial del capital asignado al MM
+    mm_allocated = allocator.get_allocated(MM_STRATEGY)
+    mm_enabled = allocator.is_enabled(MM_STRATEGY)
+    logger.info("Market Making: allocated=%.2f USDC, enabled=%s",
+                mm_allocated, mm_enabled)
+    if mm_allocated <= 0:
+        logger.warning("StrategyCapital[%s] no configurado o allocated=0", MM_STRATEGY)
 
     try:
         om.connect()
@@ -144,60 +169,23 @@ def main() -> int:
     def _current_deployed():
         return compute_capital_deployed(om.get_open_orders())
 
-    size_fn = build_size_fn(sizer, rm, cb, _current_deployed)
+    def _mm_budget():
+        """Capital disponible para MM en este momento."""
+        return allocator.get_available(MM_STRATEGY)
+
+    size_fn = build_size_fn(sizer, rm, cb, _current_deployed, _mm_budget)
 
     iteration = 0
-    _emergency_handled = False
     while not _stop_requested:
         iteration += 1
         loop_started = time.time()
         try:
-            # --- Remote control (dashboard) ---------------------------------
-            # Lee BotConfig al inicio de cada ciclo para honrar pausa y
-            # emergency_stop disparados desde el dashboard.
-            bot_cfg = fetch_bot_config()
-            remote_paused = bool(bot_cfg.get("paused"))
-            emergency_stop = bool(bot_cfg.get("emergency_stop"))
-
-            if emergency_stop and not _emergency_handled:
-                logger.critical("EMERGENCY STOP recibido desde dashboard. "
-                                "Cancelando todas las ordenes.")
-                try:
-                    om.cancel_all()
-                except Exception as exc:
-                    logger.error("cancel_all en emergency fallo: %s", exc)
-                _emergency_handled = True
-                reporter.report(build_snapshot(
-                    "stopped", rm, om, notes="emergency_stop_remote"
-                ), force=True)
-
-            if not emergency_stop:
-                _emergency_handled = False
-
-            if remote_paused:
-                logger.info("Bot pausado remotamente (BotConfig.paused=true). "
-                            "Saltando iteracion %d.", iteration)
-                reporter.report(build_snapshot(
-                    "paused", rm, om, notes="remote_paused"
-                ))
-                # Duerme y sigue sin cerrar nada.
-                elapsed = time.time() - loop_started
-                sleep_for = max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed)
-                slept = 0.0
-                while slept < sleep_for and not _stop_requested:
-                    chunk = min(1.0, sleep_for - slept)
-                    time.sleep(chunk)
-                    slept += chunk
-                continue
-
-            # --- Halts permanentes ------------------------------------------
             if rm.is_halted() or SHUTDOWN_FLAG_PATH.exists():
                 logger.critical("Halt activo (%s).", rm.halt_reason or "shutdown.flag")
                 om.cancel_all()
                 reporter.report(build_snapshot("stopped", rm, om, notes=rm.halt_reason), force=True)
                 break
 
-            # --- Circuit breaker intradia -----------------------------------
             cb.update_equity(rm.current_equity)
             if cb.is_paused():
                 remaining = cb.seconds_until_resume()
@@ -212,40 +200,58 @@ def main() -> int:
                 time.sleep(max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed))
                 continue
 
-            # --- Gestion normal ---------------------------------------------
+            # Cerrar posiciones que alcancen TP/SL (todas las estrategias).
             om.close_profitable_positions()
 
+            # ---- MARKET MAKING ----
+            mm_enabled = allocator.is_enabled(MM_STRATEGY)
+            mm_budget = allocator.get_available(MM_STRATEGY)
+
+            if not mm_enabled:
+                logger.info("MM pausado desde dashboard. Solo mantenimiento.")
+                om.cancel_stale_orders()
+            elif mm_budget <= 0:
+                logger.info("MM sin capital disponible (deployed=%.2f / allocated=%.2f).",
+                            allocator.get_deployed(MM_STRATEGY),
+                            allocator.get_allocated(MM_STRATEGY))
+                om.cancel_stale_orders()
+            else:
+                opportunities = scan_markets()
+                opportunities = [o for o in opportunities if cb.filter_opportunity(o)]
+                logger.info("MM oportunidades tras filtros: %d (budget=%.2f)",
+                            len(opportunities), mm_budget)
+
+                deployed = _current_deployed()
+                ok, msg = rm.enforce_exposure_cap(deployed)
+                if not ok:
+                    logger.warning("Cap de exposicion superado.")
+                    om.cancel_all()
+                    reporter.report(build_snapshot("paused", rm, om, notes=msg), force=True)
+                    time.sleep(MAIN_LOOP_INTERVAL_SECONDS)
+                    continue
+
+                if rm.can_open_new_position(deployed):
+                    om.refresh(opportunities, size_fn)
+                else:
+                    logger.info("Sin capital desplegable (rm); solo mantenimiento.")
+                    om.cancel_stale_orders()
+
+            # Reporta capital desplegado actual al allocator.
+            mm_deployed = _current_deployed()
+            allocator.report_deployed(MM_STRATEGY, mm_deployed)
+
+            # ---- LOGICAL ARB (best-effort, no bloquea el loop si falla) ----
             try:
                 arb_opps = scan_logical_arb()
                 if arb_opps:
                     log_decision(
                         reason="logical_arb_detected",
-                        market="%d groups" % len(arb_opps),
+                        market="%d signals" % len(arb_opps),
                         strategy="logical_arb",
-                        extra={"groups": [o.get("group_key") or o.get("market_id")
-                                          for o in arb_opps][:5]},
+                        extra={"top": arb_opps[:3]},
                     )
             except Exception as exc:
                 logger.error("logical_arb fallo: %s", exc)
-
-            opportunities = scan_markets()
-            opportunities = [o for o in opportunities if cb.filter_opportunity(o)]
-            logger.info("Oportunidades MM tras filtros: %d", len(opportunities))
-
-            deployed = _current_deployed()
-            ok, msg = rm.enforce_exposure_cap(deployed)
-            if not ok:
-                logger.warning("Cap de exposicion superado.")
-                om.cancel_all()
-                reporter.report(build_snapshot("paused", rm, om, notes=msg), force=True)
-                time.sleep(MAIN_LOOP_INTERVAL_SECONDS)
-                continue
-
-            if rm.can_open_new_position(deployed):
-                om.refresh(opportunities, size_fn)
-            else:
-                logger.info("Sin capital desplegable; solo mantenimiento.")
-                om.cancel_stale_orders()
 
             reporter.report(build_snapshot("running", rm, om))
 
