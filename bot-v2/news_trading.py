@@ -176,7 +176,7 @@ def _classify_with_llm(news_title: str, news_desc: str,
     """
     if not BASE44_API_KEY:
         return None
-    url = "%s/api/apps/%s/functions/invokeLLMProxy" % (BASE44_BASE_URL, BASE44_APP_ID)
+    url = "%s/api/apps/69e189f649c5d21cd42536bc/functions/invokeLLMProxy" % (BASE44_BASE_URL,)
 
     prompt = (
         "You are a prediction-market news analyst. Given a breaking-news headline "
