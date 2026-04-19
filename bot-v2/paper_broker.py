@@ -251,6 +251,91 @@ class PaperBroker:
         }
 
 
+    # ------------------------------------------------------ target / stop
+    def close_profitable_positions(self, profit_target_pct: float = 0.15,
+                                   stop_loss_pct: float = -0.30) -> int:
+        """Compat con OrderManager.close_profitable_positions().
+
+        Revisa cada posicion abierta contra el mid-price de Gamma y cierra
+        las que alcanzaron el profit target o el stop loss. Devuelve
+        cantidad de cierres.
+        """
+        if not self.positions:
+            return 0
+        try:
+            import requests  # lazy
+            from config import GAMMA_API_URL
+        except Exception:
+            return 0
+
+        closed = 0
+        for token_id, pos in list(self.positions.items()):
+            try:
+                resp = requests.get(
+                    "%s/markets" % GAMMA_API_URL,
+                    params={"clob_token_ids": token_id, "limit": 1},
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                markets = data["data"] if isinstance(data, dict) and "data" in data else data
+                if not markets:
+                    continue
+                m = markets[0]
+                raw = m.get("outcomePrices")
+                if isinstance(raw, str):
+                    import json as _json
+                    try:
+                        raw = _json.loads(raw)
+                    except (ValueError, TypeError):
+                        raw = None
+                tokens_raw = m.get("clobTokenIds")
+                if isinstance(tokens_raw, str):
+                    import json as _json
+                    try:
+                        tokens_raw = _json.loads(tokens_raw)
+                    except (ValueError, TypeError):
+                        tokens_raw = None
+                if not raw or not tokens_raw:
+                    continue
+                mark = None
+                for i, t in enumerate(tokens_raw):
+                    if str(t) == str(token_id) and i < len(raw):
+                        try:
+                            mark = float(raw[i])
+                        except (TypeError, ValueError):
+                            mark = None
+                        break
+                if mark is None:
+                    continue
+            except Exception as exc:
+                logger.warning("[PAPER] close_profitable mark fetch fallo: %s", exc)
+                continue
+
+            entry = pos["entry_price"]
+            if entry <= 0:
+                continue
+            pnl_pct = (mark - entry) / entry
+            if pnl_pct >= profit_target_pct:
+                reason = "profit_target"
+            elif pnl_pct <= stop_loss_pct:
+                reason = "stop_loss"
+            else:
+                continue
+            logger.info("[PAPER] close_profitable tok=%s entry=%.4f mark=%.4f "
+                        "pnl_pct=%+.2f%% reason=%s",
+                        token_id[:10], entry, mark, pnl_pct * 100, reason)
+            self.close_position_market(
+                token_id=token_id,
+                size=pos["size"],
+                market_id=pos.get("market_id", ""),
+                strategy=pos.get("strategy", ""),
+                exit_price=mark,
+            )
+            closed += 1
+        return closed
+
 class _FakeTracker:
     """Tracker-shape compatible para modulos que consultan om.tracker."""
 
