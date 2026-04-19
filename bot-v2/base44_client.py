@@ -1,9 +1,7 @@
 """base44_client.py - Cliente HTTP para escribir en Base44."""
 
-import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
 
 import requests
 
@@ -14,7 +12,6 @@ REQUEST_TIMEOUT = 15
 
 
 def _endpoint(entity):
-    # Endpoint correcto: /api/apps/{app_id}/entities/{entity}
     return "%s/api/apps/%s/entities/%s" % (BASE44_BASE_URL, BASE44_APP_ID, entity)
 
 
@@ -26,25 +23,12 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _normalize(payload):
-    """Base44 espera campos 'data' como string JSON, no objeto."""
-    if not isinstance(payload, dict):
-        return payload
-    out = dict(payload)
-    if "data" in out and not isinstance(out["data"], str):
-        try:
-            out["data"] = json.dumps(out["data"], default=str)
-        except (TypeError, ValueError):
-            out["data"] = str(out["data"])
-    return out
-
-
 def create_record(entity, payload):
     if not BASE44_API_KEY:
         logger.debug("BASE44_API_KEY vacio; omitiendo %s", entity)
         return None
     try:
-        resp = requests.post(_endpoint(entity), json=_normalize(payload),
+        resp = requests.post(_endpoint(entity), json=payload,
                              headers=_headers(), timeout=REQUEST_TIMEOUT)
         if resp.status_code >= 400:
             logger.error("Base44 %s %d: %s", entity, resp.status_code, resp.text[:200])
