@@ -1,22 +1,17 @@
-"""logical_arb.py - Deteccion de inconsistencias matematicas en Polymarket.
+"""logical_arb.py - Deteccion de arbitrajes logicos en Polymarket (v2.0).
 
-Tres familias de arbitraje logico:
+v2.0 (Fase 1.4): Binary Under ahora se valida contra el orderbook CLOB real
+antes de reportar. Gamma outcomePrices es un midpoint y no es cruzable con
+ordenes limit. El executor necesita best_ask real + liquidez disponible.
 
-  1) BINARY_UNDER: mercado binario donde P(YES) + P(NO) < UNDER_THRESHOLD.
-     Comprar ambos lados = profit garantizado a la resolucion.
+Flujo Binary Under:
+  1) Pre-filtro barato con Gamma: volumen, liquidez, YES+NO<threshold.
+  2) Por cada candidato, fetch del orderbook CLOB para YES y NO.
+  3) Valida que best_ask(YES) + best_ask(NO) sigue siendo arbitrable
+     despues de consultar el book real (los precios Gamma estan stale).
+  4) Enriquece la oportunidad con token_ids y sizes disponibles.
 
-  2) UMBRELLA_OVER_CHILDREN: un mercado "any of X" cotiza mas barato que la
-     suma de sus componentes individuales. Ej: "AFC team wins SB" = 24%
-     pero suma(equipos AFC) = 28%. Comprar umbrella, vender children.
-
-  3) MONOTONIC_VIOLATION: en grupos con thresholds anidados (BTC >$100k,
-     >$120k, >$150k) el precio debe ser monotonicamente decreciente. Si
-     >$120k cotiza mas caro que >$100k, arbitraje puro.
-
-El modulo solo DETECTA y reporta a Base44 como Opportunity. La ejecucion
-concreta queda para una futura estrategia LogicalArbStrategy que consumira
-capital de StrategyCapital['logical_arb']. Mantener detector y ejecutor
-separados ayuda a validar con dinero virtual primero.
+Umbrella y Monotonic: siguen siendo solo deteccion informativa.
 """
 
 import json
@@ -32,20 +27,27 @@ from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL, GAMMA_API_URL
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 15
+CLOB_BASE_URL = "https://clob.polymarket.com"
 
-# Umbrales
-BINARY_UNDER_THRESHOLD = 0.97         # YES+NO < 0.97 -> arb
-UMBRELLA_MIN_DIFF = 0.03              # sum(children) - umbrella >= 3%
-MONOTONIC_MIN_DIFF = 0.02             # violacion minima 2% para reportar
-MIN_VOLUME_USDC = 10_000.0            # ignora mercados ilquidos
+# Umbrales Binary Under
+BINARY_PREFILTER_THRESHOLD = 0.98     # Gamma: aceptamos hasta 0.98 para no perder candidatos
+BINARY_CLOB_MIN_EDGE = 0.025          # CLOB real: al menos 2.5% edge neto (1-asks)
+BINARY_MIN_ASK_SIZE_SHARES = 20.0     # shares disponibles al tope; <20 es ilquido
+
+# Umbrales otros
+UMBRELLA_MIN_DIFF = 0.03
+MONOTONIC_MIN_DIFF = 0.02
+
+# Filtros volumen/liquidez
+MIN_VOLUME_USDC = 10_000.0
 MIN_LIQUIDITY_USDC = 1_000.0
 TOP_N = 20
+MAX_CLOB_LOOKUPS_PER_SCAN = 30        # rate limit safety
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers Gamma
 # ---------------------------------------------------------------------------
-
-
 def _safe_float(v, default=0.0):
     try:
         if v is None:
@@ -109,10 +111,55 @@ def _is_binary(prices) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 1) BINARY_UNDER: YES + NO < 0.97
+# CLOB orderbook lookup (solo para binary under)
+# ---------------------------------------------------------------------------
+def _fetch_clob_book(token_id: str) -> Optional[Dict[str, Any]]:
+    """GET /book?token_id=... devuelve {bids, asks, market, ...}. Orderbook
+    publico, sin auth. Devuelve None si falla.
+    """
+    try:
+        resp = requests.get(
+            "%s/book" % CLOB_BASE_URL,
+            params={"token_id": token_id},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        return data
+    except requests.RequestException as exc:
+        logger.debug("CLOB book fetch fallo token=%s: %s", token_id, exc)
+        return None
+
+
+def _best_ask(book: Dict[str, Any]) -> Tuple[Optional[float], float]:
+    """Devuelve (price, size) del mejor ask. CLOB ordena asks ascendente
+    por precio, pero siempre sort defensivo.
+    """
+    asks = book.get("asks") or []
+    if not asks:
+        return None, 0.0
+    try:
+        # Cada nivel es {"price": str, "size": str}
+        parsed = [(float(a.get("price", 0)), float(a.get("size", 0))) for a in asks]
+        parsed = [p for p in parsed if p[0] > 0 and p[1] > 0]
+        if not parsed:
+            return None, 0.0
+        parsed.sort(key=lambda x: x[0])
+        price, size = parsed[0]
+        return price, size
+    except (TypeError, ValueError):
+        return None, 0.0
+
+
+# ---------------------------------------------------------------------------
+# 1) BINARY_UNDER con enriquecimiento CLOB
 # ---------------------------------------------------------------------------
 def _scan_binary_under(markets) -> List[Dict[str, Any]]:
-    opps = []
+    # Paso A: pre-filtrado barato con Gamma
+    candidates = []
     for m in markets:
         if not _volume_ok(m):
             continue
@@ -120,33 +167,70 @@ def _scan_binary_under(markets) -> List[Dict[str, Any]]:
         if not _is_binary(prices):
             continue
         yes, no = prices[0], prices[1]
-        total = yes + no
-        if total >= BINARY_UNDER_THRESHOLD or total <= 0:
+        gamma_total = yes + no
+        if gamma_total >= BINARY_PREFILTER_THRESHOLD or gamma_total <= 0:
             continue
         token_ids = _extract_token_ids(m)
         if len(token_ids) < 2:
             continue
-        edge = 1.0 - total
+        candidates.append((m, yes, no, token_ids))
+
+    # Ordena por edge "Gamma" descendente y limita consultas CLOB
+    candidates.sort(key=lambda c: 1.0 - (c[1] + c[2]), reverse=True)
+    candidates = candidates[:MAX_CLOB_LOOKUPS_PER_SCAN]
+
+    opps = []
+    for market, gamma_yes, gamma_no, token_ids in candidates:
+        token_yes, token_no = token_ids[0], token_ids[1]
+
+        book_yes = _fetch_clob_book(token_yes)
+        book_no = _fetch_clob_book(token_no)
+        if not book_yes or not book_no:
+            continue
+
+        ask_yes_price, ask_yes_size = _best_ask(book_yes)
+        ask_no_price, ask_no_size = _best_ask(book_no)
+        if ask_yes_price is None or ask_no_price is None:
+            continue
+        if ask_yes_size < BINARY_MIN_ASK_SIZE_SHARES or ask_no_size < BINARY_MIN_ASK_SIZE_SHARES:
+            continue
+
+        clob_total = ask_yes_price + ask_no_price
+        edge = 1.0 - clob_total
+        if edge < BINARY_CLOB_MIN_EDGE:
+            continue
+
+        # Liquidez maxima arbitrable al tope del book
+        max_shares = min(ask_yes_size, ask_no_size)
+        max_notional_usdc = max_shares * clob_total  # USDC necesarios
+
         opps.append({
             "arb_type": "binary_under",
-            "market_id": m.get("id") or m.get("conditionId"),
-            "question": m.get("question") or m.get("slug"),
-            "yes_price": yes, "no_price": no, "total": round(total, 4),
+            "market_id": market.get("id") or market.get("conditionId"),
+            "question": market.get("question") or market.get("slug"),
+            "token_id_yes": token_yes,
+            "token_id_no": token_no,
+            "ask_yes": round(ask_yes_price, 4),
+            "ask_no": round(ask_no_price, 4),
+            "ask_size_yes": round(ask_yes_size, 2),
+            "ask_size_no": round(ask_no_size, 2),
+            "max_arb_shares": round(max_shares, 2),
+            "max_arb_notional_usdc": round(max_notional_usdc, 2),
+            "total": round(clob_total, 4),
             "edge_pct": round(edge * 100, 3),
-            "profit_per_100": round(edge / total * 100, 3),
-            "token_ids": token_ids,
-            "volume": _safe_float(m.get("volume") or m.get("volumeNum")),
+            "profit_per_100": round(edge / clob_total * 100, 3),
+            "gamma_yes": round(gamma_yes, 4),
+            "gamma_no": round(gamma_no, 4),
+            "volume": _safe_float(market.get("volume") or market.get("volumeNum")),
         })
     return opps
 
 
 # ---------------------------------------------------------------------------
-# 2) UMBRELLA_OVER_CHILDREN
-# Agrupa mercados por 'eventSlug' o 'groupSlug'. Si uno se titula "Any X" /
-# "Will any..." / tiene 'anywinner' en el slug, lo tomamos como umbrella.
+# 2) UMBRELLA (sin enriquecimiento, solo deteccion)
 # ---------------------------------------------------------------------------
 UMBRELLA_PATTERNS = re.compile(
-    r"(anys+w+s+win|wills+any|anys+other|field|others+candidate)",
+    r"(any\s+\w+\s+win|will\s+any|any\s+other|field|other\s+candidate)",
     re.IGNORECASE,
 )
 
@@ -178,7 +262,7 @@ def _scan_umbrella(markets) -> List[Dict[str, Any]]:
     opps = []
     for key, members in groups.items():
         if len(members) < 3:
-            continue  # umbrella + al menos 2 children
+            continue
 
         umbrella = None
         children = []
@@ -214,10 +298,9 @@ def _scan_umbrella(markets) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# 3) MONOTONIC_VIOLATION
-# Detecta grupos tipo "BTC above $X on date Y" con thresholds crecientes.
+# 3) MONOTONIC (sin cambios, solo deteccion)
 # ---------------------------------------------------------------------------
-THRESHOLD_PATTERN = re.compile(r"$?([d,]+(?:.d+)?)s*(k|m|bn)?", re.IGNORECASE)
+THRESHOLD_PATTERN = re.compile(r"\$?([\d,]+(?:\.\d+)?)\s*(k|m|bn)?", re.IGNORECASE)
 
 
 def _extract_threshold(question: str) -> Optional[float]:
@@ -261,12 +344,10 @@ def _scan_monotonic(markets) -> List[Dict[str, Any]]:
     for key, items in groups.items():
         if len(items) < 2:
             continue
-        # Ordena ascendente por threshold; P(>=X) debe ser >= P(>=Y) si X<Y.
         items.sort(key=lambda t: t[0])
         for i in range(len(items) - 1):
             th_lo, m_lo, p_lo = items[i]
             th_hi, m_hi, p_hi = items[i + 1]
-            # Violacion: threshold mayor tiene precio estrictamente mayor.
             if p_hi > p_lo + MONOTONIC_MIN_DIFF:
                 opps.append({
                     "arb_type": "monotonic_violation",
@@ -322,7 +403,8 @@ def _persist_opportunity(opp: Dict[str, Any]) -> None:
 def scan_logical_arb() -> List[Dict[str, Any]]:
     """Ejecuta las 3 familias de deteccion y devuelve top-N por edge_pct.
 
-    Persiste cada deteccion como Opportunity en Base44 para analisis.
+    Binary Under incluye token_ids y precios CLOB reales listos para executor.
+    Umbrella y Monotonic son solo informativos.
     """
     markets = _fetch_markets()
     if not markets:
@@ -340,7 +422,7 @@ def scan_logical_arb() -> List[Dict[str, Any]]:
         "logical_arb: binary=%d umbrella=%d monotonic=%d (top %d reportados)",
         len(binary), len(umbrella), len(monotonic), len(top),
     )
-    for opp in top[:5]:  # persiste solo los 5 mejores para no saturar
+    for opp in top[:5]:
         _persist_opportunity(opp)
 
     return top
