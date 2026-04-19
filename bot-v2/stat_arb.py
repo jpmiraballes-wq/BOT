@@ -1,25 +1,7 @@
 """stat_arb.py - Statistical arbitrage sobre pares correlacionados.
 
-Estrategia:
-  1) Universo: mercados activos con volumen >= MIN_VOLUME.
-  2) Cada ciclo, actualiza historial de precios (YES price) en memoria.
-  3) Cuando hay >= MIN_SAMPLES puntos, calcula correlacion Pearson entre
-     todos los pares. Los que superan CORR_THRESHOLD se guardan como
-     "pares activos".
-  4) Para cada par activo, calcula el spread normalizado:
-        spread_t = price_A_t - beta * price_B_t
-     donde beta = cov(A,B)/var(B) (OLS simple).
-     Z-score = (spread_t - mean(spread)) / std(spread).
-  5) Entrada: |z| > Z_ENTRY. Si z > 0 -> A caro, B barato: vender A (short
-     no existe en Polymarket, asi que compramos NO de A) + comprar YES de B.
-     Simplificamos: solo tomamos el lado "barato" = comprar YES de B,
-     esperando convergencia. Captura menos edge pero evita shorts.
-  6) Salida: |z| < Z_EXIT o pasa MAX_HOLD_HOURS.
-  7) Capital estricto de StrategyCapital['stat_arb'].
-
-La correlacion se recalcula cada RECALC_INTERVAL_CYCLES ciclos para no
-saturar CPU. El historial se persiste en /tmp/stat_arb_history.json para
-sobrevivir restarts cortos.
+Version con persistencia en Base44 (entity Position). Las posiciones abiertas
+se cargan desde la DB al arrancar, asi sobreviven restarts del bot.
 """
 
 import json
@@ -49,9 +31,9 @@ Z_EXIT = 0.3
 MAX_HOLD_HOURS = 24
 MIN_VOLUME_USDC = 20_000.0
 MIN_LIQUIDITY_USDC = 2_000.0
-UNIVERSE_SIZE = 40  # top N por volumen
-RECALC_PAIRS_EVERY = 10  # ciclos
-POSITION_SIZE_USDC = 15.0  # tamaño fijo por entrada
+UNIVERSE_SIZE = 40
+RECALC_PAIRS_EVERY = 10
+POSITION_SIZE_USDC = 15.0
 MAX_CONCURRENT_POSITIONS = 3
 REQUEST_TIMEOUT = 15
 
@@ -84,7 +66,6 @@ def _corr(xs, ys):
 
 
 def _beta(xs, ys):
-    # OLS: xs = alpha + beta*ys => beta = cov(x,y)/var(y)
     if len(xs) < 3:
         return 1.0
     mx, my = _mean(xs), _mean(ys)
@@ -95,9 +76,6 @@ def _beta(xs, ys):
     return cov / vy
 
 
-# ---------------------------------------------------------------------------
-# Gamma fetch
-# ---------------------------------------------------------------------------
 def _safe_float(v, default=0.0):
     try:
         if v is None:
@@ -107,6 +85,104 @@ def _safe_float(v, default=0.0):
         return default
 
 
+# ---------------------------------------------------------------------------
+# Persistencia Base44 - entity Position
+# ---------------------------------------------------------------------------
+def _b44_headers():
+    return {"api_key": BASE44_API_KEY or "", "Content-Type": "application/json"}
+
+
+def _b44_url(record_id: Optional[str] = None) -> str:
+    base = "%s/api/apps/%s/entities/Position" % (BASE44_BASE_URL, BASE44_APP_ID)
+    return "%s/%s" % (base, record_id) if record_id else base
+
+
+def _load_open_positions(strategy: str) -> Dict[str, Dict[str, Any]]:
+    """Lee todas las Position con status=open de esta estrategia."""
+    if not BASE44_API_KEY:
+        return {}
+    try:
+        resp = requests.get(
+            _b44_url(),
+            params={"status": "open", "strategy": strategy},
+            headers=_b44_headers(), timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            logger.warning("Position load %d: %s", resp.status_code, resp.text[:200])
+            return {}
+        data = resp.json()
+        records = data["data"] if isinstance(data, dict) and "data" in data else data
+        if not isinstance(records, list):
+            return {}
+        positions = {}
+        for r in records:
+            market_id = r.get("market")
+            if not market_id:
+                continue
+            positions[market_id] = {
+                "_record_id": r.get("id"),
+                "token_id": r.get("token_id") or "",
+                "entry_price": _safe_float(r.get("entry_price")),
+                "size_tokens": _safe_float(r.get("size_tokens")),
+                "size_usdc": _safe_float(r.get("size_usdc")),
+                "opened_at": _safe_float(r.get("opened_at_ts"), time.time()),
+                "question": r.get("question") or "",
+                "z_entry": _safe_float(r.get("z_entry")),
+            }
+        logger.info("stat_arb: %d posiciones open recuperadas de Base44", len(positions))
+        return positions
+    except requests.RequestException as exc:
+        logger.error("Position load fallo: %s", exc)
+        return {}
+
+
+def _persist_position_open(strategy: str, market_id: str, pos: Dict[str, Any]) -> Optional[str]:
+    if not BASE44_API_KEY:
+        return None
+    payload = {
+        "market": market_id,
+        "side": "BUY",
+        "entry_price": pos["entry_price"],
+        "current_price": pos["entry_price"],
+        "size_usdc": pos["size_usdc"],
+        "pnl_unrealized": 0.0,
+        "status": "open",
+        "strategy": strategy,
+        "token_id": pos["token_id"],
+        "size_tokens": pos["size_tokens"],
+        "opened_at_ts": pos["opened_at"],
+        "question": pos.get("question"),
+        "z_entry": pos.get("z_entry"),
+    }
+    try:
+        resp = requests.post(_b44_url(), json=payload,
+                             headers=_b44_headers(), timeout=REQUEST_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Position create %d: %s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        return data.get("id") or (data.get("data") or {}).get("id")
+    except requests.RequestException as exc:
+        logger.error("Position create fallo: %s", exc)
+        return None
+
+
+def _persist_position_close(record_id: Optional[str], exit_price: float) -> None:
+    if not record_id or not BASE44_API_KEY:
+        return
+    try:
+        requests.patch(
+            _b44_url(record_id),
+            json={"status": "closed", "current_price": exit_price},
+            headers=_b44_headers(), timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        logger.error("Position close fallo: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Gamma fetch
+# ---------------------------------------------------------------------------
 def _extract_yes_price(market) -> Optional[float]:
     raw = market.get("outcomePrices")
     if isinstance(raw, str):
@@ -175,9 +251,6 @@ def _fetch_universe() -> List[Dict[str, Any]]:
     return filtered
 
 
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
 def _load_history() -> Dict[str, List[float]]:
     if not os.path.exists(HISTORY_PATH):
         return {}
@@ -207,15 +280,14 @@ class StatArb:
         self.history: Dict[str, List[float]] = defaultdict(
             lambda: deque(maxlen=MAX_HISTORY_POINTS)
         )
-        # Reload desde disco
         for k, v in _load_history().items():
             self.history[k] = deque(v, maxlen=MAX_HISTORY_POINTS)
-        self.pairs: List[Tuple[str, str, float]] = []  # (id_a, id_b, beta)
-        self.positions: Dict[str, Dict[str, Any]] = {}  # market_id -> info
+        self.pairs: List[Tuple[str, str, float]] = []
+        # Cargar posiciones abiertas desde Base44 (sobrevive restart)
+        self.positions: Dict[str, Dict[str, Any]] = _load_open_positions(STRATEGY)
         self.cycle_count = 0
-        self.market_meta: Dict[str, Dict[str, Any]] = {}  # id -> last market obj
+        self.market_meta: Dict[str, Dict[str, Any]] = {}
 
-    # ------------------------------------------------------------------
     def _update_history(self, universe):
         for m in universe:
             mid = m["id"]
@@ -257,7 +329,6 @@ class StatArb:
             return None
         return (spreads[-1] - mu) / sd
 
-    # ------------------------------------------------------------------
     def _open_position(self, market_id: str, side_market: Dict[str, Any],
                        zscore: float, budget: float):
         if market_id in self.positions:
@@ -275,7 +346,7 @@ class StatArb:
         try:
             order_ids = self.om.place_limit_buy(
                 token_id=side_market["yes_token"],
-                price=round(price * 1.005, 2),  # slippage 0.5%
+                price=round(price * 1.005, 2),
                 size=size_tokens,
                 market_id=market_id,
                 strategy=STRATEGY,
@@ -285,7 +356,7 @@ class StatArb:
             return
         if not order_ids:
             return
-        self.positions[market_id] = {
+        pos = {
             "token_id": side_market["yes_token"],
             "entry_price": price,
             "size_tokens": size_tokens,
@@ -294,6 +365,8 @@ class StatArb:
             "opened_at": time.time(),
             "question": side_market.get("question"),
         }
+        pos["_record_id"] = _persist_position_open(STRATEGY, market_id, pos)
+        self.positions[market_id] = pos
         log_decision(reason="stat_arb_entry", market=side_market.get("question"),
                      strategy=STRATEGY, edge=abs(zscore),
                      size=POSITION_SIZE_USDC,
@@ -303,7 +376,6 @@ class StatArb:
         now = time.time()
         for market_id, pos in list(self.positions.items()):
             age_h = (now - pos["opened_at"]) / 3600.0
-            # Buscamos la paridad de este market_id para obtener z actual
             z_now = None
             for a, b, beta in self.pairs:
                 if market_id in (a, b):
@@ -316,6 +388,8 @@ class StatArb:
                 exit_reason = "z_converged"
             if not exit_reason:
                 continue
+            cur_market = self.market_meta.get(market_id) or {}
+            exit_price = cur_market.get("yes_price", pos["entry_price"])
             try:
                 self.om.close_position_market(
                     token_id=pos["token_id"],
@@ -326,12 +400,12 @@ class StatArb:
             except Exception as exc:
                 logger.error("stat_arb close_position fallo: %s", exc)
                 continue
+            _persist_position_close(pos.get("_record_id"), float(exit_price))
             log_decision(reason="stat_arb_exit_%s" % exit_reason,
                          market=pos.get("question"), strategy=STRATEGY,
                          extra={"age_h": round(age_h, 2), "z_now": z_now})
             self.positions.pop(market_id, None)
 
-    # ------------------------------------------------------------------ main
     def run_cycle(self):
         if not self.allocator.is_enabled(STRATEGY):
             return
@@ -352,7 +426,6 @@ class StatArb:
         if budget < POSITION_SIZE_USDC:
             return
 
-        # Evalua cada par; compra el lado barato si |z|>Z_ENTRY
         for id_a, id_b, beta in self.pairs:
             if len(self.positions) >= MAX_CONCURRENT_POSITIONS:
                 break
@@ -361,7 +434,6 @@ class StatArb:
             z = self._current_zscore(id_a, id_b, beta)
             if z is None or abs(z) < Z_ENTRY:
                 continue
-            # z>0 => A caro vs B => compramos B (barato). z<0 => A barato.
             target_id = id_b if z > 0 else id_a
             market = self.market_meta.get(target_id)
             if not market:
@@ -369,6 +441,5 @@ class StatArb:
             self._open_position(target_id, market, z, budget)
             budget -= POSITION_SIZE_USDC
 
-        # Reporta capital desplegado
         deployed = sum(p["size_usdc"] for p in self.positions.values())
         self.allocator.report_deployed(STRATEGY, deployed)
