@@ -213,6 +213,14 @@ def main() -> int:
         except Exception as _cfg_exc:
             logger.warning("fetch_bot_config fallo: %s", _cfg_exc)
             bot_cfg = {}
+        if iteration == 1 or iteration % 5 == 0:
+            logger.info(
+                "BotConfig leido: paused=%s emergency_stop=%s mode=%s id=%s",
+                bool(bot_cfg.get("paused")),
+                bool(bot_cfg.get("emergency_stop")),
+                bot_cfg.get("mode"),
+                bot_cfg.get("id"),
+            )
         if bot_cfg.get("emergency_stop"):
             logger.critical("EMERGENCY STOP desde dashboard (at=%s). Cancelando todo y saliendo.",
                             bot_cfg.get("emergency_stop_at"))
