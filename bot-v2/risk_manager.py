@@ -1,0 +1,168 @@
+"""risk_manager.py - Controles de riesgo del bot.
+
+Responsabilidades:
+  - Track del high-watermark y del drawdown global
+  - Stop global si drawdown > MAX_DRAWDOWN_PCT
+  - Stop por posicion si perdida > MAX_LOSS_PER_POSITION_USDC
+  - Cap absoluto de exposicion total
+  - Creacion del archivo shutdown.flag para detener el bot
+"""
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Dict, Any, List, Tuple
+
+from config import (
+    CAPITAL_USDC,
+    MAX_DRAWDOWN_PCT,
+    MAX_LOSS_PER_POSITION_USDC,
+    MAX_TOTAL_EXPOSURE_USDC,
+    RESERVE_PCT,
+    MAX_POSITION_PCT,
+    SHUTDOWN_FLAG_PATH,
+    STATE_FILE_PATH,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RiskManager:
+    """Guardia de riesgo. Persistente via state.json."""
+
+    def __init__(self) -> None:
+        self.state_path: Path = STATE_FILE_PATH
+        self.high_watermark: float = CAPITAL_USDC
+        self.current_equity: float = CAPITAL_USDC
+        self.daily_pnl: float = 0.0
+        self.daily_anchor_equity: float = CAPITAL_USDC
+        self.daily_anchor_ts: float = time.time()
+        self.halted: bool = False
+        self.halt_reason: str = ""
+        self._load()
+
+    # --------------------------------------------------------- persistencia
+    def _load(self) -> None:
+        if self.state_path.exists():
+            try:
+                data = json.loads(self.state_path.read_text())
+                self.high_watermark = float(data.get("high_watermark", CAPITAL_USDC))
+                self.current_equity = float(data.get("current_equity", CAPITAL_USDC))
+                self.daily_pnl = float(data.get("daily_pnl", 0.0))
+                self.daily_anchor_equity = float(
+                    data.get("daily_anchor_equity", CAPITAL_USDC)
+                )
+                self.daily_anchor_ts = float(data.get("daily_anchor_ts", time.time()))
+                self.halted = bool(data.get("halted", False))
+                self.halt_reason = str(data.get("halt_reason", ""))
+                logger.info("Estado cargado: HWM=%.2f equity=%.2f halted=%s",
+                            self.high_watermark, self.current_equity, self.halted)
+            except Exception as exc:
+                logger.error("No se pudo leer %s: %s. Usando defaults.",
+                             self.state_path, exc)
+
+    def _save(self) -> None:
+        try:
+            self.state_path.write_text(json.dumps({
+                "high_watermark": self.high_watermark,
+                "current_equity": self.current_equity,
+                "daily_pnl": self.daily_pnl,
+                "daily_anchor_equity": self.daily_anchor_equity,
+                "daily_anchor_ts": self.daily_anchor_ts,
+                "halted": self.halted,
+                "halt_reason": self.halt_reason,
+                "updated_at": time.time(),
+            }, indent=2))
+        except Exception as exc:
+            logger.error("No se pudo guardar estado: %s", exc)
+
+    # ---------------------------------------------------------------- equity
+    def update_equity(self, equity: float) -> None:
+        self.current_equity = float(equity)
+        if self.current_equity > self.high_watermark:
+            self.high_watermark = self.current_equity
+
+        if time.time() - self.daily_anchor_ts >= 24 * 3600:
+            self.daily_anchor_equity = self.current_equity
+            self.daily_anchor_ts = time.time()
+            self.daily_pnl = 0.0
+        else:
+            self.daily_pnl = self.current_equity - self.daily_anchor_equity
+
+        self._check_global_drawdown()
+        self._save()
+
+    # -------------------------------------------------------------- metricas
+    @property
+    def drawdown_pct(self) -> float:
+        if self.high_watermark <= 0:
+            return 0.0
+        return max(0.0, (self.high_watermark - self.current_equity) / self.high_watermark)
+
+    # ----------------------------------------------------------------- halts
+    def _check_global_drawdown(self) -> None:
+        if self.halted:
+            return
+        if self.drawdown_pct >= MAX_DRAWDOWN_PCT:
+            reason = ("Drawdown global %.2f%% >= %.2f%% (HWM=%.2f, equity=%.2f)"
+                      % (self.drawdown_pct * 100, MAX_DRAWDOWN_PCT * 100,
+                         self.high_watermark, self.current_equity))
+            self.trigger_shutdown(reason)
+
+    def trigger_shutdown(self, reason: str) -> None:
+        self.halted = True
+        self.halt_reason = reason
+        logger.critical("SHUTDOWN activado: %s", reason)
+        try:
+            SHUTDOWN_FLAG_PATH.write_text(
+                "%s - %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), reason)
+            )
+        except Exception as exc:
+            logger.error("No se pudo escribir shutdown.flag: %s", exc)
+        self._save()
+
+    def is_halted(self) -> bool:
+        if self.halted:
+            return True
+        if SHUTDOWN_FLAG_PATH.exists():
+            self.halted = True
+            self.halt_reason = self.halt_reason or "shutdown.flag presente"
+            return True
+        return False
+
+    # ----------------------------------------------------- sizing / exposicion
+    def max_position_size_usdc(self) -> float:
+        return CAPITAL_USDC * MAX_POSITION_PCT
+
+    def deployable_capital(self, currently_deployed: float) -> float:
+        usable = CAPITAL_USDC * (1.0 - RESERVE_PCT)
+        cap = min(usable, MAX_TOTAL_EXPOSURE_USDC)
+        return max(0.0, cap - currently_deployed)
+
+    def can_open_new_position(self, currently_deployed: float) -> bool:
+        if self.is_halted():
+            return False
+        return self.deployable_capital(currently_deployed) >= self.max_position_size_usdc()
+
+    # ---------------------------------------------------- perdidas por pos.
+    def check_positions(self, positions: List[Dict[str, Any]]) -> List[str]:
+        to_close = []
+        for p in positions:
+            pnl = float(p.get("unrealized_pnl", 0.0))
+            if pnl <= -MAX_LOSS_PER_POSITION_USDC:
+                mid = p.get("market_id") or p.get("market")
+                logger.warning("Posicion %s supera perdida maxima: %.2f USDC",
+                               mid, pnl)
+                if mid:
+                    to_close.append(mid)
+        return to_close
+
+    # -------------------------------------------------------- exposicion total
+    def enforce_exposure_cap(self, currently_deployed: float) -> Tuple[bool, str]:
+        if currently_deployed > MAX_TOTAL_EXPOSURE_USDC:
+            msg = ("Exposicion %.2f supera cap %.2f"
+                   % (currently_deployed, MAX_TOTAL_EXPOSURE_USDC))
+            logger.error(msg)
+            return False, msg
+        return True, ""
