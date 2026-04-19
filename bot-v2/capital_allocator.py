@@ -89,11 +89,16 @@ class CapitalAllocator:
 
     def get_allocated(self, strategy: str) -> float:
         rec = self.get(strategy)
-        return float(rec.get("allocated") or 0.0) if rec else 0.0
+        # La entity externa usa 'allocated_usdc'. Fallback a 'allocated' por compat.
+        if not rec:
+            return 0.0
+        return float(rec.get("allocated_usdc") or rec.get("allocated") or 0.0)
 
     def get_deployed(self, strategy: str) -> float:
         rec = self.get(strategy)
-        return float(rec.get("deployed") or 0.0) if rec else 0.0
+        if not rec:
+            return 0.0
+        return float(rec.get("deployed_usdc") or rec.get("deployed") or 0.0)
 
     def get_available(self, strategy: str) -> float:
         """Capital disponible = allocated - deployed. Nunca negativo."""
@@ -150,7 +155,7 @@ class CapitalAllocator:
             logger.warning("StrategyCapital sin registro para %s", strategy)
             return False
         payload: Dict[str, Any] = {
-            "deployed": float(deployed_usdc),
+            "deployed_usdc": float(deployed_usdc),
             "last_run_at": datetime.now(timezone.utc).isoformat(),
         }
         if notes is not None:
