@@ -215,11 +215,79 @@ class PaperBroker:
         return True
 
     # ---------------------------------------------------------- market data
-    def refresh(self, *args, **kwargs):
-        """No-op: el OrderManager real recicla ordenes stale / repinta MM.
-        En paper el fill es inmediato, no hay ordenes colgadas.
+    def refresh(self, opportunities=None, size_fn=None, *args, **kwargs):
+        """Simula fills de Market Making BUY_ONLY replicando la logica del
+        OrderManager real. Recorre cada oportunidad, pide size con size_fn,
+        y si es positivo abre una posicion paper al precio bid.
         """
-        return
+        if not opportunities or size_fn is None:
+            return
+        try:
+            from config import MIN_SPREAD_PCT
+        except ImportError:
+            MIN_SPREAD_PCT = 0.02
+
+        MAX_MM_MARKETS = 5  # same as MAX_CONCURRENT_MARKETS
+        active_tokens = set(self.positions.keys())
+        opened = 0
+
+        for opp in opportunities:
+            if len(active_tokens) >= MAX_MM_MARKETS:
+                break
+            token_ids = opp.get("token_ids") or []
+            if not token_ids:
+                continue
+            token_id = str(token_ids[0])
+            if token_id in active_tokens:
+                continue
+
+            try:
+                mid = float(opp.get("mid") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if mid <= 0:
+                continue
+
+            half_spread = max(float(MIN_SPREAD_PCT) / 2.0, 0.01)
+            bid_price = max(0.01, min(0.99, round((mid - half_spread) * 100) / 100.0))
+
+            try:
+                size_usdc = float(size_fn(opp))
+            except Exception as exc:
+                logger.warning("[PAPER] size_fn fallo para %s: %s",
+                               opp.get("market_id"), exc)
+                continue
+            if size_usdc <= 0:
+                continue
+
+            # BUY_ONLY: todo el capital al BUY, convertido a tokens al bid.
+            size_tokens = round(max(5.0, size_usdc / bid_price), 2)
+            if size_tokens < 5.0:
+                continue
+
+            ids = self.place_limit_buy(
+                token_id=token_id,
+                price=bid_price,
+                size=size_tokens,
+                market_id=opp.get("market_id", ""),
+                strategy="market_making_paper",
+            )
+            if ids:
+                active_tokens.add(token_id)
+                opened += 1
+
+        if opened:
+            logger.info("[PAPER] refresh MM: %d fills simulados en este ciclo", opened)
+
+    def cancel_stale_orders(self, *args, **kwargs) -> int:
+        """No-op en paper: los fills son inmediatos, no hay ordenes colgadas."""
+        return 0
+
+    def close_profitable_positions(self, *args, **kwargs) -> int:
+        """Stub: el PaperBroker no tiene logica de take-profit automatico.
+        Las estrategias que quieran cerrar llaman close_position_market().
+        """
+        return 0
 
     def get_open_orders(self, *args, **kwargs) -> List[Dict[str, Any]]:
         return []
