@@ -1,17 +1,17 @@
-"""order_manager.py - Gestion de ordenes en Polymarket CLOB (v2.3).
+"""order_manager.py - Gestion de ordenes Polymarket CLOB (v2.4).
 
-Cambios v2.3:
-  - Obtiene maker_fee_rate del mercado via client.get_market(token_id)
-    antes de construir la orden, evitando el error
-    "invalid fee rate (0), current market's maker fee: 1000".
-  - Cache de fee_rate por token_id para no consultar en cada ciclo.
+Cambios v2.4 (fix duplicados):
+  - Antes de place_market_making_pair(), consulta PositionTracker.list_open()
+    y salta si ya hay una posicion abierta con el mismo token_id.
+  - refresh() construye un set active_tokens (ordenes + posiciones) para
+    dedup global. MAX_ORDERS_PER_MARKET se mantiene como segundo cinturon.
 """
 
 import logging
 import os
 import time
 from collections import Counter
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
@@ -44,7 +44,7 @@ class OrderManager:
         self.client = None
         self.creds = None
         self._orders = {}
-        self._fee_cache = {}  # token_id -> maker_fee_rate (int basis points)
+        self._fee_cache = {}
         self.tracker = PositionTracker()
 
     def connect(self):
@@ -56,7 +56,7 @@ class OrderManager:
         )
         self.creds = self.create_or_derive_api_creds()
         self.client.set_api_creds(self.creds)
-        logger.info("ClobClient listo. API key: %s... | BUY_ONLY_MODE=%s | MAX_ORDERS/MKT=%d",
+        logger.info("ClobClient listo v2.4 dedup. API key: %s... | BUY_ONLY=%s | MAX_ORD/MKT=%d",
                     self.creds.api_key[:8], BUY_ONLY_MODE, MAX_ORDERS_PER_MARKET)
 
     def create_or_derive_api_creds(self):
@@ -78,18 +78,11 @@ class OrderManager:
 
     # -------------------------------------------------------------- fee rate
     def get_maker_fee_rate(self, token_id):
-        """Devuelve el maker_fee_rate del mercado (basis points, int).
-
-        Polymarket exige que la orden firme con el mismo fee_rate que expone
-        el mercado. Cacheamos para evitar consultar cada ciclo.
-        """
         if token_id in self._fee_cache:
             return self._fee_cache[token_id]
         fee = 0
         try:
             market = self.client.get_market(token_id) or {}
-            # El campo puede venir como 'maker_fee_rate_bps', 'makerFeeRate',
-            # o anidado bajo 'fee' / 'fees'. Intentamos varias claves.
             candidates = [
                 market.get("maker_fee_rate_bps"),
                 market.get("makerFeeRate"),
@@ -136,9 +129,34 @@ class OrderManager:
     def get_active_market_ids(self):
         return list(self.get_orders_per_market().keys())
 
+    def get_active_token_ids(self):
+        """Tokens con orden BUY abierta en el CLOB ahora mismo."""
+        tokens = set()
+        for order in self.get_open_orders():
+            side = (order.get("side") or "").upper()
+            tid = order.get("asset_id") or order.get("token_id") or order.get("tokenId")
+            if tid and side == "BUY":
+                tokens.add(str(tid))
+        return tokens
+
+    def get_open_position_tokens(self):
+        """Tokens con posicion Position(status=open) en Base44."""
+        tokens = set()
+        try:
+            for pos in self.tracker.list_open() or []:
+                tid = pos.get("token_id")
+                if tid:
+                    tokens.add(str(tid))
+                pid = pos.get("id")
+                cached = self.tracker._cache.get(pid) if pid else None
+                if cached and cached.get("token_id"):
+                    tokens.add(str(cached["token_id"]))
+        except Exception as exc:
+            logger.warning("No se pudieron listar posiciones abiertas: %s", exc)
+        return tokens
+
     # --------------------------------------------------------------- builder
     def _build_order_args(self, *, token_id, price, size, side):
-        """Construye OrderArgs incluyendo fee_rate_bps si el SDK lo soporta."""
         fee = self.get_maker_fee_rate(token_id)
         try:
             return OrderArgs(
@@ -146,18 +164,31 @@ class OrderManager:
                 fee_rate_bps=fee,
             )
         except TypeError:
-            # SDK antiguo sin fee_rate_bps; degradamos sin fee.
             return OrderArgs(token_id=token_id, price=price, size=size, side=side)
 
     # ----------------------------------------------------------------- place
-    def place_market_making_pair(self, opportunity, position_size_usdc):
+    def place_market_making_pair(self, opportunity, position_size_usdc,
+                                 blocked_tokens: Optional[Set[str]] = None):
         market_id = opportunity["market_id"]
         token_ids = opportunity.get("token_ids") or []
         if not token_ids:
             log_warning("opportunity_sin_token_ids", module="market_maker",
                         extra={"market": market_id})
             return []
-        token_id = token_ids[0]
+        token_id = str(token_ids[0])
+
+        # DEDUP: si ya hay posicion abierta u orden BUY viva en este token, saltar.
+        if blocked_tokens and token_id in blocked_tokens:
+            log_decision(
+                reason="skip_duplicate_token",
+                market=opportunity.get("question") or market_id,
+                strategy="market_maker",
+                extra={"token_id": token_id[:10]},
+            )
+            logger.info("SKIP %s: ya hay posicion/orden abierta en token %s",
+                        market_id, token_id[:10])
+            return []
+
         mid = float(opportunity["mid"])
         half_spread = max(MIN_SPREAD_PCT / 2.0, 0.01)
         bid_price = self._round_price(mid - half_spread)
@@ -186,7 +217,8 @@ class OrderManager:
             market=question, strategy="market_maker",
             edge=edge, size=position_size_usdc,
             extra={"mid": mid, "bid": bid_price, "ask": ask_price,
-                   "size_per_side": size_per_side, "buy_only": BUY_ONLY_MODE},
+                   "size_per_side": size_per_side, "buy_only": BUY_ONLY_MODE,
+                   "token_id": token_id[:10]},
         )
 
         sides = ((BUY, bid_price),) if BUY_ONLY_MODE else ((BUY, bid_price), (SELL, ask_price))
@@ -220,6 +252,10 @@ class OrderManager:
                     logger.warning("Respuesta sin orderID: %s", resp)
             except Exception as exc:
                 logger.error("Error %s en %s: %s", side, market_id, exc)
+
+        # Marcar token como ocupado para el resto de este refresh().
+        if created and blocked_tokens is not None:
+            blocked_tokens.add(token_id)
         return created
 
     def cancel_stale_orders(self):
@@ -271,12 +307,27 @@ class OrderManager:
 
     def refresh(self, opportunities, size_fn):
         self.cancel_stale_orders()
+
         orders_per_market = self.get_orders_per_market()
         active_markets = set(orders_per_market.keys())
         free_slots = MAX_CONCURRENT_MARKETS - len(active_markets)
 
+        # DEDUP GLOBAL: tokens con orden BUY viva + tokens con posicion abierta.
+        blocked_tokens: Set[str] = set()
+        blocked_tokens.update(self.get_active_token_ids())
+        blocked_tokens.update(self.get_open_position_tokens())
+        if blocked_tokens:
+            logger.info("Dedup activo: %d token_ids bloqueados", len(blocked_tokens))
+
         for opp in opportunities:
             market_id = opp["market_id"]
+            token_id = str((opp.get("token_ids") or [""])[0])
+
+            if token_id and token_id in blocked_tokens:
+                logger.info("SKIP %s: token %s ya tiene posicion/orden abierta",
+                            market_id, token_id[:10])
+                continue
+
             if orders_per_market.get(market_id, 0) >= MAX_ORDERS_PER_MARKET:
                 logger.info("Mercado %s ya tiene %d ordenes (max %d); saltando.",
                             market_id, orders_per_market[market_id],
@@ -287,7 +338,8 @@ class OrderManager:
             size = size_fn(opp)
             if size <= 0:
                 continue
-            created = self.place_market_making_pair(opp, size)
+
+            created = self.place_market_making_pair(opp, size, blocked_tokens=blocked_tokens)
             if created:
                 if market_id not in active_markets:
                     active_markets.add(market_id)
