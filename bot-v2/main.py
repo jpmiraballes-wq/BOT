@@ -34,6 +34,9 @@ from reporter import Reporter
 from risk_manager import RiskManager
 from bot_config_reader import fetch_bot_config  # dashboard control
 from strategies.umbrella_executor import run_umbrella_cycle
+from portfolio_sync import PortfolioSync
+
+PORTFOLIO_SYNC_EVERY_N_ITERATIONS = 5
 
 
 MM_STRATEGY = "market_making"
@@ -203,6 +206,15 @@ def main() -> int:
 
     size_fn = build_size_fn(sizer, rm, cb, _current_deployed, _mm_budget)
 
+    # PortfolioSync: actualiza current_price y PnL unrealized de posiciones.
+    try:
+        psync = PortfolioSync(om.client)
+        logger.info("PortfolioSync activo (cada %d iteraciones).",
+                    PORTFOLIO_SYNC_EVERY_N_ITERATIONS)
+    except Exception as _exc:
+        logger.warning("No se pudo inicializar PortfolioSync: %s", _exc)
+        psync = None
+
     iteration = 0
     while not _stop_requested:
         iteration += 1
@@ -355,6 +367,12 @@ def main() -> int:
             except Exception as exc:
                 logger.error("logical_arb cycle fallo: %s", exc)
                 logger.debug(traceback.format_exc())
+
+            if psync is not None and iteration % PORTFOLIO_SYNC_EVERY_N_ITERATIONS == 0:
+                try:
+                    psync.sync()
+                except Exception as _exc:
+                    logger.warning("portfolio_sync fallo: %s", _exc)
 
             reporter.report(build_snapshot("running", rm, om))
 
