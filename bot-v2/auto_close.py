@@ -160,11 +160,12 @@ class AutoClose:
         )
 
     def run(self):
+        logger.info("AutoClose: run() invocado.")
         cfg = fetch_bot_config() or {}
         tp = _safe_float(cfg.get("take_profit"))
         sl = _safe_float(cfg.get("stop_loss"))
         if tp is None and sl is None:
-            logger.debug("AutoClose: sin TP/SL configurados, skip.")
+            logger.info("AutoClose: sin TP/SL en BotConfig, skip.")
             return 0
 
         positions = list_records("Position", sort="-updated_date", limit=200) or []
