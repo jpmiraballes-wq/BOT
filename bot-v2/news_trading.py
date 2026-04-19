@@ -18,6 +18,7 @@ Persistencia: usamos entities en Base44 para rastrear:
 """
 
 import hashlib
+import os
 import json
 import logging
 import re
@@ -176,7 +177,10 @@ def _classify_with_llm(news_title: str, news_desc: str,
     """
     if not BASE44_API_KEY:
         return None
-    url = "%s/api/apps/69e189f649c5d21cd42536bc/functions/invokeLLMProxy" % (BASE44_BASE_URL,)
+    url = os.getenv("BASE44_FUNCTIONS_URL", "").strip()
+    if not url:
+        logger.warning("BASE44_FUNCTIONS_URL no seteada; news_trading LLM desactivado.")
+        return None
 
     prompt = (
         "You are a prediction-market news analyst. Given a breaking-news headline "
