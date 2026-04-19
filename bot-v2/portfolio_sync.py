@@ -1,22 +1,22 @@
 """portfolio_sync.py - Sincroniza precios y PnL de Position abiertas.
 
-Cada N iteraciones del main loop se llama PortfolioSync.sync() que:
-  - Lee Position con status='open' desde Base44.
-  - Para cada una con token_id, pide el midpoint actual al CLOB.
-  - Actualiza current_price y pnl_unrealized mediante PUT en la entidad.
+Usa el endpoint publico del CLOB (sin firma) para obtener el mid de cada
+token, y actualiza via PUT cada Position con current_price + pnl_unrealized.
 
-pnl_unrealized se calcula como:
-    BUY : (current - entry) * size_tokens
-    SELL: (entry - current) * size_tokens
-
-Si size_tokens no esta, se aproxima desde size_usdc / entry_price.
+Funciona tanto en DRY_RUN (paper) como en live, porque no depende del
+ClobClient autenticado (que en paper es PaperBroker y no expone get_midpoint).
 """
 
 import logging
 
+import requests
+
 from base44_client import list_records, update_record
 
 logger = logging.getLogger(__name__)
+
+CLOB_PRICE_URL = "https://clob.polymarket.com/price"
+REQUEST_TIMEOUT = 8
 
 
 def _safe_float(v):
@@ -28,6 +28,32 @@ def _safe_float(v):
         return None
 
 
+def _fetch_side(token_id, side):
+    """Pide el mejor precio en un lado. None si falla."""
+    try:
+        resp = requests.get(
+            CLOB_PRICE_URL,
+            params={"token_id": token_id, "side": side},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return None
+        data = resp.json()
+        return _safe_float(data.get("price"))
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _fetch_midpoint(token_id):
+    if not token_id:
+        return None
+    buy = _fetch_side(token_id, "BUY")
+    sell = _fetch_side(token_id, "SELL")
+    if buy is not None and sell is not None and buy > 0 and sell > 0:
+        return (buy + sell) / 2.0
+    return buy if buy else sell
+
+
 def _compute_pnl(side, entry, current, size_tokens):
     if (side or "BUY").upper() == "SELL":
         return (entry - current) * size_tokens
@@ -37,28 +63,17 @@ def _compute_pnl(side, entry, current, size_tokens):
 class PortfolioSync:
     """Actualiza current_price y pnl_unrealized de las posiciones abiertas."""
 
-    def __init__(self, clob_client):
+    def __init__(self, clob_client=None):
+        # clob_client se acepta por compatibilidad pero no se usa.
         self.clob = clob_client
 
-    def _get_midpoint(self, token_id):
-        if not token_id or self.clob is None:
-            return None
-        try:
-            resp = self.clob.get_midpoint(token_id)
-            if isinstance(resp, dict):
-                mid = resp.get("mid") or resp.get("midpoint")
-            else:
-                mid = resp
-            return _safe_float(mid)
-        except Exception as exc:
-            logger.debug("get_midpoint(%s) fallo: %s",
-                         str(token_id)[:10], exc)
-            return None
-
     def sync(self):
-        """Actualiza precio/PnL de las positions abiertas. Devuelve #tocadas."""
         positions = list_records("Position", sort="-updated_date", limit=200) or []
         updated = 0
+        skipped_no_token = 0
+        skipped_no_price = 0
+        skipped_no_change = 0
+        checked = 0
 
         for pos in positions:
             if pos.get("status") != "open":
@@ -66,14 +81,17 @@ class PortfolioSync:
             pos_id = pos.get("id")
             token_id = pos.get("token_id")
             if not pos_id or not token_id:
+                skipped_no_token += 1
                 continue
 
             entry = _safe_float(pos.get("entry_price"))
             if entry is None or entry <= 0:
                 continue
 
-            current = self._get_midpoint(token_id)
-            if current is None:
+            checked += 1
+            current = _fetch_midpoint(token_id)
+            if current is None or current <= 0:
+                skipped_no_price += 1
                 continue
 
             size_tokens = _safe_float(pos.get("size_tokens"))
@@ -85,7 +103,8 @@ class PortfolioSync:
 
             prev = _safe_float(pos.get("current_price"))
             if prev is not None and abs(prev - current) < 1e-4:
-                continue  # sin cambio apreciable, evita spam de writes
+                skipped_no_change += 1
+                continue
 
             ok = update_record(
                 "Position", pos_id,
@@ -94,9 +113,14 @@ class PortfolioSync:
             )
             if ok:
                 updated += 1
-                logger.info("Position %s: %.3f -> %.3f, pnl=%.2f",
-                            str(pos_id)[:8], prev or 0.0, current, pnl)
+                logger.info(
+                    "Position %s (%s): %.4f -> %.4f pnl=%+.2f",
+                    str(pos_id)[:8], (pos.get("side") or "")[:3],
+                    prev or 0.0, current, pnl,
+                )
 
-        if updated:
-            logger.info("PortfolioSync: %d posiciones actualizadas.", updated)
+        logger.info(
+            "PortfolioSync: checked=%d updated=%d no_token=%d no_price=%d no_change=%d",
+            checked, updated, skipped_no_token, skipped_no_price, skipped_no_change,
+        )
         return updated
