@@ -42,3 +42,9 @@ def log_warning(message, module, extra=None):
     payload = dict(extra or {})
     payload["timestamp"] = now_iso()
     _emit("warn", message, module=module, data=payload)
+
+
+def log_error(message, module, extra=None):
+    payload = dict(extra or {})
+    payload["timestamp"] = now_iso()
+    _emit("error", message, module=module, data=payload)
