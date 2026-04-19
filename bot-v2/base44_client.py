@@ -50,3 +50,57 @@ def create_record(entity, payload):
     except requests.RequestException as exc:
         logger.error("Fallo Base44 %s: %s", entity, exc)
         return None
+
+
+# --- portfolio_sync helpers ---
+def _base_entity_url(entity):
+    return "%s/api/apps/%s/entities/%s" % (BASE44_BASE_URL, BASE44_APP_ID, entity)
+
+
+def list_records(entity, sort="-created_date", limit=100):
+    """Lista registros de una entidad. Devuelve [] ante cualquier fallo."""
+    if not BASE44_API_KEY:
+        return []
+    url = _base_entity_url(entity)
+    params = {"sort": sort, "limit": limit}
+    try:
+        resp = requests.get(url, params=params, headers=_headers(),
+                            timeout=REQUEST_TIMEOUT)
+        if resp.status_code >= 400:
+            logger.warning("Base44 list %s %d: %s",
+                           entity, resp.status_code, resp.text[:200])
+            return []
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        return data.get("data") or data.get("records") or []
+    except requests.RequestException as exc:
+        logger.warning("Base44 list %s fallo: %s", entity, exc)
+        return []
+
+
+def update_record(entity, record_id, patch):
+    """Actualiza un registro por id (PUT; fallback PATCH si 404/405)."""
+    if not BASE44_API_KEY or not record_id:
+        return None
+    url = "%s/%s" % (_base_entity_url(entity), record_id)
+    for method in ("PUT", "PATCH"):
+        try:
+            resp = requests.request(method, url, json=patch,
+                                    headers=_headers(),
+                                    timeout=REQUEST_TIMEOUT)
+            if resp.status_code in (404, 405) and method == "PUT":
+                continue
+            if resp.status_code >= 400:
+                logger.error("Base44 update %s %d: %s",
+                             entity, resp.status_code, resp.text[:200])
+                return None
+            try:
+                return resp.json()
+            except ValueError:
+                return {"status": "ok"}
+        except requests.RequestException as exc:
+            logger.error("Fallo update Base44 %s/%s: %s",
+                         entity, record_id, exc)
+            return None
+    return None
