@@ -113,6 +113,15 @@ def _trade_stats():
         logger.warning("trade_stats fallo: %s", _exc)
         trades = []
 
+    def _field(rec, key):
+        # Base44 externo envuelve campos en rec["data"]; fallback a raiz.
+        if isinstance(rec, dict):
+            d = rec.get("data")
+            if isinstance(d, dict) and key in d:
+                return d.get(key)
+            return rec.get(key)
+        return None
+
     today = _dt.now(_tz.utc).date()
     total_pnl = 0.0
     daily_pnl = 0.0
@@ -120,17 +129,17 @@ def _trade_stats():
     total_closed = 0
 
     for t in trades:
-        if t.get("status") != "closed":
+        if _field(t, "status") != "closed":
             continue
         try:
-            pnl = float(t.get("pnl") or 0.0)
+            pnl = float(_field(t, "pnl") or 0.0)
         except (TypeError, ValueError):
             continue
         total_pnl += pnl
         total_closed += 1
         if pnl > 0:
             wins += 1
-        exit_time = t.get("exit_time") or t.get("entry_time")
+        exit_time = _field(t, "exit_time") or _field(t, "entry_time")
         if exit_time:
             try:
                 d = _dt.fromisoformat(exit_time.replace("Z", "+00:00")).date()
