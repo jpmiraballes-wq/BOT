@@ -347,3 +347,100 @@ class OrderManager:
                 orders_per_market[market_id] = (
                     orders_per_market.get(market_id, 0) + len(created)
                 )
+
+    # ------------------------------------------------------------ news_trading
+    def place_limit_buy(self, token_id: str, price: float, shares: float,
+                        strategy: str = "news_trading") -> Optional[str]:
+        """BUY limite simple para estrategias distintas de MM.
+
+        Devuelve order_id o None. No registra en PositionTracker (lo hace la
+        propia estrategia si le interesa). Lo registra en self._orders para
+        tracking local y cancel_stale_orders.
+        """
+        assert self.client is not None
+        price = self._round_price(price)
+        size = self._round_size(shares)
+        if size < 5.0:
+            logger.info("place_limit_buy: size %.2f < 5, skip", size)
+            return None
+        try:
+            args = OrderArgs(token_id=token_id, price=price, size=size, side=BUY)
+            signed = self.client.create_order(args)
+            resp = self.client.post_order(signed, OrderType.GTC)
+            order_id = (resp or {}).get("orderID") or (resp or {}).get("orderId")
+            if not order_id:
+                logger.warning("place_limit_buy sin orderID: %s", resp)
+                return None
+            self._orders[order_id] = {
+                "market_id": None,
+                "token_id": token_id,
+                "side": BUY,
+                "price": price,
+                "size": size,
+                "ts": time.time(),
+                "strategy": strategy,
+            }
+            log_decision(
+                reason="limit_buy",
+                market=token_id[:10],
+                strategy=strategy,
+                edge=0.0,
+                size=size * price,
+                extra={"price": price, "shares": size},
+            )
+            return order_id
+        except Exception as exc:
+            logger.error("place_limit_buy fallo token=%s: %s", token_id[:10], exc)
+            return None
+
+    def close_position_market(self, token_id: str, shares: float,
+                              strategy: str = "news_trading") -> Optional[Dict[str, Any]]:
+        """Cierra una posicion vendiendo al mejor bid (market-like).
+
+        Pide el orderbook, encuentra best bid y coloca SELL limite a ese precio.
+        Devuelve {"order_id": str, "avg_price": float} o None si falla.
+        """
+        assert self.client is not None
+        size = self._round_size(shares)
+        if size < 5.0:
+            logger.info("close_position_market: shares %.2f < 5, skip", size)
+            return None
+        try:
+            # Best bid via orderbook publico (no requiere auth)
+            import requests as _rq
+            resp = _rq.get("https://clob.polymarket.com/book",
+                          params={"token_id": token_id}, timeout=10)
+            if resp.status_code != 200:
+                logger.warning("close: book HTTP %d", resp.status_code)
+                return None
+            book = resp.json()
+            bids = book.get("bids") or []
+            parsed = [(float(b.get("price", 0)), float(b.get("size", 0)))
+                      for b in bids]
+            parsed = [p for p in parsed if p[0] > 0]
+            if not parsed:
+                logger.warning("close: sin bids token=%s", token_id[:10])
+                return None
+            parsed.sort(key=lambda x: x[0], reverse=True)
+            best_bid = parsed[0][0]
+            price = self._round_price(best_bid)
+
+            args = OrderArgs(token_id=token_id, price=price, size=size, side=SELL)
+            signed = self.client.create_order(args)
+            post = self.client.post_order(signed, OrderType.GTC)
+            order_id = (post or {}).get("orderID") or (post or {}).get("orderId")
+            if not order_id:
+                logger.warning("close_position_market sin orderID: %s", post)
+                return None
+            log_decision(
+                reason="close_market",
+                market=token_id[:10],
+                strategy=strategy,
+                edge=0.0,
+                size=size * price,
+                extra={"price": price, "shares": size},
+            )
+            return {"order_id": order_id, "avg_price": price}
+        except Exception as exc:
+            logger.error("close_position_market fallo token=%s: %s", token_id[:10], exc)
+            return None
