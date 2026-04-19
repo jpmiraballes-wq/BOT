@@ -64,6 +64,8 @@ MAX_POSITIONS_CONCURRENT = 4             # safety: no mas de 4 posiciones news a
 MIN_SHARE_SIZE_USDC = 5.0                # no entrar con menos de $5
 KELLY_BASE_FRACTION = 0.25               # base kelly; se multiplica por conf^2
 SIMILARITY_TOKEN_OVERLAP = 0.6           # 60% palabras comunes = misma noticia
+MAX_LLM_CALLS_PER_CYCLE = 8              # throttle: max titulares clasificados por ciclo
+LLM_SLEEP_SEC = 0.8                      # pausa entre llamadas para no saturar rate-limit
 
 
 # ---------------------------------------------------------------------------
@@ -330,10 +332,17 @@ class NewsTrader:
         if not new_items:
             return
 
-        # Clasifica solo titulares totalmente nuevos (primera vista)
+        # Clasifica solo titulares totalmente nuevos (primera vista).
+        # Throttle: maximo MAX_LLM_CALLS_PER_CYCLE por ciclo + pausa entre llamadas
+        # para evitar rate-limit 500 del proxy InvokeLLM.
         markets_snapshot = _summary_market_list(_fetch_top_markets())
-        for item in new_items:
+        to_classify = new_items[:MAX_LLM_CALLS_PER_CYCLE]
+        if len(new_items) > MAX_LLM_CALLS_PER_CYCLE:
+            logger.info("news_trading: %d titulares nuevos, clasificando top %d este ciclo",
+                        len(new_items), MAX_LLM_CALLS_PER_CYCLE)
+        for item in to_classify:
             self._classify_and_record(item, markets_snapshot)
+            time.sleep(LLM_SLEEP_SEC)
 
         # Busca confirmaciones y ejecuta
         self._check_and_execute()
