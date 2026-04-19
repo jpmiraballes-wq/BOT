@@ -69,18 +69,29 @@ class CapitalAllocator:
             if resp.status_code >= 400:
                 logger.error("StrategyCapital list %d: %s",
                              resp.status_code, resp.text[:200])
-                return
+                return  # mantiene cache previo
             data = resp.json()
             records = data["data"] if isinstance(data, dict) and "data" in data else data
             if not isinstance(records, list):
-                return
-            self._cache = {r["name"]: r for r in records if r.get("name")}
+                logger.warning("StrategyCapital response inesperada: %s", type(records).__name__)
+                return  # mantiene cache previo
+            new_cache = {r["name"]: r for r in records if r.get("name")}
+            if not new_cache:
+                logger.warning("StrategyCapital devolvio 0 registros; conservando cache previo (%d).",
+                               len(self._cache))
+                return  # evita quedar con cache vacio
+            self._cache = new_cache
             self._cache_ts = time.time()
         except requests.RequestException as exc:
             logger.error("CapitalAllocator refresh fallo: %s", exc)
+            # mantiene cache previo
 
     def get(self, strategy: str) -> Optional[Dict[str, Any]]:
         self._refresh()
+        # Si falto la estrategia en cache, forzamos un refresh para no devolver None
+        # por un cache vacio (p.ej. tras un error transiente del API).
+        if strategy not in self._cache:
+            self._refresh(force=True)
         return self._cache.get(strategy)
 
     def is_enabled(self, strategy: str) -> bool:
