@@ -177,10 +177,7 @@ def _classify_with_llm(news_title: str, news_desc: str,
     """
     if not BASE44_API_KEY:
         return None
-    url = os.getenv("BASE44_FUNCTIONS_URL", "").strip()
-    if not url:
-        logger.warning("BASE44_FUNCTIONS_URL no seteada; news_trading LLM desactivado.")
-        return None
+    url = "https://69e189f649c5d21cd42536bc.base44.app/functions/invokeLLMProxy"
 
     prompt = (
         "You are a prediction-market news analyst. Given a breaking-news headline "
