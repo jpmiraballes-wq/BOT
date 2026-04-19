@@ -210,6 +210,12 @@ class AutoClose:
 
             self._close_position(pos, current, pnl_usdc, pnl_pct, reason)
             closed += 1
+            if closed >= MAX_CLOSES_PER_RUN:
+                logger.info(
+                    "AutoClose: alcanzado MAX_CLOSES_PER_RUN=%d, resto se cerrara en el siguiente ciclo.",
+                    MAX_CLOSES_PER_RUN,
+                )
+                break
 
         logger.info(
             "AutoClose: tp=%s sl=%s checked=%d closed=%d mode=%s",
