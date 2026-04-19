@@ -1,5 +1,6 @@
 """base44_client.py - Cliente HTTP para escribir en Base44."""
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -27,6 +28,15 @@ def create_record(entity, payload):
     if not BASE44_API_KEY:
         logger.debug("BASE44_API_KEY vacio; omitiendo %s", entity)
         return None
+    # LogEvent.data en la app externa es string; si viene dict, serializar.
+    if entity == "LogEvent" and isinstance(payload, dict):
+        raw = payload.get("data")
+        if isinstance(raw, (dict, list)):
+            payload = dict(payload)
+            try:
+                payload["data"] = json.dumps(raw, default=str)
+            except (TypeError, ValueError):
+                payload["data"] = str(raw)
     try:
         resp = requests.post(_endpoint(entity), json=payload,
                              headers=_headers(), timeout=REQUEST_TIMEOUT)
