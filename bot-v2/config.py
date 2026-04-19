@@ -21,8 +21,10 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY", "").strip()
 BASE44_API_KEY = os.getenv("BASE44_API_KEY", "").strip()
 
 # Polymarket proxy/funder (para firmar ordenes CLOB). Default: WALLET_ADDRESS.
-POLYMARKET_FUNDER = os.getenv("POLYMARKET_FUNDER", WALLET_ADDRESS).strip()
+POLYMARKET_FUNDER = os.getenv("POLYMARKET_FUNDER", "0x7c6a42cb6ae0d63a7073eefc1a5e04f102facbfb").strip()
 POLYMARKET_PROXY_ADDRESS = os.getenv("POLYMARKET_PROXY_ADDRESS", WALLET_ADDRESS).strip()
+# 0=EOA, 1=Polymarket email proxy, 2=Gnosis Safe (MetaMask login).
+POLYMARKET_SIGNATURE_TYPE = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "2"))
 
 # ---------------------------------------------------------------------------
 # Base44 (reporting API)
