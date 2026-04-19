@@ -17,9 +17,11 @@ from typing import Any, Dict, List
 from capital_allocator import CapitalAllocator
 from circuit_breakers import CircuitBreakers
 from config import (
-    CAPITAL_USDC, LOG_PATH, MAIN_LOOP_INTERVAL_SECONDS,
+    CAPITAL_USDC, DRY_RUN, LOG_PATH, MAIN_LOOP_INTERVAL_SECONDS,
     SHUTDOWN_FLAG_PATH, validate_config,
 )
+from paper_broker import PaperBroker
+from paper_daily_report import PaperDailyReporter
 from decision_logger import log_decision, log_warning
 from kelly import KellySizer
 from logical_arb import scan_logical_arb
@@ -132,7 +134,7 @@ def main() -> int:
     logger.info("=" * 60)
 
     try:
-        validate_config()
+        (None if DRY_RUN else validate_config())
     except EnvironmentError as exc:
         logger.critical(str(exc))
         return 2
@@ -142,7 +144,13 @@ def main() -> int:
 
     rm = RiskManager()
     reporter = Reporter()
-    om = OrderManager()
+    if DRY_RUN:
+        logger.info("=== MODO PAPER TRADING ACTIVO (DRY_RUN=true) ===")
+        om = PaperBroker()
+        paper_reporter = PaperDailyReporter(om)
+    else:
+        om = OrderManager()
+        paper_reporter = None
     sizer = KellySizer()
     cb = CircuitBreakers()
     allocator = CapitalAllocator()
@@ -245,6 +253,15 @@ def main() -> int:
                     logger.warning("Cap de exposicion superado.")
                     om.cancel_all()
                     reporter.report(build_snapshot("paused", rm, om, notes=msg), force=True)
+                    if paper_reporter is not None:
+                        try:
+                            paper_reporter.tick()
+                            if paper_reporter.should_stop():
+                                logger.info("[PAPER] duracion alcanzada, saliendo.")
+                                break
+                        except Exception as _exc:
+                            logger.error("paper_reporter tick fallo: %s", _exc)
+
                     time.sleep(MAIN_LOOP_INTERVAL_SECONDS)
                     continue
 
