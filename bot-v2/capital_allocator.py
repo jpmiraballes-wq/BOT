@@ -109,21 +109,37 @@ class CapitalAllocator:
         return [r for r in self._cache.values() if r.get("enabled")]
 
     # --------------------------------------------------------------- write
-    def _patch(self, record_id: str, payload: Dict[str, Any]) -> bool:
+    def _put(self, record_id: str, payload: Dict[str, Any]) -> bool:
+        """Base44 API no soporta PATCH; hay que hacer PUT con el doc completo.
+
+        Hace GET del registro actual, mergea el payload encima y PUT.
+        """
         try:
-            resp = requests.patch(
-                self._endpoint(record_id), json=payload,
+            get_resp = requests.get(
+                self._endpoint(record_id), headers=self._headers(),
+                timeout=REQUEST_TIMEOUT,
+            )
+            if get_resp.status_code >= 400:
+                logger.error("StrategyCapital get %d: %s",
+                             get_resp.status_code, get_resp.text[:200])
+                return False
+            current = get_resp.json() or {}
+            # Quitar campos de solo-lectura que rechaza el PUT.
+            for k in ("id", "created_date", "updated_date", "created_by"):
+                current.pop(k, None)
+            current.update(payload)
+            resp = requests.put(
+                self._endpoint(record_id), json=current,
                 headers=self._headers(), timeout=REQUEST_TIMEOUT,
             )
             if resp.status_code >= 400:
-                logger.error("StrategyCapital patch %d: %s",
+                logger.error("StrategyCapital put %d: %s",
                              resp.status_code, resp.text[:200])
                 return False
-            # Invalida cache para forzar refresh en la proxima lectura.
             self._cache_ts = 0.0
             return True
         except requests.RequestException as exc:
-            logger.error("StrategyCapital patch fallo: %s", exc)
+            logger.error("StrategyCapital put fallo: %s", exc)
             return False
 
     def report_deployed(self, strategy: str, deployed_usdc: float,
@@ -139,7 +155,7 @@ class CapitalAllocator:
         }
         if notes is not None:
             payload["notes"] = notes
-        return self._patch(rec["id"], payload)
+        return self._put(rec["id"], payload)
 
     def record_trade(self, strategy: str, pnl: float) -> bool:
         """Suma pnl al pnl_today/total e incrementa contadores."""
@@ -153,13 +169,13 @@ class CapitalAllocator:
             "trades_today": int(rec.get("trades_today") or 0) + 1,
             "trades_total": int(rec.get("trades_total") or 0) + 1,
         }
-        return self._patch(rec["id"], payload)
+        return self._put(rec["id"], payload)
 
     def reset_daily(self) -> int:
         """Resetea pnl_today y trades_today (llamar a las 00:00 UTC)."""
         self._refresh(force=True)
         count = 0
         for rec in list(self._cache.values()):
-            if self._patch(rec["id"], {"pnl_today": 0.0, "trades_today": 0}):
+            if self._put(rec["id"], {"pnl_today": 0.0, "trades_today": 0}):
                 count += 1
         return count
