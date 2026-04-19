@@ -1,12 +1,9 @@
-"""main.py - Loop principal del bot de Polymarket (v3.0 multi-estrategia).
+"""main.py - Loop principal del bot de Polymarket (v3.1 multi-estrategia).
 
-Cambios v3.0:
-  - Integra CapitalAllocator: el MM lee su presupuesto de
-    StrategyCapital["market_making"] en vez de CAPITAL_USDC global.
-  - Cada ciclo reporta capital desplegado a la entity.
-  - Si la estrategia esta 'enabled=false' en el dashboard, el MM se pausa
-    sin tocar el resto del bot (permite activar/desactivar por UI).
-  - Prepara el loop para enchufar logical_arb y otras estrategias.
+Cambios v3.1:
+  - Integra umbrella_executor: tras detectar oportunidades de logical_arb,
+    ejecuta hasta 2 umbrella_over_children por ciclo con ordenes pseudo-FOK.
+  - Resto identico a v3.0.
 """
 
 import logging
@@ -30,9 +27,11 @@ from market_scanner import scan_markets
 from order_manager import OrderManager
 from reporter import Reporter
 from risk_manager import RiskManager
+from strategies.umbrella_executor import run_umbrella_cycle
 
 
 MM_STRATEGY = "market_making"
+ARB_STRATEGY = "logical_arb"
 
 
 def setup_logging() -> None:
@@ -95,14 +94,11 @@ def build_snapshot(mode, rm, om, notes=""):
 
 
 def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
-    """Genera la size_fn del OrderManager usando Kelly capado por el
-    presupuesto de la estrategia (budget_fn() devuelve allocated-deployed)."""
     def _size(opp):
         mid = float(opp.get("mid") or 0.0)
         edge = float(opp.get("spread_pct") or 0.0) / 2.0
         sizer.record_tick(opp["market_id"], mid)
 
-        # Capital disponible = min(risk manager, presupuesto de la estrategia)
         rm_capital = rm.deployable_capital(deployed_fn())
         strategy_budget = budget_fn()
         capital_available = min(rm_capital, strategy_budget)
@@ -129,7 +125,7 @@ def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
 def main() -> int:
     setup_logging()
     logger.info("=" * 60)
-    logger.info("Polymarket Multi-Strategy Bot v3.0 - allocator activo")
+    logger.info("Polymarket Multi-Strategy Bot v3.1 - umbrella executor activo")
     logger.info("=" * 60)
 
     try:
@@ -148,13 +144,10 @@ def main() -> int:
     cb = CircuitBreakers()
     allocator = CapitalAllocator()
 
-    # Log inicial del capital asignado al MM
     mm_allocated = allocator.get_allocated(MM_STRATEGY)
-    mm_enabled = allocator.is_enabled(MM_STRATEGY)
-    logger.info("Market Making: allocated=%.2f USDC, enabled=%s",
-                mm_allocated, mm_enabled)
-    if mm_allocated <= 0:
-        logger.warning("StrategyCapital[%s] no configurado o allocated=0", MM_STRATEGY)
+    arb_allocated = allocator.get_allocated(ARB_STRATEGY)
+    logger.info("MM allocated=%.2f USDC | ArbLogic allocated=%.2f USDC",
+                mm_allocated, arb_allocated)
 
     try:
         om.connect()
@@ -170,7 +163,6 @@ def main() -> int:
         return compute_capital_deployed(om.get_open_orders())
 
     def _mm_budget():
-        """Capital disponible para MM en este momento."""
         return allocator.get_available(MM_STRATEGY)
 
     size_fn = build_size_fn(sizer, rm, cb, _current_deployed, _mm_budget)
@@ -200,7 +192,6 @@ def main() -> int:
                 time.sleep(max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed))
                 continue
 
-            # Cerrar posiciones que alcancen TP/SL (todas las estrategias).
             om.close_profitable_positions()
 
             # ---- MARKET MAKING ----
@@ -236,22 +227,31 @@ def main() -> int:
                     logger.info("Sin capital desplegable (rm); solo mantenimiento.")
                     om.cancel_stale_orders()
 
-            # Reporta capital desplegado actual al allocator.
             mm_deployed = _current_deployed()
             allocator.report_deployed(MM_STRATEGY, mm_deployed)
 
-            # ---- LOGICAL ARB (best-effort, no bloquea el loop si falla) ----
+            # ---- LOGICAL ARB (detection + umbrella execution) ----
             try:
                 arb_opps = scan_logical_arb()
                 if arb_opps:
                     log_decision(
                         reason="logical_arb_detected",
                         market="%d signals" % len(arb_opps),
-                        strategy="logical_arb",
+                        strategy=ARB_STRATEGY,
                         extra={"top": arb_opps[:3]},
                     )
+                    # Solo ejecuta umbrella. binary_under y monotonic quedan
+                    # como deteccion hasta tener executor dedicado.
+                    if allocator.is_enabled(ARB_STRATEGY):
+                        results = run_umbrella_cycle(om, arb_opps, max_per_cycle=2)
+                        for r in results:
+                            if r.get("status") == "executed":
+                                logger.info("Umbrella arb ejecutado: %s", r)
+                            elif r.get("status") == "rolled_back":
+                                logger.warning("Umbrella rollback: %s", r)
             except Exception as exc:
-                logger.error("logical_arb fallo: %s", exc)
+                logger.error("logical_arb cycle fallo: %s", exc)
+                logger.debug(traceback.format_exc())
 
             reporter.report(build_snapshot("running", rm, om))
 
