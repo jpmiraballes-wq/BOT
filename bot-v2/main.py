@@ -24,6 +24,8 @@ from decision_logger import log_decision, log_warning
 from kelly import KellySizer
 from logical_arb import scan_logical_arb
 from news_trading import NewsTrader
+from stat_arb import StatArb
+from resolution_snipe import ResolutionSniper
 from market_scanner import scan_markets
 from order_manager import OrderManager
 from reporter import Reporter
@@ -166,6 +168,22 @@ def main() -> int:
         logger.error("No se pudo inicializar NewsTrader: %s", _exc)
         news_trader = None
 
+    # ----- StatArb (Fase 3) -----
+    try:
+        stat_arb = StatArb(om, allocator)
+        logger.info("StatArb activo.")
+    except Exception as _exc:
+        logger.error("No se pudo inicializar StatArb: %s", _exc)
+        stat_arb = None
+
+    # ----- ResolutionSniper (Fase 4) -----
+    try:
+        res_sniper = ResolutionSniper(om, allocator)
+        logger.info("ResolutionSniper activo.")
+    except Exception as _exc:
+        logger.error("No se pudo inicializar ResolutionSniper: %s", _exc)
+        res_sniper = None
+
     reporter.report(build_snapshot("running", rm, om), force=True)
 
     def _current_deployed():
@@ -245,6 +263,18 @@ def main() -> int:
                     news_trader.run_cycle()
                 except Exception as _exc:
                     logger.error("news_trading fallo: %s", _exc)
+
+            if stat_arb is not None:
+                try:
+                    stat_arb.run_cycle()
+                except Exception as _exc:
+                    logger.error("stat_arb fallo: %s", _exc)
+
+            if res_sniper is not None:
+                try:
+                    res_sniper.run_cycle()
+                except Exception as _exc:
+                    logger.error("resolution_snipe fallo: %s", _exc)
 
             try:
                 arb_opps = scan_logical_arb()
