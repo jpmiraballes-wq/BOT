@@ -128,20 +128,25 @@ class CapitalAllocator:
     def _put(self, record_id: str, payload: Dict[str, Any]) -> bool:
         """Base44 API no soporta PATCH; hay que hacer PUT con el doc completo.
 
-        Hace GET del registro actual, mergea el payload encima y PUT.
+        IMPORTANTE: la Base44 external API devuelve {} en GET por id
+        individual, asi que no podemos releer el record antes del PUT
+        (eso borraba allocated_usdc). Mergeamos sobre self._cache que
+        ya tiene el record completo tras el _refresh inicial.
         """
         try:
-            get_resp = requests.get(
-                self._endpoint(record_id), headers=self._headers(),
-                timeout=REQUEST_TIMEOUT,
-            )
-            if get_resp.status_code >= 400:
-                logger.error("StrategyCapital get %d: %s",
-                             get_resp.status_code, get_resp.text[:200])
+            # Asegura cache fresco y localiza el record por id.
+            self._refresh()
+            current = None
+            for rec in self._cache.values():
+                if rec.get("id") == record_id:
+                    current = dict(rec)
+                    break
+            if current is None:
+                logger.error("StrategyCapital _put: record %s no esta en cache", record_id)
                 return False
-            current = get_resp.json() or {}
             # Quitar campos de solo-lectura que rechaza el PUT.
-            for k in ("id", "created_date", "updated_date", "created_by"):
+            for k in ("id", "created_date", "updated_date", "created_by",
+                      "created_by_id", "is_sample"):
                 current.pop(k, None)
             current.update(payload)
             resp = requests.put(
