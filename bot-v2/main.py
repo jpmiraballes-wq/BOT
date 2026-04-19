@@ -36,7 +36,7 @@ from bot_config_reader import fetch_bot_config  # dashboard control
 from strategies.umbrella_executor import run_umbrella_cycle
 from portfolio_sync import PortfolioSync
 
-PORTFOLIO_SYNC_EVERY_N_ITERATIONS = 5
+PORTFOLIO_SYNC_EVERY_N_ITERATIONS = 2
 
 
 MM_STRATEGY = "market_making"
