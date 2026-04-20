@@ -426,7 +426,16 @@ def main() -> int:
         logger.error("No se pudo inicializar ResolutionSniper: %s", _exc)
         res_sniper = None
 
-    reporter.report(build_snapshot("running", rm, om), force=True)
+    # Sync capital real desde BotConfig antes del primer heartbeat.
+    try:
+        _initial_cfg = fetch_bot_config() or {}
+        rm.update_capital(_initial_cfg.get("capital_usdc"))
+    except Exception as _sync_exc:
+        logger.warning("Sync inicial de capital fallo: %s", _sync_exc)
+        _initial_cfg = {}
+    reporter.report(build_snapshot("running", rm, om,
+                                   live_capital=_initial_cfg.get("capital_usdc")),
+                    force=True)
 
     def _current_deployed():
         return compute_capital_deployed(om.get_open_orders())
@@ -468,6 +477,11 @@ def main() -> int:
         except Exception as _cfg_exc:
             logger.warning("fetch_bot_config fallo: %s", _cfg_exc)
             bot_cfg = {}
+        # Sync equity con capital real del BotConfig cada ciclo.
+        try:
+            rm.update_capital(bot_cfg.get("capital_usdc"))
+        except Exception as _sync_exc:
+            logger.warning("rm.update_capital fallo: %s", _sync_exc)
         if iteration == 1 or iteration % 5 == 0:
             logger.info(
                 "BotConfig leido: paused=%s emergency_stop=%s mode=%s id=%s",
