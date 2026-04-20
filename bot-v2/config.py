@@ -37,7 +37,7 @@ PAPER_DURATION_DAYS = float(os.getenv("PAPER_DURATION_DAYS", "7"))
 # Base44 (reporting API)
 # APP_ID hardcodeado para evitar desincronizacion entre VPS.
 # ---------------------------------------------------------------------------
-BASE44_APP_ID = "69e189f649c5d21cd42536bc"
+BASE44_APP_ID = "69e1e225a40599eb44ced81e"
 BASE44_BASE_URL = "https://app.base44.com"
 BASE44_ENTITY = "SystemState"
 REPORT_INTERVAL_SECONDS = 5 * 60
@@ -45,7 +45,7 @@ REPORT_INTERVAL_SECONDS = 5 * 60
 # ---------------------------------------------------------------------------
 # Capital y riesgo
 # ---------------------------------------------------------------------------
-CAPITAL_USDC = 30.0
+CAPITAL_USDC = 60.0
 MAX_POSITION_PCT = 0.05
 MIN_SPREAD_PCT = 0.02
 MAX_DRAWDOWN_PCT = 0.15
