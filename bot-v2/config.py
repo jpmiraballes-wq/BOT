@@ -81,7 +81,7 @@ LOGICAL_ARB_UNDER_THRESHOLD = 0.97
 # ---------------------------------------------------------------------------
 # Modo
 # ---------------------------------------------------------------------------
-BUY_ONLY_MODE = True
+BUY_ONLY_MODE = False  # market-making real (BUY+SELL)
 PROFIT_TARGET_PCT = 0.15
 STOP_LOSS_PCT = -0.30
 
