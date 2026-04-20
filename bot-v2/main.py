@@ -49,7 +49,7 @@ NEWS_TRADING_EVERY_N_ITERATIONS = 3
 DAILY_DRAWDOWN_AUTOPAUSE_PCT = -0.05
 
 
-MM_STRATEGY = "market_making"
+MM_STRATEGY = "market_maker"
 ARB_STRATEGY = "logical_arb"
 
 
@@ -255,6 +255,7 @@ def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
         kelly_size = sizer.compute_size(
             market_id=opp["market_id"], edge=edge,
             capital_available=capital_available, price=mid,
+            strategy=MM_STRATEGY,
         )
         factor = cb.get_size_factor(mid)
         final = kelly_size * factor
