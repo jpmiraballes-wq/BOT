@@ -47,6 +47,40 @@ MM_STRATEGY = "market_making"
 ARB_STRATEGY = "logical_arb"
 
 
+def _refresh_kelly_caps(kelly_sizer):
+    """Lee StrategySizing desde Base44 y actualiza los caps del Kelly.
+
+    Silencioso ante errores: si falla, se mantiene el cap anterior
+    (o el default MAX_POSITION_PCT de config).
+    """
+    try:
+        import os
+        import requests
+        api_key = os.environ.get("EXTERNAL_BASE44_API_KEY") or os.environ.get("BASE44_API_KEY")
+        app_id = os.environ.get("EXTERNAL_BASE44_APP_ID", "69e1e225a40599eb44ced81e")
+        base = os.environ.get("BASE44_BASE_URL", "https://app.base44.com")
+        if not api_key:
+            return
+        url = "%s/api/apps/%s/entities/StrategySizing?limit=50" % (base, app_id)
+        r = requests.get(url, headers={"api_key": api_key}, timeout=10)
+        if r.status_code >= 400:
+            return
+        records = r.json() if isinstance(r.json(), list) else (r.json().get("records") or r.json().get("data") or [])
+        caps = {}
+        for rec in records:
+            data = rec.get("data") if isinstance(rec.get("data"), dict) else rec
+            strat = data.get("strategy")
+            pct = data.get("position_size_pct")
+            if strat and pct is not None:
+                caps[strat] = float(pct)
+        if caps:
+            kelly_sizer.set_strategy_caps(caps)
+    except Exception as exc:
+        logging.getLogger(__name__).debug("refresh_kelly_caps fallo: %s", exc)
+
+
+
+
 def setup_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -264,6 +298,7 @@ def main() -> int:
     om = OrderManager()
     paper_reporter = None
     sizer = KellySizer()
+    _refresh_kelly_caps(sizer)  # carga inicial desde Base44
     cb = CircuitBreakers()
     allocator = CapitalAllocator()
 
@@ -334,6 +369,9 @@ def main() -> int:
     iteration = 0
     while not _stop_requested:
         iteration += 1
+        # Refrescar caps Kelly cada 60 iteraciones desde Base44
+        if iteration % 60 == 0:
+            _refresh_kelly_caps(sizer)
         loop_started = time.time()
         # ---- Control remoto desde dashboard (BotConfig) ----
         try:
