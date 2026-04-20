@@ -248,10 +248,11 @@ class OrderManager:
                                 side, token_id[:10], price, size_per_side,
                                 market_id, order_id)
                     if side == BUY:
-                        self.tracker.register_buy(
+                        self.tracker.register_buy(  # tracking-meta-v1
                             market_id=market_id, token_id=token_id,
                             question=question, entry_price=price,
                             size_tokens=size_per_side, order_id=order_id,
+                            strategy="market_maker",
                         )
                 else:
                     logger.warning("Respuesta sin orderID: %s", resp)
