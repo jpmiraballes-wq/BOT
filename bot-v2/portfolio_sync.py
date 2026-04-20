@@ -16,6 +16,7 @@ get_order, simplemente actualiza precios como antes.
 """
 
 import logging
+from datetime import datetime, timezone
 
 import requests
 
@@ -92,10 +93,30 @@ class PortfolioSync:
 
     def _confirm_or_cancel_pending(self, pos):
         """Verifica una Position pending_fill. Devuelve accion aplicada."""
+        # PENDING_FILL_TIMEOUT_V1
         pos_id = pos.get("id")
         order_id = pos.get("order_id")
         info = self._order_status(order_id)
         if info is None:
+            # Fallback: si llevamos > 600s pending y no podemos
+            # consultar el CLOB, asumimos que la orden ya esta colocada y
+            # liberamos el flag para que auto_close pueda operar.
+            opened = pos.get("opened_at") or pos.get("created_date")
+            age_ok = False
+            if opened:
+                try:
+                    ts = datetime.fromisoformat(str(opened).replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - ts).total_seconds()
+                    age_ok = age > 600
+                except (ValueError, TypeError):
+                    age_ok = False
+            if age_ok:
+                update_record("Position", pos_id, {"pending_fill": False})
+                logger.info("pending_fill timeout liberado: pos=%s order=%s",
+                            str(pos_id)[:8], str(order_id)[:10])
+                return "timeout_cleared"
             return "unknown"
 
         if info["matched"] > 0:
