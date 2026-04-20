@@ -14,7 +14,10 @@ from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.clob_types import (
+    ApiCreds, OrderArgs, OrderType,
+    BalanceAllowanceParams, AssetType,
+)
 from py_clob_client.order_builder.constants import BUY, SELL
 
 from config import (
@@ -407,6 +410,32 @@ class OrderManager:
         if size < 5.0:
             logger.info("close_position_market: shares %.2f < 5, skip", size)
             return None
+
+        # Pre-check: balance CONDITIONAL real on-chain. Si el BUY original
+        # nunca filleo (limit LIVE con filled=0), el proxy no tiene tokens
+        # que vender y la SELL fallaria con "balance: 0, order amount: X".
+        try:
+            bal_resp = self.client.get_balance_allowance(
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=token_id,
+                )
+            )
+            raw_bal = (bal_resp or {}).get("balance", "0")
+            # El balance viene en unidades de 6 decimales (USDC-like).
+            available = float(raw_bal) / 1_000_000.0
+            if available < size:
+                logger.warning(
+                    "close SKIP: balance=%.4f < size=%.4f token=%s "
+                    "(probable BUY original con filled=0)",
+                    available, size, token_id[:10],
+                )
+                return None
+        except Exception as _exc:
+            logger.warning("close: get_balance_allowance fallo token=%s: %s",
+                           token_id[:10], _exc)
+            return None
+
         try:
             # Best bid via orderbook publico (no requiere auth)
             import requests as _rq
@@ -429,7 +458,9 @@ class OrderManager:
 
             args = OrderArgs(token_id=token_id, price=price, size=size, side=SELL)
             signed = self.client.create_order(args)
-            post = self.client.post_order(signed, OrderType.GTC)
+            # FOK: fill-or-kill. Si no hay liquidez suficiente en el book,
+            # se cancela en lugar de quedar como limit huerfano.
+            post = self.client.post_order(signed, OrderType.FOK)
             order_id = (post or {}).get("orderID") or (post or {}).get("orderId")
             if not order_id:
                 logger.warning("close_position_market sin orderID: %s", post)
