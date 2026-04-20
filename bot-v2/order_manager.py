@@ -205,11 +205,14 @@ class OrderManager:
             # Aggressive mode: 1 tick delante del best_bid / best_ask.
             # Cap inferior en mid - 0.01 y superior en mid + 0.01 para no
             # tocar el otro lado ni auto-fillearnos.
-            bid_price = self._round_price(min(best_bid + TICK, mid - TICK))
-            ask_price = self._round_price(max(best_ask - TICK, mid + TICK))
-            # Si el book es tan estrecho que se cruzarian, volvemos al mid +- 1 tick.
+            # Subir el bid hasta el mid (no mid-TICK, porque si no se redondea
+            # al best_bid y no sirve de nada). Con mid=0.155 y best_bid=0.14:
+            # best_bid+TICK=0.15 < mid=0.155 -> bid final=0.15 (un tick mejor que best_bid)
+            bid_price = self._round_price(min(best_bid + TICK, mid))
+            ask_price = self._round_price(max(best_ask - TICK, mid))
+            # Si cruzarian, abrir medio tick a cada lado del mid.
             if ask_price - bid_price < 0.01:
-                bid_price = self._round_price(mid - TICK)
+                bid_price = self._round_price(mid)
                 ask_price = self._round_price(mid + TICK)
         else:
             # Fallback: comportamiento viejo si el opportunity no trae best_bid/best_ask.
