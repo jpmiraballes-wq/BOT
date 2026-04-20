@@ -221,13 +221,19 @@ def _trade_stats():
     return data
 
 
-def build_snapshot(mode, rm, om, notes=""):
+def build_snapshot(mode, rm, om, notes="", live_capital=None):
     open_orders = om.get_open_orders() if om.client else []
     deployed = compute_capital_deployed(open_orders)
     stats = _trade_stats()
+    # Prioridad: capital live del BotConfig (fuente de verdad del usuario)
+    # > equity del risk manager > CAPITAL_USDC hardcoded.
+    if live_capital and float(live_capital) > 0:
+        cap_total = float(live_capital)
+    else:
+        cap_total = rm.current_equity or CAPITAL_USDC
     return {
         "mode": mode,
-        "capital_total": rm.current_equity or CAPITAL_USDC,
+        "capital_total": cap_total,
         "capital_deployed": deployed,
         "daily_pnl": stats["daily_pnl"],
         "total_pnl": stats["total_pnl"],
@@ -483,7 +489,8 @@ def main() -> int:
                     _close()
                 except Exception as _e:
                     logger.error("close_all_positions en emergency stop fallo: %s", _e)
-            reporter.report(build_snapshot("stopped", rm, om, notes="emergency_stop_dashboard"),
+            reporter.report(build_snapshot("stopped", rm, om, notes="emergency_stop_dashboard",
+                                           live_capital=bot_cfg.get("capital_usdc")),
                             force=True)
             break
         if bot_cfg.get("paused"):
@@ -492,7 +499,8 @@ def main() -> int:
                 om.cancel_stale_orders()
             except Exception as _e:
                 logger.error("cancel_stale_orders en pausa fallo: %s", _e)
-            reporter.report(build_snapshot("paused", rm, om, notes="paused_dashboard"))
+            reporter.report(build_snapshot("paused", rm, om, notes="paused_dashboard",
+                                           live_capital=bot_cfg.get("capital_usdc")))
             elapsed = time.time() - loop_started
             time.sleep(max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed))
             continue
@@ -620,7 +628,7 @@ def main() -> int:
             # rm corrupto, etc.) mandamos heartbeat minimo para no quedar
             # "clavado" en el dashboard.
             try:
-                reporter.report(build_snapshot("running", rm, om))
+                reporter.report(build_snapshot("running", rm, om, live_capital=bot_cfg.get("capital_usdc")))
             except Exception as _hb_exc:
                 logger.error("build_snapshot fallo, mando heartbeat minimo: %s",
                              _hb_exc)
