@@ -199,6 +199,11 @@ class AutoClose:
                 reason = "take_profit"
             elif sl is not None and pnl_pct <= sl:
                 reason = "stop_loss"
+            logger.info(
+                "AutoClose check pos=%s %s entry=%.4f cur=%.4f pnl_pct=%+.2f%% tp=%s sl=%s reason=%s",
+                str(pos.get("id"))[:8], pos.get("side"), entry, current,
+                pnl_pct * 100.0, tp, sl, reason,
+            )
             if reason is None:
                 continue
 
