@@ -188,6 +188,9 @@ class AutoClose:
         for pos in positions:
             if pos.get("status") != "open":
                 continue
+            if pos.get("pending_fill"):
+                # Orden aun no rellenada en el CLOB: no es una posicion real.
+                continue
             if not pos.get("id"):
                 continue
             entry = _safe_float(pos.get("entry_price"))
