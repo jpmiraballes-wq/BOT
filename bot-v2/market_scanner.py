@@ -134,9 +134,10 @@ def _passes_filters(market, prices):
         return False
     hours_left = _hours_to_resolution(market)
     if hours_left is not None and hours_left < MIN_DAYS_TO_RESOLUTION * 24:
-        logger.debug("skip %s: resuelve en %.1fh (<%dd)",
-                     (market.get("question") or "")[:40],
-                     hours_left, MIN_DAYS_TO_RESOLUTION)
+        logger.info("skip resolution<%dd: %s resuelve en %.1fh",
+                    MIN_DAYS_TO_RESOLUTION,
+                    (market.get("question") or "")[:60],
+                    hours_left)
         return False
     return True
 
