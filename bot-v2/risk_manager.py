@@ -42,6 +42,32 @@ class RiskManager:
         self.halt_reason: str = ""
         self._load()
 
+    def update_capital(self, live_capital) -> None:
+        """Sincroniza current_equity con el capital real (BotConfig / wallet).
+
+        Solo sube: si live > current_equity, lo actualiza. Nunca baja
+        automaticamente para preservar PnL realizado del high-watermark.
+        """
+        if live_capital is None:
+            return
+        try:
+            live = float(live_capital)
+        except (TypeError, ValueError):
+            return
+        if live <= 0:
+            return
+        changed = False
+        if live > self.current_equity + 0.01:
+            self.current_equity = live
+            changed = True
+        if live > self.high_watermark:
+            self.high_watermark = live
+            changed = True
+        if changed:
+            self._save()
+            logger.info("RiskManager capital sync -> equity=%.2f hwm=%.2f",
+                        self.current_equity, self.high_watermark)
+
     # --------------------------------------------------------- persistencia
     def _load(self) -> None:
         if self.state_path.exists():
@@ -133,10 +159,14 @@ class RiskManager:
 
     # ----------------------------------------------------- sizing / exposicion
     def max_position_size_usdc(self) -> float:
-        return CAPITAL_USDC * MAX_POSITION_PCT
+        # Usar equity actual (live) en vez del hardcoded CAPITAL_USDC=30.
+        base = self.current_equity if self.current_equity > 0 else CAPITAL_USDC
+        return base * MAX_POSITION_PCT
 
     def deployable_capital(self, currently_deployed: float) -> float:
-        usable = CAPITAL_USDC * (1.0 - RESERVE_PCT)
+        # Usar equity actual (live) en vez del hardcoded CAPITAL_USDC=30.
+        base = self.current_equity if self.current_equity > 0 else CAPITAL_USDC
+        usable = base * (1.0 - RESERVE_PCT)
         cap = min(usable, MAX_TOTAL_EXPOSURE_USDC)
         return max(0.0, cap - currently_deployed)
 
