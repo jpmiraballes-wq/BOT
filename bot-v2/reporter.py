@@ -79,3 +79,38 @@ class Reporter:
             logger.info("Heartbeat OK - capital: %s", payload["capital_total"])
         except requests.RequestException as exc:
             logger.error("Error reportando a Base44: %s", exc)
+
+    def send_minimal_heartbeat(self, mode="running", notes=""):
+        """Heartbeat de fallback: no depende de rm/om ni del CLOB.
+
+        Uso: cuando build_snapshot() falla (ej: CLOB caido), llamar a esto
+        para que el dashboard siga viendo al bot como vivo.
+        """
+        if not BASE44_API_KEY:
+            return
+        payload = {
+            "mode": mode,
+            "capital_total": 0.0,
+            "capital_deployed": 0.0,
+            "daily_pnl": 0.0,
+            "total_pnl": 0.0,
+            "drawdown_pct": 0.0,
+            "win_rate": 0.0,
+            "open_positions": 0,
+            "total_trades": 0,
+            "last_heartbeat": _now_iso(),
+            "heartbeat_at": _now_iso(),
+            "bot_version": BOT_VERSION,
+            "notes": "minimal_hb:" + str(notes)[:100],
+        }
+        try:
+            resp = requests.post(self._endpoint, json=payload,
+                                 headers=self._headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code >= 400:
+                logger.error("minimal_hb HTTP %d: %s",
+                             resp.status_code, resp.text[:200])
+                return
+            self._last_report_ts = time.time()
+            logger.warning("Heartbeat MINIMO enviado (build_snapshot fallo)")
+        except requests.RequestException as exc:
+            logger.error("minimal_hb request fallo: %s", exc)
