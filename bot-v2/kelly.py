@@ -47,7 +47,8 @@ class KellySizer:
         raw = (edge / variance) * capital_available * KELLY_FRACTION
         # Cap dinamico por estrategia si existe, sino MAX_POSITION_PCT
         cap_pct = self.strategy_caps.get(strategy, MAX_POSITION_PCT) if strategy else MAX_POSITION_PCT
-        hard_cap = CAPITAL_USDC * cap_pct
+        # hard_cap como % del capital disponible (no del hardcoded CAPITAL_USDC=30).
+        hard_cap = capital_available * cap_pct
         size = max(0.0, min(raw, hard_cap, capital_available))
         logger.info(
             "Kelly[%s strat=%s cap=%.2f%%]: edge=%.4f var=%.6f avail=%.2f -> raw=%.2f final=%.2f",
