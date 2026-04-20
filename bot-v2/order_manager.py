@@ -236,6 +236,13 @@ class OrderManager:
             logger.info("Tamano pequeno (%.2f) en %s.", size_per_side, market_id)
             return []
 
+        # Polymarket minimo $1 de notional por orden. Con mid bajo (ej 0.06)
+        # y size=5 tokens, notional=$0.30 y la orden es rechazada.
+        notional = size_per_side * mid
+        if notional < 1.05:
+            logger.info("Notional bajo ($%.2f < $1.05) en %s, skip.", notional, market_id)
+            return []
+
         edge = float(opportunity.get("spread_pct", 0.0)) / 2.0
         question = opportunity.get("question") or market_id
         log_decision(
