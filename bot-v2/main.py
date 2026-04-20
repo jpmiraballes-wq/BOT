@@ -221,6 +221,17 @@ def main() -> int:
         logger.critical(str(exc))
         return 2
 
+    # _SHUTDOWN_FLAG_CLEAR_ON_START: limpiar flag huerfano de runs anteriores.
+    # Si el flag quedo en disco tras un SIGTERM previo, crash o kill -9,
+    # el loop principal veria exists()=True en la primera iteracion y haria
+    # "clean shutdown" inmediato -> bucle con systemd Restart=always.
+    try:
+        if SHUTDOWN_FLAG_PATH.exists():
+            SHUTDOWN_FLAG_PATH.unlink()
+            logger.warning("shutdown.flag huerfano encontrado al arrancar y borrado")
+    except OSError as _flag_exc:
+        logger.error("no pude borrar shutdown.flag al arrancar: %s", _flag_exc)
+
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
