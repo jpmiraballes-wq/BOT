@@ -121,12 +121,32 @@ def _extract_yes_no_prices(market):
     return yes, no
 
 
+def _get_dynamic_thresholds():
+    """LIQUIDITY_FILTER_V1: lee min_volume_usdc y min_liquidity_usdc de BotConfig.
+
+    Fallback a las constantes hardcoded si BotConfig no esta disponible o
+    no tiene los campos. Se cachea por la duracion de fetch_bot_config().
+    """
+    try:
+        from bot_config_reader import fetch_bot_config
+        cfg = fetch_bot_config() or {}
+        min_vol = cfg.get("min_volume_usdc")
+        min_liq = cfg.get("min_liquidity_usdc")
+        return (
+            float(min_vol) if min_vol is not None else MIN_VOLUME_USDC,
+            float(min_liq) if min_liq is not None else MIN_LIQUIDITY_USDC,
+        )
+    except Exception:
+        return MIN_VOLUME_USDC, MIN_LIQUIDITY_USDC
+
+
 def _passes_filters(market, prices):
     volume = _safe_float(market.get("volume") or market.get("volumeNum"))
     liquidity = _safe_float(market.get("liquidity") or market.get("liquidityNum"))
-    if volume < MIN_VOLUME_USDC:
+    min_vol, min_liq = _get_dynamic_thresholds()
+    if volume < min_vol:
         return False
-    if liquidity < MIN_LIQUIDITY_USDC:
+    if liquidity < min_liq:
         return False
     if prices["spread_pct"] < MIN_SPREAD_PCT:
         return False
