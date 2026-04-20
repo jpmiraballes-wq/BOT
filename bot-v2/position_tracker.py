@@ -192,6 +192,51 @@ class PositionTracker:
             return cached.get("token_id"), cached.get("size_tokens")
         return None, None
 
+    # ---------------------------------------------- wallet balance guard
+    _WALLET = "0x7c6a42cb6ae0d63a7073eefc1a5e04f102facbfb"
+    _DATA_API = "https://data-api.polymarket.com"
+
+    def _has_wallet_balance(self, token_id, size_tokens):
+        """Consulta data-api y devuelve True si wallet tiene >= size_tokens."""
+        try:
+            url = "%s/positions" % self._DATA_API
+            resp = requests.get(
+                url,
+                params={"user": self._WALLET, "sizeThreshold": "0.01"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            if resp.status_code >= 400:
+                return True  # en caso de error de red, no bloqueamos
+            positions = resp.json() or []
+            tid = str(token_id)
+            for p in positions:
+                asset = str(p.get("asset") or p.get("tokenId") or p.get("token_id") or "")
+                if asset == tid:
+                    return float(p.get("size") or 0) >= float(size_tokens) * 0.95
+            return False  # no encontrado = 0 en wallet
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("balance check fallo: %s", exc)
+            return True  # fail-open para no bloquear por red
+
+    def _mark_no_balance(self, position_id):
+        payload = {
+            "status": "closed",
+            "close_reason": "no_balance_on_chain",
+            "close_time": _now_iso(),
+            "pnl_realized": 0.0,
+            "pnl_unrealized": 0.0,
+        }
+        try:
+            resp = requests.put(
+                _b44_endpoint("Position", position_id),
+                json=payload, headers=_b44_headers(), timeout=REQUEST_TIMEOUT
+            )
+            if resp.status_code >= 400:
+                logger.error("mark_no_balance %d: %s",
+                             resp.status_code, resp.text[:200])
+        except requests.RequestException as exc:
+            logger.error("mark_no_balance fallo: %s", exc)
+
     def check_and_close(self, clob_client):
         """Revisa posiciones abiertas y coloca SELL si alcanzan el target.
 
@@ -207,9 +252,22 @@ class PositionTracker:
         closed = 0
         for pos in open_positions:
             pid = pos.get("id")
+            # PATCH: ignorar posiciones pending_fill (aun no confirmadas en wallet)
+            if pos.get("pending_fill") is True:
+                logger.debug("Skip pending_fill position %s", pid)
+                continue
             token_id, size_tokens = self._extract_token_id(pos)
             if not token_id or not size_tokens:
                 # Posicion de una sesion anterior sin cache local; saltamos.
+                continue
+            # PATCH: verificar balance on-chain antes de intentar SELL
+            if not self._has_wallet_balance(token_id, size_tokens):
+                logger.warning(
+                    "Position %s sin balance on-chain para %s (req %.2f tokens). "
+                    "Marco closed (no_balance_on_chain).",
+                    pid, (token_id or "")[:10], float(size_tokens)
+                )
+                self._mark_no_balance(pid)
                 continue
 
             entry = float(pos.get("entry_price") or 0.0)
