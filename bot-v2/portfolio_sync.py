@@ -1,10 +1,18 @@
-"""portfolio_sync.py - Sincroniza precios y PnL de Position abiertas.
+"""portfolio_sync.py - Sincroniza precios, PnL y estado de fill de Position.
 
-Usa el endpoint publico del CLOB (sin firma) para obtener el mid de cada
-token, y actualiza via PUT cada Position con current_price + pnl_unrealized.
+En cada ciclo:
+  * Para cada Position(status='open'):
+      - Si pending_fill=True y tiene order_id, consulta el estado de la orden
+        en el CLOB autenticado (clob_client.get_order(order_id)):
+            size_matched > 0  -> pending_fill=False (confirmada)
+            estado CANCELED   -> Position.status='closed',
+                                 close_reason='cancelled_no_fill'
+            sigue LIVE sin fill -> no toca (sigue esperando)
+      - Si pending_fill=False, actualiza current_price y pnl_unrealized con
+        el midpoint publico del CLOB.
 
-Funciona tanto en DRY_RUN (paper) como en live, porque no depende del
-ClobClient autenticado (que en paper es PaperBroker y no expone get_midpoint).
+Funciona tanto en DRY_RUN (paper) como en live; si el clob_client no expone
+get_order, simplemente actualiza precios como antes.
 """
 
 import logging
@@ -12,6 +20,7 @@ import logging
 import requests
 
 from base44_client import list_records, update_record
+from decision_logger import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +38,6 @@ def _safe_float(v):
 
 
 def _fetch_side(token_id, side):
-    """Pide el mejor precio en un lado. None si falla."""
     try:
         resp = requests.get(
             CLOB_PRICE_URL,
@@ -61,19 +69,62 @@ def _compute_pnl(side, entry, current, size_tokens):
 
 
 class PortfolioSync:
-    """Actualiza current_price y pnl_unrealized de las posiciones abiertas."""
+    """Actualiza precios y estado de fill de las Position abiertas."""
 
     def __init__(self, clob_client=None):
-        # clob_client se acepta por compatibilidad pero no se usa.
-        self.clob = clob_client
+        self._client = clob_client
+
+    def _order_status(self, order_id):
+        """Devuelve dict con (matched, status) o None si no se puede consultar."""
+        if not order_id or self._client is None:
+            return None
+        fn = getattr(self._client, "get_order", None)
+        if not callable(fn):
+            return None
+        try:
+            o = fn(order_id) or {}
+        except Exception as exc:
+            logger.debug("get_order(%s) fallo: %s", str(order_id)[:10], exc)
+            return None
+        matched = _safe_float(o.get("size_matched") or o.get("sizeMatched")) or 0.0
+        status = (o.get("status") or o.get("state") or "").upper()
+        return {"matched": matched, "status": status}
+
+    def _confirm_or_cancel_pending(self, pos):
+        """Verifica una Position pending_fill. Devuelve accion aplicada."""
+        pos_id = pos.get("id")
+        order_id = pos.get("order_id")
+        info = self._order_status(order_id)
+        if info is None:
+            return "unknown"
+
+        if info["matched"] > 0:
+            update_record("Position", pos_id, {"pending_fill": False})
+            logger.info("Fill confirmado: pos=%s order=%s matched=%.2f",
+                        str(pos_id)[:8], str(order_id)[:10], info["matched"])
+            return "confirmed"
+
+        if info["status"] in ("CANCELED", "CANCELLED", "EXPIRED"):
+            update_record("Position", pos_id, {
+                "status": "closed",
+                "pending_fill": False,
+                "pnl_unrealized": 0.0,
+                "pnl_realized": 0.0,
+                "close_time": now_iso(),
+                "close_reason": "cancelled_no_fill",
+            })
+            logger.info("Orden cancelada sin fill: pos=%s order=%s",
+                        str(pos_id)[:8], str(order_id)[:10])
+            return "cancelled"
+
+        return "still_pending"
 
     def sync(self):
         positions = list_records("Position", sort="-updated_date", limit=200) or []
         updated = 0
-        skipped_no_token = 0
-        skipped_no_price = 0
-        skipped_no_change = 0
-        checked = 0
+        pending_skipped = 0
+        confirmed = 0
+        cancelled = 0
 
         for pos in positions:
             if pos.get("status") != "open":
@@ -81,17 +132,24 @@ class PortfolioSync:
             pos_id = pos.get("id")
             token_id = pos.get("token_id")
             if not pos_id or not token_id:
-                skipped_no_token += 1
+                continue
+
+            if pos.get("pending_fill"):
+                action = self._confirm_or_cancel_pending(pos)
+                if action == "confirmed":
+                    confirmed += 1
+                elif action == "cancelled":
+                    cancelled += 1
+                else:
+                    pending_skipped += 1
                 continue
 
             entry = _safe_float(pos.get("entry_price"))
             if entry is None or entry <= 0:
                 continue
 
-            checked += 1
             current = _fetch_midpoint(token_id)
             if current is None or current <= 0:
-                skipped_no_price += 1
                 continue
 
             size_tokens = _safe_float(pos.get("size_tokens"))
@@ -100,27 +158,18 @@ class PortfolioSync:
                 size_tokens = size_usdc / entry if entry > 0 else 0.0
 
             pnl = _compute_pnl(pos.get("side"), entry, current, size_tokens)
-
             prev = _safe_float(pos.get("current_price"))
             if prev is not None and abs(prev - current) < 1e-4:
-                skipped_no_change += 1
                 continue
 
-            ok = update_record(
-                "Position", pos_id,
-                {"current_price": round(current, 4),
-                 "pnl_unrealized": round(pnl, 4)},
-            )
+            ok = update_record("Position", pos_id, {
+                "current_price": round(current, 4),
+                "pnl_unrealized": round(pnl, 4),
+            })
             if ok:
                 updated += 1
-                logger.info(
-                    "Position %s (%s): %.4f -> %.4f pnl=%+.2f",
-                    str(pos_id)[:8], (pos.get("side") or "")[:3],
-                    prev or 0.0, current, pnl,
-                )
 
         logger.info(
-            "PortfolioSync: checked=%d updated=%d no_token=%d no_price=%d no_change=%d",
-            checked, updated, skipped_no_token, skipped_no_price, skipped_no_change,
+            "PortfolioSync: updated=%d confirmed=%d cancelled=%d pending=%d",
+            updated, confirmed, cancelled, pending_skipped,
         )
-        return updated
