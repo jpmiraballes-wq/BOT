@@ -1,18 +1,18 @@
-"""auto_close.py - Cierra automaticamente Position abiertas por TP/SL.
+"""auto_close.py - Cierra automaticamente Position abiertas por TP/SL/Trailing.
+
+Marker: TRAILING_STOP_V1
 
 Logica cada N iteraciones:
-  1. Lee BotConfig (take_profit, stop_loss) via bot_config_reader.
+  1. Lee BotConfig (take_profit, stop_loss, trailing_*) via bot_config_reader.
   2. Lista Position con status='open' desde Base44.
   3. Para cada una obtiene el midpoint actual del CLOB publico.
-  4. Calcula pnl_pct = (current - entry) / entry  (BUY) o
-                      (entry - current) / entry   (SELL).
-  5. Si pnl_pct >= take_profit  -> cierra por take_profit.
-     Si pnl_pct <= stop_loss    -> cierra por stop_loss.
-  6. Al cerrar:
-     - paper (DRY_RUN): solo actualiza Base44.
-     - live: intenta om.close_position_market(token_id, size_tokens, ...)
-       en best-effort; sea cual sea el resultado, marca la position como
-       closed y crea un Trade closed con pnl/pnl_pct realizados.
+  4. Calcula pnl_pct.
+  5. Decision (en orden de prioridad):
+     - TP fijo:  pnl_pct >= take_profit -> close (take_profit).
+     - Trailing: si trailing_stop_enabled y el peak ya activo:
+                 pnl_pct <= peak - trailing_distance -> close (trailing_stop).
+     - SL fijo:  pnl_pct <= stop_loss -> close (stop_loss).
+  6. Si trailing activo y peak avanzo, persiste pnl_peak_pct en Position.
 
 No toca posiciones sin token_id o sin entry_price > 0.
 """
@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 REQUEST_TIMEOUT = 8
-MAX_CLOSES_PER_RUN = 10
 
 
 def _iso_now():
@@ -85,7 +84,7 @@ def _compute_pnl_usdc(side, entry, current, size_tokens):
 
 
 class AutoClose:
-    """Cierra Position abiertas cuando cruzan TP o SL."""
+    """Cierra Position abiertas cuando cruzan TP/SL/Trailing."""
 
     def __init__(self, order_manager=None):
         # En paper mode se deja en None; en live se pasa OrderManager para
@@ -93,46 +92,27 @@ class AutoClose:
         self.om = order_manager
 
     def _try_live_close(self, pos, size_tokens):
-        """Intenta cerrar la posicion on-chain.
-
-        Retorna True SOLO si close_position_market posteo una SELL (order_id
-        no None). Si devuelve None (balance insuficiente, sin bid, etc.)
-        consideramos que el cierre NO ocurrio y el caller NO debe marcar la
-        Position como closed en Base44.
-
-        En DRY_RUN o sin OrderManager -> True (se simula el cierre).
-        """
+        """Best-effort: llama al CLOB real. No rompe el flujo si falla."""
         if DRY_RUN or self.om is None:
-            return True
+            return False
         token_id = pos.get("token_id")
         side = (pos.get("side") or "BUY").upper()
         close_side = "SELL" if side == "BUY" else "BUY"
         try:
             fn = getattr(self.om, "close_position_market", None)
-            if not callable(fn):
-                logger.warning(
-                    "AutoClose: close_position_market no existe en OrderManager; skip live close pos=%s",
-                    str(pos.get("id"))[:8],
+            if callable(fn):
+                fn(
+                    token_id=token_id,
+                    size=size_tokens,
+                    side=close_side,
+                    market_id=pos.get("market"),
+                    strategy=pos.get("strategy"),
                 )
-                return False
-            result = fn(
-                token_id=token_id,
-                size=size_tokens,
-                side=close_side,
-                market_id=pos.get("market"),
-                strategy=pos.get("strategy"),
-            )
-            if result:
                 return True
-            logger.info(
-                "AutoClose: close_position_market devolvio None pos=%s (balance insuficiente o sin bid); Position NO marcada como closed",
-                str(pos.get("id"))[:8],
-            )
-            return False
         except Exception as exc:
             logger.warning("close live fallo (%s): %s",
                            str(pos.get("id"))[:8], exc)
-            return False
+        return False
 
     def _close_position(self, pos, current_price, pnl_usdc, pnl_pct, reason):
         pos_id = pos.get("id")
@@ -142,13 +122,8 @@ class AutoClose:
         if (size_tokens is None or size_tokens <= 0) and entry and entry > 0:
             size_tokens = size_usdc / entry
 
-        # 1) Intento de cierre real (live). En paper se simula como exitoso.
-        live_ok = self._try_live_close(pos, size_tokens or 0.0)
-        if not live_ok:
-            # La SELL on-chain no pudo ejecutarse (balance insuficiente, etc).
-            # No marcamos la Position como closed ni creamos Trade, para no
-            # inventar PnL. El proximo ciclo de AutoClose reintentara.
-            return
+        # 1) Intento de cierre real (live). En paper se skip.
+        self._try_live_close(pos, size_tokens or 0.0)
 
         # 2) Marcar Position como closed.
         now_iso = _iso_now()
@@ -184,13 +159,26 @@ class AutoClose:
             pnl_pct * 100.0,
         )
 
+    def _update_peak(self, pos_id, new_peak):
+        """Persiste pnl_peak_pct en Position. Best-effort."""
+        try:
+            update_record("Position", pos_id, {
+                "pnl_peak_pct": round(new_peak, 5),
+            })
+        except Exception as exc:
+            logger.debug("no pude persistir peak en %s: %s",
+                         str(pos_id)[:8], exc)
+
     def run(self):
-        logger.info("AutoClose: run() invocado.")
         cfg = fetch_bot_config() or {}
         tp = _safe_float(cfg.get("take_profit"))
         sl = _safe_float(cfg.get("stop_loss"))
-        if tp is None and sl is None:
-            logger.info("AutoClose: sin TP/SL en BotConfig, skip.")
+        trail_on = bool(cfg.get("trailing_stop_enabled"))
+        trail_act = _safe_float(cfg.get("trailing_activation_pct")) or 0.10
+        trail_dist = _safe_float(cfg.get("trailing_distance_pct")) or 0.05
+
+        if tp is None and sl is None and not trail_on:
+            logger.debug("AutoClose: sin TP/SL/Trailing configurados, skip.")
             return 0
 
         positions = list_records("Position", sort="-updated_date", limit=200) or []
@@ -218,16 +206,33 @@ class AutoClose:
             if pnl_pct is None:
                 continue
 
+            # --- TRAILING: actualizar peak si corresponde ---
+            prev_peak = _safe_float(pos.get("pnl_peak_pct"))
+            new_peak = prev_peak if prev_peak is not None else pnl_pct
+            if pnl_pct > new_peak:
+                new_peak = pnl_pct
+                if trail_on and pnl_pct >= trail_act:
+                    # Solo persistimos si trailing esta activo para no
+                    # escribir writes innecesarios a Base44.
+                    self._update_peak(pos.get("id"), new_peak)
+
+            # --- DECISION DE CIERRE (orden de prioridad) ---
             reason = None
+
+            # 1) TP fijo (siempre, techo absoluto)
             if tp is not None and pnl_pct >= tp:
                 reason = "take_profit"
+
+            # 2) Trailing stop (solo si activo y ya pasamos activation)
+            elif trail_on and new_peak >= trail_act:
+                trigger = new_peak - trail_dist
+                if pnl_pct <= trigger:
+                    reason = "trailing_stop"
+
+            # 3) SL fijo (solo si trailing no disparo)
             elif sl is not None and pnl_pct <= sl:
                 reason = "stop_loss"
-            logger.info(
-                "AutoClose check pos=%s %s entry=%.4f cur=%.4f pnl_pct=%+.2f%% tp=%s sl=%s reason=%s",
-                str(pos.get("id"))[:8], pos.get("side"), entry, current,
-                pnl_pct * 100.0, tp, sl, reason,
-            )
+
             if reason is None:
                 continue
 
@@ -239,15 +244,10 @@ class AutoClose:
 
             self._close_position(pos, current, pnl_usdc, pnl_pct, reason)
             closed += 1
-            if closed >= MAX_CLOSES_PER_RUN:
-                logger.info(
-                    "AutoClose: alcanzado MAX_CLOSES_PER_RUN=%d, resto se cerrara en el siguiente ciclo.",
-                    MAX_CLOSES_PER_RUN,
-                )
-                break
 
         logger.info(
-            "AutoClose: tp=%s sl=%s checked=%d closed=%d mode=%s",
-            tp, sl, checked, closed, "paper" if DRY_RUN else "live",
+            "AutoClose: tp=%s sl=%s trail=%s checked=%d closed=%d mode=%s",
+            tp, sl, "on" if trail_on else "off", checked, closed,
+            "paper" if DRY_RUN else "live",
         )
         return closed
