@@ -144,7 +144,7 @@ class PortfolioSync:
                     "size_usdc": pos.get("size_usdc") or 0.0,
                     "pnl": 0.0,
                     "pnl_pct": 0.0,
-                    "strategy": pos.get("strategy") or "market_making",
+                    "strategy": pos.get("strategy") or "market_maker",
                     "status": "cancelled",
                     "entry_time": pos.get("opened_at"),
                     "exit_time": now_iso(),
