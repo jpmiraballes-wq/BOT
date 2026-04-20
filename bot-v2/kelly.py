@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 class KellySizer:
     def __init__(self):
         self._history = defaultdict(lambda: deque(maxlen=KELLY_VARIANCE_WINDOW))
+        # Caps dinamicos por estrategia (cargados desde Base44 StrategySizing).
+        # Si una estrategia no esta aqui, se usa MAX_POSITION_PCT de config.
+        self.strategy_caps = {}
+
+    def set_strategy_caps(self, caps):
+        """Actualiza los caps. caps = {'market_maker': 0.04, ...}"""
+        if isinstance(caps, dict):
+            self.strategy_caps = {k: float(v) for k, v in caps.items() if v}
+            logger.info("Kelly strategy_caps actualizado: %s", self.strategy_caps)
 
     def record_tick(self, market_id, mid):
         try:
@@ -31,15 +40,18 @@ class KellySizer:
         except statistics.StatisticsError:
             return KELLY_MIN_VARIANCE * 10
 
-    def compute_size(self, *, market_id, edge, capital_available, price=None):
+    def compute_size(self, *, market_id, edge, capital_available, price=None, strategy=None):
         if edge <= 0 or capital_available <= 0:
             return 0.0
         variance = self._variance(market_id)
         raw = (edge / variance) * capital_available * KELLY_FRACTION
-        hard_cap = CAPITAL_USDC * MAX_POSITION_PCT
+        # Cap dinamico por estrategia si existe, sino MAX_POSITION_PCT
+        cap_pct = self.strategy_caps.get(strategy, MAX_POSITION_PCT) if strategy else MAX_POSITION_PCT
+        hard_cap = CAPITAL_USDC * cap_pct
         size = max(0.0, min(raw, hard_cap, capital_available))
         logger.info(
-            "Kelly[%s]: edge=%.4f var=%.6f cap=%.2f -> raw=%.2f final=%.2f",
-            market_id, edge, variance, capital_available, raw, size,
+            "Kelly[%s strat=%s cap=%.2f%%]: edge=%.4f var=%.6f avail=%.2f -> raw=%.2f final=%.2f",
+            market_id, strategy or "-", cap_pct * 100.0,
+            edge, variance, capital_available, raw, size,
         )
         return size
