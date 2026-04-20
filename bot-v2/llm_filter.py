@@ -1,18 +1,15 @@
-"""llm_filter.py - Filtro de oportunidades via Claude (Anthropic Messages API).
+"""llm_filter.py - Filtro de oportunidades via invokeLLMProxy (Base44).
 
-Flujo:
-  market_scanner -> lista de oportunidades -> filter_opportunities(opps, strategy)
-  -> Claude responde JSON {approve, reason} por cada oportunidad -> se
-  devuelven solo las aprobadas.
+Llama a la funcion invokeLLMProxy del dashboard (que internamente usa
+InvokeLLM con creditos de Base44). Soporta response_json_schema asi el
+modelo devuelve JSON valido sin necesidad de parsear fences markdown.
 
-Requiere ANTHROPIC_API_KEY en el entorno. Si falta o la API falla, la
-funcion es fail-open (retorna la lista tal cual) para no bloquear el bot.
+Requiere EXTERNAL_BASE44_API_KEY en el entorno (ya usado por otras partes
+del bot). Si falta o la API falla, fail-open (aprueba).
 
-Cache en memoria (TTL 5 min) por (question, strategy) para no gastar tokens
-repitiendo el mismo mercado cada ciclo.
+Cache en memoria (TTL 5 min) por (question, strategy).
 """
 
-import json
 import logging
 import os
 import time
@@ -22,11 +19,28 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-5")
-ANTHROPIC_VERSION = "2023-06-01"
+BASE44_APP_ID = os.getenv("BASE44_APP_ID", "69e189f649c5d21cd42536bc")
+BASE44_BASE_URL = os.getenv("BASE44_BASE_URL", "https://app.base44.com")
+PROXY_URL = "%s/api/apps/%s/functions/invokeLLMProxy" % (
+    BASE44_BASE_URL, BASE44_APP_ID,
+)
+
+# claude_sonnet_4_6 = Claude Sonnet, balance calidad/costo.
+# Fallback automatico si la primera llamada falla.
+PRIMARY_MODEL = os.getenv("LLM_FILTER_MODEL", "claude_sonnet_4_6")
+FALLBACK_MODEL = "gpt_5_mini"
+
 REQUEST_TIMEOUT = 30
-CACHE_TTL_SECONDS = 300  # 5 min
+CACHE_TTL_SECONDS = 300
+
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "approve": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["approve", "reason"],
+}
 
 # (question, strategy) -> (ts, approve, reason)
 _CACHE: Dict[Tuple[str, str], Tuple[float, bool, str]] = {}
@@ -94,74 +108,48 @@ def _build_prompt(opp: Dict[str, Any], strategy: str) -> str:
         "- Calidad del mercado (volumen y liquidez suficientes)",
         "- Si la estrategia tiene sentido para este mercado",
         "",
-        "Responde SOLO con un JSON valido, sin markdown:",
-        '{"approve": true_o_false, "reason": "motivo en <=25 palabras"}',
+        "Respuesta: approve (bool) y reason (<=25 palabras).",
     ]
     return "\n".join(lines)
 
 
-def _parse_response(text: str) -> Tuple[bool, str]:
-    """Extrae JSON del texto. Tolerante a fences markdown."""
-    if not text:
-        return True, "empty_response_fail_open"
-    s = text.strip()
-    # Quitar fences si el modelo los pone.
-    if s.startswith("```"):
-        s = s.strip("`")
-        if s.startswith("json"):
-            s = s[4:]
-    # Encontrar primer { y ultimo }.
-    start = s.find("{")
-    end = s.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return True, "parse_fail_open"
-    try:
-        obj = json.loads(s[start:end + 1])
-    except (ValueError, TypeError):
-        return True, "json_fail_open"
-    approve = bool(obj.get("approve", True))
-    reason = str(obj.get("reason") or "")[:200]
-    return approve, reason
-
-
-def _call_claude(prompt: str, api_key: str) -> Optional[str]:
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
+def _call_proxy(prompt: str, api_key: str, model: str) -> Optional[Dict[str, Any]]:
+    """POST a invokeLLMProxy. Devuelve el dict con approve/reason o None."""
+    headers = {"api_key": api_key, "Content-Type": "application/json"}
     body = {
-        "model": ANTHROPIC_MODEL,
-        "max_tokens": 256,
-        "messages": [{"role": "user", "content": prompt}],
+        "prompt": prompt,
+        "response_json_schema": RESPONSE_SCHEMA,
+        "model": model,
     }
     try:
-        resp = requests.post(ANTHROPIC_URL, headers=headers, json=body,
+        resp = requests.post(PROXY_URL, headers=headers, json=body,
                              timeout=REQUEST_TIMEOUT)
     except requests.RequestException as exc:
-        logger.warning("llm_filter: request fallo: %s", exc)
+        logger.warning("llm_filter: request fallo (%s): %s", model, exc)
         return None
     if resp.status_code >= 400:
-        logger.warning("llm_filter: HTTP %d: %s",
-                       resp.status_code, resp.text[:200])
+        logger.warning("llm_filter: HTTP %d (%s): %s",
+                       resp.status_code, model, resp.text[:200])
         return None
     try:
         data = resp.json()
     except ValueError:
         return None
-    blocks = data.get("content") or []
-    for b in blocks:
-        if b.get("type") == "text":
-            return b.get("text") or ""
+    # invokeLLMProxy envuelve en {result: ...}
+    result = data.get("result") if isinstance(data, dict) else None
+    if isinstance(result, dict) and "approve" in result:
+        return result
+    logger.warning("llm_filter: respuesta inesperada (%s): %s",
+                   model, str(data)[:200])
     return None
 
 
 def evaluate(opp: Dict[str, Any], strategy: str) -> Tuple[bool, str]:
     """Evalua una oportunidad. Retorna (approve, reason).
 
-    Fail-open: si no hay ANTHROPIC_API_KEY o la API falla, aprueba.
+    Fail-open: si no hay API key o el proxy falla en ambos modelos, aprueba.
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    api_key = os.getenv("EXTERNAL_BASE44_API_KEY", "").strip()
     if not api_key:
         return True, "no_api_key_fail_open"
 
@@ -173,26 +161,27 @@ def evaluate(opp: Dict[str, Any], strategy: str) -> Tuple[bool, str]:
         return cached[1], cached[2]
 
     prompt = _build_prompt(opp, strategy)
-    text = _call_claude(prompt, api_key)
-    if text is None:
-        # Fail-open pero NO cacheamos para reintentar el siguiente ciclo.
+
+    # Intento con modelo primario (claude_sonnet_4_6).
+    result = _call_proxy(prompt, api_key, PRIMARY_MODEL)
+    # Fallback a gpt_5_mini si el primario falla.
+    if result is None:
+        logger.info("llm_filter: fallback a %s", FALLBACK_MODEL)
+        result = _call_proxy(prompt, api_key, FALLBACK_MODEL)
+    if result is None:
         return True, "api_fail_open"
 
-    approve, reason = _parse_response(text)
+    approve = bool(result.get("approve", True))
+    reason = str(result.get("reason") or "")[:200]
     _CACHE[cache_key] = (now, approve, reason)
     return approve, reason
 
 
 def filter_opportunities(opps: List[Dict[str, Any]], strategy: str) -> List[Dict[str, Any]]:
-    """Filtra una lista de oportunidades via Claude.
-
-    - Cada opp es un dict con 'question', 'mid', 'spread_pct', etc.
-    - Las rechazadas se loggean con el motivo.
-    - Fail-open: si no hay API key, devuelve la lista tal cual.
-    """
+    """Filtra oportunidades via LLM. Fail-open si falta API key."""
     if not opps:
         return opps
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    api_key = os.getenv("EXTERNAL_BASE44_API_KEY", "").strip()
     if not api_key:
         return opps
 
