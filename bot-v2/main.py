@@ -36,6 +36,7 @@ from bot_config_reader import fetch_bot_config  # dashboard control
 from strategies.umbrella_executor import run_umbrella_cycle
 from portfolio_sync import PortfolioSync
 from auto_close import AutoClose
+from llm_filter import filter_opportunities
 
 AUTO_CLOSE_EVERY_N_ITERATIONS = 2
 
@@ -382,6 +383,7 @@ def main() -> int:
             else:
                 opportunities = scan_markets()
                 opportunities = [o for o in opportunities if cb.filter_opportunity(o)]
+                opportunities = filter_opportunities(opportunities, MM_STRATEGY)
                 logger.info("MM oportunidades tras filtros: %d (budget=%.2f)",
                             len(opportunities), mm_budget)
 
@@ -443,7 +445,8 @@ def main() -> int:
                     # Solo ejecuta umbrella. binary_under y monotonic quedan
                     # como deteccion hasta tener executor dedicado.
                     if allocator.is_enabled(ARB_STRATEGY):
-                        results = run_umbrella_cycle(om, arb_opps, max_per_cycle=2)
+                        arb_opps_filtered = filter_opportunities(arb_opps, ARB_STRATEGY)
+                        results = run_umbrella_cycle(om, arb_opps_filtered, max_per_cycle=2)
                         for r in results:
                             if r.get("status") == "executed":
                                 logger.info("Umbrella arb ejecutado: %s", r)
