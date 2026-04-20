@@ -62,10 +62,12 @@ class PositionTracker:
 
     # ----------------------------------------------------------------- create
     def register_buy(self, *, market_id, token_id, question,
-                     entry_price, size_tokens, order_id):
+                     entry_price, size_tokens, order_id,
+                     strategy=None):  # tracking-meta-v1
         """Crea un registro Position(status=open) en Base44."""
         if not BASE44_API_KEY:
             return None
+        _now_ts = time.time()
         payload = {
             "market": question or market_id,
             "side": "BUY",
@@ -78,6 +80,10 @@ class PositionTracker:
             "pnl_unrealized": 0.0,
             "status": "open",
             "pending_fill": True,
+            "strategy": strategy or "market_maker",
+            "question": question or "",
+            "opened_at": _now_iso(),
+            "opened_at_ts": _now_ts,
         }
         try:
             resp = requests.post(_b44_endpoint("Position"), json=payload,
