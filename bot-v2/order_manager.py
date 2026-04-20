@@ -278,7 +278,14 @@ class OrderManager:
                 else:
                     logger.warning("Respuesta sin orderID: %s", resp)
             except Exception as exc:
-                logger.error("Error %s en %s: %s", side, market_id, exc)
+                exc_str = str(exc)
+                if "not enough balance" in exc_str and side == SELL:
+                    # Esperado en MM: no tenemos tokens hasta que el BUY se llene.
+                    # El SELL se colocara despues via close_profitable_positions.
+                    logger.info("SELL skip %s en %s: sin tokens aun (BUY pendiente fill)",
+                                token_id[:10], market_id)
+                else:
+                    logger.error("Error %s en %s: %s", side, market_id, exc)
 
         # Marcar token como ocupado para el resto de este refresh().
         if created and blocked_tokens is not None:
