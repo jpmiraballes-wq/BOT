@@ -62,6 +62,7 @@ NEWS_POLL_INTERVAL_SEC = 60
 DEDUPE_TTL_SEC = 6 * 60 * 60            # olvida hashes viejos a las 6h
 MAX_POSITIONS_CONCURRENT = 4             # safety: no mas de 4 posiciones news a la vez
 MIN_SHARE_SIZE_USDC = 5.0                # no entrar con menos de $5
+MAX_POSITION_USDC = 15.0                 # hard cap por posicion news (safety)
 KELLY_BASE_FRACTION = 0.25               # base kelly; se multiplica por conf^2
 SIMILARITY_TOKEN_OVERLAP = 0.6           # 60% palabras comunes = misma noticia
 MAX_LLM_CALLS_PER_CYCLE = 8              # throttle: max titulares clasificados por ciclo
@@ -492,7 +493,9 @@ class NewsTrader:
         # Kelly base * confidence^2, limitado por capital disponible y por book
         kelly_size_usdc = budget * KELLY_BASE_FRACTION * (confidence ** 2)
         book_cap_usdc = ask_size * ask_price * 0.5  # no arrasar book (50% del tope)
-        size_usdc = min(kelly_size_usdc, book_cap_usdc, budget)
+        # Hard cap absoluto por posicion: evita sizes desproporcionados en
+        # noticias de alta confidence (ej: $96 en US Strike on Cuba).
+        size_usdc = min(kelly_size_usdc, book_cap_usdc, budget, MAX_POSITION_USDC)
         if size_usdc < MIN_SHARE_SIZE_USDC:
             return False
 
