@@ -123,9 +123,18 @@ class AutoClose:
             size_tokens = size_usdc / entry
 
         # 1) Intento de cierre real (live). En paper se skip.
-        self._try_live_close(pos, size_tokens or 0.0)
+        # VERIFY_SELL_BEFORE_CLOSE_V1: en modo LIVE solo marcamos closed si el sell se confirmo.
+        sell_ok = self._try_live_close(pos, size_tokens or 0.0)
+        if not DRY_RUN and not sell_ok:
+            logger.warning(
+                "AutoClose SELL no confirmado, posicion %s sigue OPEN (reason=%s pnl=%+.2f)",
+                str(pos_id)[:8], reason, pnl_usdc,
+            )
+            # No cerramos: la posicion queda open y el loop reintentara
+            # en el proximo ciclo.
+            return
 
-        # 2) Marcar Position como closed.
+        # 2) Marcar Position como closed (solo si sell confirmado o paper).
         now_iso = _iso_now()
         update_record("Position", pos_id, {
             "status": "closed",
