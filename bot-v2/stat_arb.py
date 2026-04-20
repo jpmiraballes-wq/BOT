@@ -136,9 +136,70 @@ def _load_open_positions(strategy: str) -> Dict[str, Dict[str, Any]]:
         return {}
 
 
+def _find_existing_open(strategy: str, token_id: str) -> Optional[Dict[str, Any]]:
+    """Busca un Position existente con mismo token_id+strategy+status=open."""
+    if not BASE44_API_KEY or not token_id:
+        return None
+    try:
+        resp = requests.get(
+            _b44_url(),
+            params={"status": "open", "strategy": strategy, "token_id": token_id},
+            headers=_b44_headers(), timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code >= 400:
+            return None
+        data = resp.json()
+        records = data["data"] if isinstance(data, dict) and "data" in data else data
+        if not isinstance(records, list) or not records:
+            return None
+        # Si hay varios (legado), el mas antiguo
+        records.sort(key=lambda r: r.get("created_date") or "")
+        return records[0]
+    except requests.RequestException:
+        return None
+
+
 def _persist_position_open(strategy: str, market_id: str, pos: Dict[str, Any]) -> Optional[str]:
+    """Upsert: si ya existe un Position open con el mismo token_id+strategy,
+    mergea tamanos y actualiza entry_price como promedio ponderado.
+    Si no existe, crea uno nuevo.
+    """
     if not BASE44_API_KEY:
         return None
+    token_id = pos.get("token_id") or ""
+    existing = _find_existing_open(strategy, token_id) if token_id else None
+
+    if existing:
+        # Merge ponderado
+        old_size_tokens = _safe_float(existing.get("size_tokens"))
+        old_size_usdc = _safe_float(existing.get("size_usdc"))
+        old_entry = _safe_float(existing.get("entry_price"))
+        new_size_tokens = old_size_tokens + pos["size_tokens"]
+        new_size_usdc = old_size_usdc + pos["size_usdc"]
+        if new_size_tokens > 0:
+            new_entry = ((old_entry * old_size_tokens) +
+                         (pos["entry_price"] * pos["size_tokens"])) / new_size_tokens
+        else:
+            new_entry = pos["entry_price"]
+        record_id = existing.get("id")
+        patch = {
+            "entry_price": round(new_entry, 4),
+            "size_tokens": round(new_size_tokens, 4),
+            "size_usdc": round(new_size_usdc, 4),
+        }
+        try:
+            resp = requests.patch(_b44_url(record_id), json=patch,
+                                  headers=_b44_headers(), timeout=REQUEST_TIMEOUT)
+            if resp.status_code >= 400:
+                logger.warning("Position merge %d: %s", resp.status_code, resp.text[:200])
+                return record_id
+            logger.info("Position merge token=%s entry=%.4f size_tokens=%.2f",
+                        token_id[:8], new_entry, new_size_tokens)
+            return record_id
+        except requests.RequestException as exc:
+            logger.error("Position merge fallo: %s", exc)
+            return record_id
+
     payload = {
         "market": market_id,
         "side": "BUY",
