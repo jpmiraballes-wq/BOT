@@ -42,6 +42,12 @@ AUTO_CLOSE_EVERY_N_ITERATIONS = 2
 
 PORTFOLIO_SYNC_EVERY_N_ITERATIONS = 2
 
+# News trading corre solo cada N iteraciones para reducir coste LLM.
+NEWS_TRADING_EVERY_N_ITERATIONS = 3
+
+# Drawdown diario maximo antes de auto-pausar (fraccion del capital).
+DAILY_DRAWDOWN_AUTOPAUSE_PCT = -0.05
+
 
 MM_STRATEGY = "market_making"
 ARB_STRATEGY = "logical_arb"
@@ -263,6 +269,80 @@ def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
     return _size
 
 
+_DD_AUTOPAUSE_TRIGGERED_DATE = {"date": None}
+
+
+def _check_daily_drawdown_autopause():
+    """Si daily_pnl cae por debajo de DAILY_DRAWDOWN_AUTOPAUSE_PCT del capital,
+    marca BotConfig.paused=true y manda alerta Telegram.
+
+    Solo se dispara UNA vez por dia (clave: fecha UTC).
+    El usuario debe despausar manualmente desde el dashboard.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    today = _dt.now(_tz.utc).date().isoformat()
+    if _DD_AUTOPAUSE_TRIGGERED_DATE["date"] == today:
+        return  # ya alertamos hoy, no repetir
+
+    try:
+        stats = _trade_stats()
+        daily_pnl = float(stats.get("daily_pnl") or 0.0)
+        capital = float(CAPITAL_USDC)
+        if capital <= 0:
+            return
+        dd_frac = daily_pnl / capital
+        if dd_frac > DAILY_DRAWDOWN_AUTOPAUSE_PCT:
+            return  # sin drawdown critico
+
+        # Gatillo: pausar bot via BotConfig
+        try:
+            from base44_client import list_records, update_record
+            cfgs = list_records("BotConfig", limit=1) or []
+            if cfgs:
+                cfg_id = cfgs[0].get("id")
+                if cfg_id:
+                    update_record("BotConfig", cfg_id, {
+                        "paused": True,
+                        "notes": "auto_pause: daily_pnl=%.2f USDC (%.2f%% del capital)" % (
+                            daily_pnl, dd_frac * 100.0,
+                        ),
+                    })
+        except Exception as _exc:
+            logger.error("auto_pause write BotConfig fallo: %s", _exc)
+
+        # Alertar Telegram
+        try:
+            import os
+            import requests
+            token = os.environ.get("TELEGRAM_BOT_TOKEN")
+            chat = os.environ.get("TELEGRAM_CHAT_ID")
+            if token and chat:
+                msg = ("\ud83d\udea8 *AUTO-PAUSE por drawdown diario*\n\n"
+                       "daily_pnl: *$%.2f* (%.2f%% del capital)\n"
+                       "umbral: %.1f%%\n\n"
+                       "Bot pausado automaticamente. Revisa y despausa desde el dashboard.") % (
+                    daily_pnl, dd_frac * 100.0,
+                    DAILY_DRAWDOWN_AUTOPAUSE_PCT * 100.0,
+                )
+                requests.post(
+                    "https://api.telegram.org/bot%s/sendMessage" % token,
+                    json={"chat_id": chat, "text": msg, "parse_mode": "Markdown"},
+                    timeout=10,
+                )
+        except Exception as _exc:
+            logger.error("auto_pause telegram fallo: %s", _exc)
+
+        logger.critical(
+            "AUTO-PAUSE activado: daily_pnl=%.2f USDC (%.2f%% del capital, umbral %.1f%%)",
+            daily_pnl, dd_frac * 100.0, DAILY_DRAWDOWN_AUTOPAUSE_PCT * 100.0,
+        )
+        _DD_AUTOPAUSE_TRIGGERED_DATE["date"] = today
+    except Exception as _exc:
+        logger.debug("check_daily_drawdown_autopause fallo: %s", _exc)
+
+
+
+
 def main() -> int:
     setup_logging()
     logger.info("=" * 60)
@@ -372,6 +452,8 @@ def main() -> int:
         # Refrescar caps Kelly cada 60 iteraciones desde Base44
         if iteration % 60 == 0:
             _refresh_kelly_caps(sizer)
+        # Chequear drawdown diario y auto-pausar si corresponde
+        _check_daily_drawdown_autopause()
         loop_started = time.time()
         # ---- Control remoto desde dashboard (BotConfig) ----
         try:
@@ -483,7 +565,7 @@ def main() -> int:
             allocator.report_deployed(MM_STRATEGY, mm_deployed)
 
             # ---- LOGICAL ARB (detection + umbrella execution) ----
-            if news_trader is not None:
+            if news_trader is not None and iteration % NEWS_TRADING_EVERY_N_ITERATIONS == 0:
                 try:
                     news_trader.run_cycle()
                 except Exception as _exc:
