@@ -28,15 +28,42 @@ def create_record(entity, payload):
     if not BASE44_API_KEY:
         logger.debug("BASE44_API_KEY vacio; omitiendo %s", entity)
         return None
-    # LogEvent.data en la app externa es string; si viene dict, serializar.
+    # LogEvent.data en esta app es type:object (dict). Garantizamos dict valido:
+    #  - dict -> se manda tal cual
+    #  - list -> se envuelve en {"items": [...]}
+    #  - string/otro -> se envuelve en {"text": "..."}
+    #  - None/ausente -> se quita el campo
     if entity == "LogEvent" and isinstance(payload, dict):
-        raw = payload.get("data")
-        if isinstance(raw, (dict, list)):
+        if "data" in payload:
+            raw = payload.get("data")
             payload = dict(payload)
-            try:
-                payload["data"] = json.dumps(raw, default=str)
-            except (TypeError, ValueError):
-                payload["data"] = str(raw)
+            if raw is None:
+                payload.pop("data", None)
+            elif isinstance(raw, dict):
+                # Sanitizamos: json.dumps + loads para evitar tipos no serializables
+                try:
+                    payload["data"] = json.loads(json.dumps(raw, default=str))
+                except (TypeError, ValueError):
+                    payload["data"] = {"text": str(raw)}
+            elif isinstance(raw, list):
+                try:
+                    payload["data"] = {"items": json.loads(json.dumps(raw, default=str))}
+                except (TypeError, ValueError):
+                    payload["data"] = {"text": str(raw)}
+            elif isinstance(raw, str):
+                # Intentar parsear como JSON, sino envolver en text
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        payload["data"] = parsed
+                    elif isinstance(parsed, list):
+                        payload["data"] = {"items": parsed}
+                    else:
+                        payload["data"] = {"text": raw}
+                except (TypeError, ValueError):
+                    payload["data"] = {"text": raw}
+            else:
+                payload["data"] = {"text": str(raw)}
     try:
         resp = requests.post(_endpoint(entity), json=payload,
                              headers=_headers(), timeout=REQUEST_TIMEOUT)
