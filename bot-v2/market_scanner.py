@@ -21,6 +21,11 @@ MIN_LIQUIDITY_USDC = 5_000.0
 TOP_N = 20
 REQUEST_TIMEOUT = 15
 
+# Minimo de dias hasta la resolucion del mercado. Si falta menos que esto,
+# evitamos entrar (no hay tiempo para que el trade se mueva a favor y el
+# riesgo de ir a cero por resolucion es alto). Ref: Sidemen Charity Match 2026.
+MIN_DAYS_TO_RESOLUTION = 7
+
 # Umbral de arbitraje logico: sum(YES+NO) debe ser menor a este valor.
 LOGICAL_ARB_THRESHOLD = 0.97
 LOGICAL_ARB_MIN_VOLUME = 20_000.0
@@ -34,6 +39,27 @@ def _safe_float(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _hours_to_resolution(market):
+    """Devuelve horas hasta endDate del mercado. None si no se puede parsear.
+
+    Gamma API suele devolver endDate como ISO 8601 (ej: "2026-06-15T00:00:00Z").
+    """
+    from datetime import datetime, timezone
+    raw = market.get("endDate") or market.get("endDateIso")
+    if not raw:
+        return None
+    try:
+        # Soporta sufijo Z y offsets.
+        s = str(raw).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = dt - datetime.now(timezone.utc)
+        return delta.total_seconds() / 3600.0
+    except (ValueError, TypeError):
+        return None
 
 
 def _fetch_active_markets(limit=500):
@@ -105,6 +131,12 @@ def _passes_filters(market, prices):
     if prices["spread_pct"] < MIN_SPREAD_PCT:
         return False
     if prices["mid"] < 0.05 or prices["mid"] > 0.95:
+        return False
+    hours_left = _hours_to_resolution(market)
+    if hours_left is not None and hours_left < MIN_DAYS_TO_RESOLUTION * 24:
+        logger.debug("skip %s: resuelve en %.1fh (<%dd)",
+                     (market.get("question") or "")[:40],
+                     hours_left, MIN_DAYS_TO_RESOLUTION)
         return False
     return True
 
@@ -182,6 +214,9 @@ def scan_logical_arb():
     for market in raw_markets:
         volume = _safe_float(market.get("volume") or market.get("volumeNum"))
         if volume < LOGICAL_ARB_MIN_VOLUME:
+            continue
+        hours_left = _hours_to_resolution(market)
+        if hours_left is not None and hours_left < MIN_DAYS_TO_RESOLUTION * 24:
             continue
         yn = _extract_yes_no_prices(market)
         if not yn:
