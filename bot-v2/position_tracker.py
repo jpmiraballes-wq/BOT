@@ -74,8 +74,10 @@ class PositionTracker:
             "size_usdc": float(entry_price) * float(size_tokens),
             "size_tokens": float(size_tokens),
             "token_id": token_id,
+            "order_id": order_id,
             "pnl_unrealized": 0.0,
             "status": "open",
+            "pending_fill": True,
         }
         try:
             resp = requests.post(_b44_endpoint("Position"), json=payload,
