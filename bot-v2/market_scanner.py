@@ -16,9 +16,9 @@ from config import GAMMA_API_URL, MIN_SPREAD_PCT
 
 logger = logging.getLogger(__name__)
 
-MIN_VOLUME_USDC = 50_000.0
-MIN_LIQUIDITY_USDC = 5_000.0
-TOP_N = 20
+MIN_VOLUME_USDC = 20_000.0
+MIN_LIQUIDITY_USDC = 2_000.0
+TOP_N = 40
 REQUEST_TIMEOUT = 15
 
 # Minimo de dias hasta la resolucion del mercado. Si falta menos que esto,
