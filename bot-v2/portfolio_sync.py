@@ -19,7 +19,7 @@ import logging
 
 import requests
 
-from base44_client import list_records, update_record
+from base44_client import list_records, update_record, create_record
 from decision_logger import now_iso
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,7 @@ class PortfolioSync:
             return "confirmed"
 
         if info["status"] in ("CANCELED", "CANCELLED", "EXPIRED"):
+            # TRADE_ON_CANCEL_V1
             update_record("Position", pos_id, {
                 "status": "closed",
                 "pending_fill": False,
@@ -113,6 +114,24 @@ class PortfolioSync:
                 "close_time": now_iso(),
                 "close_reason": "cancelled_no_fill",
             })
+            try:
+                create_record("Trade", {
+                    "market": pos.get("market"),
+                    "side": pos.get("side"),
+                    "entry_price": pos.get("entry_price"),
+                    "exit_price": pos.get("entry_price"),
+                    "size_usdc": pos.get("size_usdc") or 0.0,
+                    "pnl": 0.0,
+                    "pnl_pct": 0.0,
+                    "strategy": pos.get("strategy") or "market_making",
+                    "status": "cancelled",
+                    "entry_time": pos.get("opened_at"),
+                    "exit_time": now_iso(),
+                    "notes": f"cancelled_no_fill order={str(order_id)[:10]}",
+                })
+            except Exception as exc:
+                logger.debug("create Trade(cancelled) fallo pos=%s: %s",
+                             str(pos_id)[:8], exc)
             logger.info("Orden cancelada sin fill: pos=%s order=%s",
                         str(pos_id)[:8], str(order_id)[:10])
             return "cancelled"
