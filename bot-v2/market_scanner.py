@@ -150,7 +150,7 @@ def _passes_filters(market, prices):
         return False
     if prices["spread_pct"] < MIN_SPREAD_PCT:
         return False
-    if prices["mid"] < 0.05 or prices["mid"] > 0.95:
+    if prices["mid"] < 0.12 or prices["mid"] > 0.88:
         return False
     hours_left = _hours_to_resolution(market)
     if hours_left is not None and hours_left < MIN_DAYS_TO_RESOLUTION * 24:
