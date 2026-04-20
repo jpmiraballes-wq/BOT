@@ -465,7 +465,19 @@ def main() -> int:
             # Heartbeat ANTES de AutoClose para no quedar "offline" si el
             # cierre masivo tarda. Si AutoClose cierra muchas, el siguiente
             # ciclo emitira otro heartbeat.
-            reporter.report(build_snapshot("running", rm, om))
+            # Aislado en try/except: si build_snapshot() falla (CLOB caido,
+            # rm corrupto, etc.) mandamos heartbeat minimo para no quedar
+            # "clavado" en el dashboard.
+            try:
+                reporter.report(build_snapshot("running", rm, om))
+            except Exception as _hb_exc:
+                logger.error("build_snapshot fallo, mando heartbeat minimo: %s",
+                             _hb_exc)
+                try:
+                    reporter.send_minimal_heartbeat("running",
+                                                   notes=str(_hb_exc)[:100])
+                except Exception as _min_exc:
+                    logger.error("minimal_heartbeat tambien fallo: %s", _min_exc)
 
             if aclose is not None and iteration % AUTO_CLOSE_EVERY_N_ITERATIONS == 0:
                 try:
