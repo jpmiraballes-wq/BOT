@@ -93,27 +93,46 @@ class AutoClose:
         self.om = order_manager
 
     def _try_live_close(self, pos, size_tokens):
-        """Best-effort: llama al CLOB real. No rompe el flujo si falla."""
+        """Intenta cerrar la posicion on-chain.
+
+        Retorna True SOLO si close_position_market posteo una SELL (order_id
+        no None). Si devuelve None (balance insuficiente, sin bid, etc.)
+        consideramos que el cierre NO ocurrio y el caller NO debe marcar la
+        Position como closed en Base44.
+
+        En DRY_RUN o sin OrderManager -> True (se simula el cierre).
+        """
         if DRY_RUN or self.om is None:
-            return False
+            return True
         token_id = pos.get("token_id")
         side = (pos.get("side") or "BUY").upper()
         close_side = "SELL" if side == "BUY" else "BUY"
         try:
             fn = getattr(self.om, "close_position_market", None)
-            if callable(fn):
-                fn(
-                    token_id=token_id,
-                    size=size_tokens,
-                    side=close_side,
-                    market_id=pos.get("market"),
-                    strategy=pos.get("strategy"),
+            if not callable(fn):
+                logger.warning(
+                    "AutoClose: close_position_market no existe en OrderManager; skip live close pos=%s",
+                    str(pos.get("id"))[:8],
                 )
+                return False
+            result = fn(
+                token_id=token_id,
+                size=size_tokens,
+                side=close_side,
+                market_id=pos.get("market"),
+                strategy=pos.get("strategy"),
+            )
+            if result:
                 return True
+            logger.info(
+                "AutoClose: close_position_market devolvio None pos=%s (balance insuficiente o sin bid); Position NO marcada como closed",
+                str(pos.get("id"))[:8],
+            )
+            return False
         except Exception as exc:
             logger.warning("close live fallo (%s): %s",
                            str(pos.get("id"))[:8], exc)
-        return False
+            return False
 
     def _close_position(self, pos, current_price, pnl_usdc, pnl_pct, reason):
         pos_id = pos.get("id")
@@ -123,8 +142,13 @@ class AutoClose:
         if (size_tokens is None or size_tokens <= 0) and entry and entry > 0:
             size_tokens = size_usdc / entry
 
-        # 1) Intento de cierre real (live). En paper se skip.
-        self._try_live_close(pos, size_tokens or 0.0)
+        # 1) Intento de cierre real (live). En paper se simula como exitoso.
+        live_ok = self._try_live_close(pos, size_tokens or 0.0)
+        if not live_ok:
+            # La SELL on-chain no pudo ejecutarse (balance insuficiente, etc).
+            # No marcamos la Position como closed ni creamos Trade, para no
+            # inventar PnL. El proximo ciclo de AutoClose reintentara.
+            return
 
         # 2) Marcar Position como closed.
         now_iso = _iso_now()
