@@ -21,8 +21,14 @@ import requests
 
 from config import (
     BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL,
-    PAPER_CAPITAL_USDC,
+    DRY_RUN, PAPER_CAPITAL_USDC,
 )
+
+# _paper_dry_run_guard: PaperBroker solo debe escribir a Base44 cuando
+# corre en modo DRY_RUN. En modo real (DRY_RUN=false) no debe contaminar
+# ningun dato aunque alguien lo instancie por error.
+def _paper_writes_allowed() -> bool:
+    return bool(DRY_RUN)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,8 @@ def _b44_trade_url(record_id: Optional[str] = None) -> str:
 
 
 def _b44_create_trade(payload: Dict[str, Any]) -> Optional[str]:
+    if not _paper_writes_allowed():
+        return None
     if not BASE44_API_KEY:
         return None
     try:
@@ -60,6 +68,8 @@ def _b44_create_trade(payload: Dict[str, Any]) -> Optional[str]:
 
 
 def _b44_update_trade(record_id: str, payload: Dict[str, Any]) -> None:
+    if not _paper_writes_allowed():
+        return
     if not record_id or not BASE44_API_KEY:
         return
     try:
