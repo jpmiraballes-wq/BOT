@@ -8,12 +8,12 @@ Uso tipico desde una estrategia:
 
     from capital_allocator import CapitalAllocator
     ca = CapitalAllocator()
-    budget = ca.get_available("market_making")   # allocated - deployed
+    budget = ca.get_available("market_maker")   # allocated - deployed
     if budget <= 0:
         return  # no hay mas capital para esta estrategia
     ...
-    ca.report_deployed("market_making", deployed_usdc)
-    ca.record_trade("market_making", pnl=1.23)
+    ca.report_deployed("market_maker", deployed_usdc)
+    ca.record_trade("market_maker", pnl=1.23)
 """
 
 import logging
