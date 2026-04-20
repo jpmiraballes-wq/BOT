@@ -195,9 +195,27 @@ class OrderManager:
             return []
 
         mid = float(opportunity["mid"])
-        half_spread = max(MIN_SPREAD_PCT / 2.0, 0.01)
-        bid_price = self._round_price(mid - half_spread)
-        ask_price = self._round_price(mid + half_spread)
+        # Bids/asks agresivos: saltar al frente del book (best_bid + 1 tick)
+        # en vez de calcular desde mid - half_spread (que cae lejos y no se llena).
+        TICK = 0.01
+        # market_scanner pone "bid"/"ask" en el opportunity (best_bid/best_ask del orderbook).
+        best_bid = float(opportunity.get("bid") or opportunity.get("best_bid") or 0.0)
+        best_ask = float(opportunity.get("ask") or opportunity.get("best_ask") or 0.0)
+        if best_bid > 0 and best_ask > 0 and best_ask > best_bid:
+            # Aggressive mode: 1 tick delante del best_bid / best_ask.
+            # Cap inferior en mid - 0.01 y superior en mid + 0.01 para no
+            # tocar el otro lado ni auto-fillearnos.
+            bid_price = self._round_price(min(best_bid + TICK, mid - TICK))
+            ask_price = self._round_price(max(best_ask - TICK, mid + TICK))
+            # Si el book es tan estrecho que se cruzarian, volvemos al mid +- 1 tick.
+            if ask_price - bid_price < 0.01:
+                bid_price = self._round_price(mid - TICK)
+                ask_price = self._round_price(mid + TICK)
+        else:
+            # Fallback: comportamiento viejo si el opportunity no trae best_bid/best_ask.
+            half_spread = max(MIN_SPREAD_PCT / 2.0, 0.01)
+            bid_price = self._round_price(mid - half_spread)
+            ask_price = self._round_price(mid + half_spread)
 
         if ask_price - bid_price < 0.01:
             logger.info("Spread insuficiente en %s.", market_id)
