@@ -237,13 +237,12 @@ def main() -> int:
 
     rm = RiskManager()
     reporter = Reporter()
-    if DRY_RUN:
-        logger.info("=== MODO PAPER TRADING ACTIVO (DRY_RUN=true) ===")
-        om = PaperBroker()
-        paper_reporter = PaperDailyReporter(om)
-    else:
-        om = OrderManager()
-        paper_reporter = None
+    # PAPER TRADING DESACTIVADO PERMANENTEMENTE
+    # (antes: if DRY_RUN -> PaperBroker. Eliminado por el usuario el 2026-04-20
+    # porque generaba trades falsos que contaminaban el dashboard.)
+    logger.info("=== MODO LIVE TRADING FORZADO (paper trading desactivado) ===")
+    om = OrderManager()
+    paper_reporter = None
     sizer = KellySizer()
     cb = CircuitBreakers()
     allocator = CapitalAllocator()
