@@ -130,6 +130,14 @@ def _trade_stats():
     total_closed = 0
 
     for t in trades:
+        # REALIZED_PNL_ONLY_V1: solo contar trades con venta REAL confirmada.
+        # Se excluyen:
+        #   - trades sin pnl
+        #   - trades con status 'cancelled' o 'open'
+        #   - trades sin exit_time distinto de entry_time (no hubo salida)
+        status = _field(t, "status")
+        if status not in ("closed", "filled"):
+            continue
         raw_pnl = _field(t, "pnl")
         if raw_pnl is None:
             continue
@@ -137,18 +145,30 @@ def _trade_stats():
             pnl = float(raw_pnl)
         except (TypeError, ValueError):
             continue
+        entry_time = _field(t, "entry_time")
+        exit_time = _field(t, "exit_time")
+        if not exit_time or exit_time == entry_time:
+            # Sin cierre real -> no cuenta para stats.
+            continue
+        entry_price = _field(t, "entry_price")
+        exit_price = _field(t, "exit_price")
+        if entry_price is not None and exit_price is not None:
+            try:
+                if float(entry_price) == float(exit_price) and abs(pnl) < 1e-6:
+                    # Backfill sintetico (entry=exit, pnl=0) -> no cuenta.
+                    continue
+            except (TypeError, ValueError):
+                pass
         total_pnl += pnl
         total_closed += 1
         if pnl > 0:
             wins += 1
-        exit_time = _field(t, "exit_time") or _field(t, "entry_time")
-        if exit_time:
-            try:
-                d = _dt.fromisoformat(exit_time.replace("Z", "+00:00")).date()
-                if d == today:
-                    daily_pnl += pnl
-            except (ValueError, AttributeError):
-                pass
+        try:
+            d = _dt.fromisoformat(exit_time.replace("Z", "+00:00")).date()
+            if d == today:
+                daily_pnl += pnl
+        except (ValueError, AttributeError):
+            pass
 
     data = {
         "daily_pnl": round(daily_pnl, 4),
