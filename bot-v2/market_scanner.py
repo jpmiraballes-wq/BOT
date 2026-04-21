@@ -161,17 +161,28 @@ def _passes_filters(market, prices):
                     (market.get("question") or "")[:60],
                     hours_left)
         return False
+    # REWARDS_FILTER_V1: solo mercados donde Polymarket paga liquidity
+    # rewards. rewardsMaxSpread > 0 = hay bonus. Los pros priorizan estos
+    # porque el rewards-adjusted return es ~3x vs mercados sin bonus.
+    # Ref: defiance_cr (bot open-source que llego a $700-800/dia).
+    rewards_max_spread = _safe_float(market.get("rewardsMaxSpread"))
+    if rewards_max_spread <= 0:
+        return False
     return True
 
 
 def _score(market, prices):
+    # REWARDS_FILTER_V1: boost 3x si el mercado paga liquidity rewards.
+    # Esta aca (no en filters) porque queremos mantener ranking entre
+    # mercados premium (todos rewarded) por volumen/liquidez/spread.
+    rewards_boost = 3.0 if _safe_float(market.get("rewardsMaxSpread")) > 0 else 1.0
     volume = _safe_float(market.get("volume") or market.get("volumeNum"))
     liquidity = _safe_float(market.get("liquidity") or market.get("liquidityNum"))
     mid_balance = 1.0 - abs(prices["mid"] - 0.5) * 2.0
     return (prices["spread_pct"] * 100.0 * 0.5
             + min(liquidity / 1000.0, 100.0) * 0.3
             + mid_balance * 20.0 * 0.2
-            + volume / 100_000.0)
+            + volume / 100_000.0) * rewards_boost
 
 
 def _extract_token_ids(market):
