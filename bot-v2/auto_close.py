@@ -164,9 +164,23 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
             # Nota: esta ruta tambien existe autenticada pero para solo
             # lectura del propio wallet funciona con la proxy address que
             # el order_manager ya configuro. Si no, om.client lo hace.
+            # DUST_ZOMBIE_V3: get_balance_allowance espera BalanceAllowanceParams
+            # (objeto), no dict. Importamos la clase y construimos el param.
             bal_resp = None
             if hasattr(om, "client") and hasattr(om.client, "get_balance_allowance"):
-                bal_resp = om.client.get_balance_allowance(bal_params)
+                try:
+                    from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                    _bap = BalanceAllowanceParams(
+                        asset_type=AssetType.CONDITIONAL,
+                        token_id=str(token_id),
+                        signature_type=2,
+                    )
+                    bal_resp = om.client.get_balance_allowance(_bap)
+                except Exception as _bap_exc:
+                    logger.warning(
+                        "DUST_ZOMBIE_V3: BalanceAllowanceParams fallo (%s): %s",
+                        pos_id[-8:], _bap_exc,
+                    )
             raw_bal = (bal_resp or {}).get("balance", "0")
             # El API devuelve balance en unidades de 1e6 (USDC-style).
             # Si raw_bal es string "1066500" -> 1.0665 tokens reales.
