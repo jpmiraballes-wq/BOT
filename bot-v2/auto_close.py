@@ -101,12 +101,13 @@ class AutoClose:
         try:
             fn = getattr(self.om, "close_position_market", None)
             if callable(fn):
+                # close_position_market solo acepta (token_id, shares, strategy).
+                # Siempre vende al bid (SELL), no necesita side ni market_id.
+                _ = close_side  # silenciado, no se usa en la llamada
                 fn(
                     token_id=token_id,
                     shares=size_tokens,
-                    side=close_side,
-                    market_id=pos.get("market"),
-                    strategy=pos.get("strategy"),
+                    strategy=pos.get("strategy") or "auto_close",
                 )
                 return True
         except Exception as exc:
