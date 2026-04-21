@@ -378,10 +378,32 @@ class PositionTracker:
                 continue
             # PATCH: verificar balance on-chain antes de intentar SELL
             if not self._has_wallet_balance(token_id, size_tokens):
+                # GRACE PERIOD: si la posicion tiene < 5 min, puede ser una
+                # orden LIMIT aun no matcheada (tipico en stat_arb). No la
+                # matamos todavia, le damos tiempo al CLOB.
+                try:
+                    opened_ts = pos.get("opened_at_ts")
+                    if opened_ts:
+                        age_sec = time.time() - float(opened_ts)
+                    else:
+                        opened_iso = pos.get("opened_at") or pos.get("created_date")
+                        if opened_iso:
+                            dt = datetime.fromisoformat(str(opened_iso).replace("Z", "+00:00"))
+                            age_sec = (datetime.now(timezone.utc) - dt).total_seconds()
+                        else:
+                            age_sec = 9999.0
+                except Exception:
+                    age_sec = 9999.0
+                if age_sec < 300:  # 5 minutos de gracia
+                    logger.info(
+                        "Position %s sin balance pero solo %.0fs de edad - grace period (orden LIMIT pendiente?)",
+                        pid, age_sec
+                    )
+                    continue
                 logger.warning(
-                    "Position %s sin balance on-chain para %s (req %.2f tokens). "
+                    "Position %s sin balance on-chain para %s (req %.2f tokens, age=%.0fs). "
                     "Marco closed (no_balance_on_chain).",
-                    pid, (token_id or "")[:10], float(size_tokens)
+                    pid, (token_id or "")[:10], float(size_tokens), age_sec
                 )
                 self._mark_no_balance(pid)
                 continue
