@@ -46,7 +46,7 @@ PORTFOLIO_SYNC_EVERY_N_ITERATIONS = 2
 NEWS_TRADING_EVERY_N_ITERATIONS = 3
 
 # Drawdown diario maximo antes de auto-pausar (fraccion del capital).
-DAILY_DRAWDOWN_AUTOPAUSE_PCT = -0.05
+DAILY_DRAWDOWN_AUTOPAUSE_PCT = -0.10
 
 
 MM_STRATEGY = "market_maker"
@@ -353,7 +353,17 @@ def _check_daily_drawdown_autopause():
     try:
         stats = _trade_stats()
         daily_pnl = float(stats.get("daily_pnl") or 0.0)
+        # Lee capital REAL desde BotConfig (fuente de verdad del usuario).
+        # Antes usaba CAPITAL_USDC (constante vieja) lo que disparaba auto-pause
+        # con perdidas minusculas al calcular sobre capital desfasado.
         capital = float(CAPITAL_USDC)
+        try:
+            _cfg = fetch_bot_config() or {}
+            _live_cap = _cfg.get("capital_usdc")
+            if _live_cap is not None and float(_live_cap) > 0:
+                capital = float(_live_cap)
+        except Exception:
+            pass
         if capital <= 0:
             return
         dd_frac = daily_pnl / capital
