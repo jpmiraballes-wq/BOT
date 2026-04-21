@@ -408,8 +408,7 @@ class StatArb:
             order_ids = self.om.place_limit_buy(
                 token_id=side_market["yes_token"],
                 price=round(price * 1.005, 2),
-                size=size_tokens,
-                market_id=market_id,
+                shares=size_tokens,
                 strategy=STRATEGY,
             )
         except Exception as exc:
@@ -454,8 +453,7 @@ class StatArb:
             try:
                 self.om.close_position_market(
                     token_id=pos["token_id"],
-                    size=pos["size_tokens"],
-                    market_id=market_id,
+                    shares=pos["size_tokens"],
                     strategy=STRATEGY,
                 )
             except Exception as exc:
