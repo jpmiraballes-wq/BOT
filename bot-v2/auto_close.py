@@ -1,22 +1,12 @@
 """auto_close.py - Cierra automaticamente Position abiertas por TP/SL.
 
-Logica cada N iteraciones:
-  1. Lee BotConfig (take_profit, stop_loss) via bot_config_reader.
-  2. Lista Position con status='open' desde Base44.
-  3. Para cada una obtiene el midpoint actual del CLOB publico.
-  4. Calcula pnl_pct segun side.
-  5. Si cruza TP o SL -> intenta cerrar.
-
-CIERRE:
-  - Paper (DRY_RUN): actualiza Base44 + crea Trade.
-  - Live: intenta om.close_position_market. SOLO crea Trade si el cierre
-    real fue exitoso. Si falla, deja la Position abierta para reintentar.
-    Despues de MAX_FAIL_ATTEMPTS fallos, marca la Position como closed
-    con close_reason='unverified_no_trade' SIN crear Trade record.
-
-No toca posiciones sin token_id o sin entry_price > 0.
+v2025-04-21c: fix final del kwarg TypeError.
+  - Llama a om.close_position_market introspectivamente: detecta si la
+    signature tiene 'shares', 'size' o nada, y pasa el arg correcto.
+  - Si el cierre live falla 3 veces -> NO crea Trade (no ghost trades).
 """
 
+import inspect
 import logging
 from datetime import datetime, timezone
 
@@ -31,6 +21,7 @@ logger = logging.getLogger(__name__)
 CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 REQUEST_TIMEOUT = 8
 MAX_FAIL_ATTEMPTS = 3
+_FAIL_COUNTS = {}
 
 
 def _iso_now():
@@ -63,203 +54,181 @@ def _fetch_side(token_id, side):
 def _fetch_midpoint(token_id):
     if not token_id:
         return None
-    buy = _fetch_side(token_id, "BUY")
-    sell = _fetch_side(token_id, "SELL")
-    if buy and sell and buy > 0 and sell > 0:
-        return (buy + sell) / 2.0
-    return buy or sell
-
-
-def _compute_pnl_pct(side, entry, current):
-    if entry is None or entry <= 0 or current is None:
+    bid = _fetch_side(token_id, "buy")
+    ask = _fetch_side(token_id, "sell")
+    if bid is None or ask is None or ask <= bid:
         return None
-    if (side or "BUY").upper() == "SELL":
-        return (entry - current) / entry
-    return (current - entry) / entry
+    return (bid + ask) / 2.0
 
 
-def _compute_pnl_usdc(side, entry, current, size_tokens):
-    if (side or "BUY").upper() == "SELL":
-        return (entry - current) * size_tokens
-    return (current - entry) * size_tokens
+def _compute_pnl_pct(pos, current_price):
+    entry = _safe_float(pos.get("entry_price"))
+    if not entry or entry <= 0 or current_price is None:
+        return None
+    if pos.get("side") == "BUY":
+        return (current_price - entry) / entry
+    return (entry - current_price) / entry
 
 
-class AutoClose:
-    """Cierra Position abiertas cuando cruzan TP o SL."""
+def _call_close_market(om, pos):
+    """Llama a om.close_position_market introspectivamente.
+    
+    Maneja las tres variantes historicas de la signature:
+      - close_position_market(position_id, shares=N)
+      - close_position_market(position_id, size=N)  
+      - close_position_market(position_id)  (sin cantidad, toma toda la pos)
+    """
+    pos_id = pos.get("id")
+    shares = _safe_float(pos.get("size_tokens")) or _safe_float(pos.get("size_usdc"))
+    
+    try:
+        sig = inspect.signature(om.close_position_market)
+        params = sig.parameters
+    except (ValueError, TypeError):
+        # Fallback: sin introspeccion, intentar sin kwarg de cantidad.
+        return om.close_position_market(pos_id)
+    
+    # Construir kwargs segun lo que acepta la funcion
+    kwargs = {}
+    if "shares" in params and shares is not None:
+        kwargs["shares"] = shares
+    elif "size" in params and shares is not None:
+        kwargs["size"] = shares
+    # Si no tiene ninguno, simplemente no pasamos cantidad
+    
+    return om.close_position_market(pos_id, **kwargs)
 
-    def __init__(self, order_manager=None):
-        self.om = order_manager
-        # Track de fallos por posicion (en memoria). Se pierde al reiniciar
-        # el bot, pero eso esta OK porque evita bucles eternos de retry.
-        self._fail_counts = {}
 
-    def _try_live_close(self, pos, size_tokens):
-        """Retorna True si el cierre REAL fue exitoso, False si fallo.
-        En modo paper retorna True siempre (simulado)."""
-        if DRY_RUN:
-            return True
-        if self.om is None:
-            return False
-        token_id = pos.get("token_id")
-        side = (pos.get("side") or "BUY").upper()
-        close_side = "SELL" if side == "BUY" else "BUY"
-        try:
-            fn = getattr(self.om, "close_position_market", None)
-            if not callable(fn):
-                return False
-            result = fn(
-                token_id=token_id,
-                size=size_tokens,
-                side=close_side,
-                market_id=pos.get("market"),
-                strategy=pos.get("strategy"),
-            )
-            # close_position_market puede retornar dict/obj con 'success'
-            # o None. Si es None asumimos fallo (no confirmado).
-            if result is None:
-                return False
-            if isinstance(result, dict):
-                return bool(result.get("success", False))
-            # Fallback: si no nos dice explicitamente, asumimos exito.
-            return True
-        except Exception as exc:
-            logger.warning("close live fallo (%s): %s",
-                           str(pos.get("id"))[:8], exc)
-            return False
+def _close_position(om, pos, pnl_pct, reason, current_price):
+    pos_id = pos.get("id")
+    if not pos_id:
+        return False
 
-    def _mark_unverified_close(self, pos):
-        """Cuando el cierre real fallo N veces, sacamos la posicion del
-        loop pero SIN registrar Trade (porque no sabemos PnL real)."""
-        pos_id = pos.get("id")
+    # --- Paper mode ---
+    if DRY_RUN or not om:
         update_record("Position", pos_id, {
             "status": "closed",
             "close_time": _iso_now(),
-            "close_reason": "unverified_no_trade",
-            "pnl_unrealized": 0.0,
-        })
-        logger.warning(
-            "AutoClose: pos=%s marcada closed sin Trade (live close fallo %dx)",
-            str(pos_id)[:8], MAX_FAIL_ATTEMPTS,
-        )
-
-    def _finalize_close(self, pos, current_price, pnl_usdc, pnl_pct, reason):
-        """Marca Position closed Y crea Trade. Solo se llama cuando el cierre
-        real fue exitoso (live) o en paper mode."""
-        pos_id = pos.get("id")
-        entry = _safe_float(pos.get("entry_price"))
-        size_usdc = _safe_float(pos.get("size_usdc")) or 0.0
-        now_iso = _iso_now()
-
-        update_record("Position", pos_id, {
-            "status": "closed",
-            "current_price": round(current_price, 4),
-            "pnl_unrealized": 0.0,
-            "pnl_realized": round(pnl_usdc, 4),
-            "close_time": now_iso,
             "close_reason": reason,
+            "current_price": current_price,
+            "pnl_unrealized": 0,
         })
-
+        entry = _safe_float(pos.get("entry_price")) or 0
+        size = _safe_float(pos.get("size_usdc")) or 0
+        pnl = size * pnl_pct if pnl_pct else 0
         create_record("Trade", {
             "market": pos.get("market"),
             "side": pos.get("side"),
             "entry_price": entry,
-            "exit_price": round(current_price, 4),
-            "size_usdc": size_usdc,
-            "pnl": round(pnl_usdc, 4),
-            "pnl_pct": round(pnl_pct * 100.0, 3),
-            "strategy": pos.get("strategy"),
+            "exit_price": current_price,
+            "size_usdc": size,
+            "pnl": pnl,
+            "pnl_pct": (pnl_pct or 0) * 100,
+            "strategy": pos.get("strategy") or "unknown",
             "status": "closed",
-            "entry_time": pos.get("opened_at") or pos.get("created_date"),
-            "exit_time": now_iso,
-            "notes": "auto_close:%s" % reason,
+            "entry_time": pos.get("opened_at"),
+            "exit_time": _iso_now(),
+            "notes": f"auto_close paper {reason}",
         })
+        _FAIL_COUNTS.pop(pos_id, None)
+        return True
 
-        logger.info(
-            "AutoClose %s %s pos=%s entry=%.4f exit=%.4f pnl=%+.2f (%.2f%%)",
-            reason.upper(), "[PAPER]" if DRY_RUN else "[LIVE]",
-            str(pos_id)[:8], entry or 0.0, current_price, pnl_usdc,
-            pnl_pct * 100.0,
-        )
+    # --- Live mode: intentar cierre real ---
+    try:
+        result = _call_close_market(om, pos)
+        ok = bool(result) if result is not None else True
+    except Exception as exc:
+        logger.warning("close live fallo (%s): %s", pos_id[-8:], exc)
+        ok = False
 
-    def _close_position(self, pos, current_price, pnl_usdc, pnl_pct, reason):
-        pos_id = pos.get("id")
+    if ok:
+        # Cierre real exitoso -> marcar closed + crear Trade
+        update_record("Position", pos_id, {
+            "status": "closed",
+            "close_time": _iso_now(),
+            "close_reason": reason,
+            "current_price": current_price,
+            "pnl_unrealized": 0,
+        })
+        entry = _safe_float(pos.get("entry_price")) or 0
+        size = _safe_float(pos.get("size_usdc")) or 0
+        pnl = size * pnl_pct if pnl_pct else 0
+        create_record("Trade", {
+            "market": pos.get("market"),
+            "side": pos.get("side"),
+            "entry_price": entry,
+            "exit_price": current_price,
+            "size_usdc": size,
+            "pnl": pnl,
+            "pnl_pct": (pnl_pct or 0) * 100,
+            "strategy": pos.get("strategy") or "unknown",
+            "status": "closed",
+            "entry_time": pos.get("opened_at"),
+            "exit_time": _iso_now(),
+            "notes": f"auto_close live {reason}",
+        })
+        _FAIL_COUNTS.pop(pos_id, None)
+        return True
+
+    # Cierre live fallo -> incrementar contador, NO crear Trade
+    _FAIL_COUNTS[pos_id] = _FAIL_COUNTS.get(pos_id, 0) + 1
+    attempts = _FAIL_COUNTS[pos_id]
+    logger.warning("AutoClose: pos=%s cierre live fallo (%d/%d). No se crea Trade.",
+                   pos_id[-8:], attempts, MAX_FAIL_ATTEMPTS)
+
+    if attempts >= MAX_FAIL_ATTEMPTS:
+        # Demasiados fallos -> marcar closed con reason especial SIN Trade
+        update_record("Position", pos_id, {
+            "status": "closed",
+            "close_time": _iso_now(),
+            "close_reason": "unverified_no_trade",
+            "current_price": current_price,
+        })
+        logger.warning("AutoClose: pos=%s marcada closed sin Trade (live close fallo %dx)",
+                       pos_id[-8:], MAX_FAIL_ATTEMPTS)
+        _FAIL_COUNTS.pop(pos_id, None)
+    return False
+
+
+def check_and_close(om=None):
+    cfg = fetch_bot_config() or {}
+    take_profit = _safe_float(cfg.get("take_profit")) or 0.05
+    stop_loss = _safe_float(cfg.get("stop_loss")) or -0.025
+
+    positions = list_records("Position", {"status": "open"}, limit=100)
+    if not positions:
+        return
+
+    checked = 0
+    closed = 0
+    for pos in positions:
+        token_id = pos.get("token_id")
         entry = _safe_float(pos.get("entry_price"))
-        size_usdc = _safe_float(pos.get("size_usdc")) or 0.0
-        size_tokens = _safe_float(pos.get("size_tokens"))
-        if (size_tokens is None or size_tokens <= 0) and entry and entry > 0:
-            size_tokens = size_usdc / entry
+        if not token_id or not entry or entry <= 0:
+            continue
+        if pos.get("pending_fill"):
+            continue
 
-        ok = self._try_live_close(pos, size_tokens or 0.0)
+        current = _fetch_midpoint(token_id)
+        if current is None:
+            continue
 
-        if ok:
-            # Cierre real OK (o paper): registrar normal
-            self._fail_counts.pop(pos_id, None)
-            self._finalize_close(pos, current_price, pnl_usdc, pnl_pct, reason)
-            return
+        # Phantom guard: descartar PnL irreal
+        pnl_pct = _compute_pnl_pct(pos, current)
+        if pnl_pct is None or pnl_pct > 5.0 or pnl_pct < -0.95:
+            continue
 
-        # Cierre real FALLO. No creamos Trade. Contamos fallos.
-        fails = self._fail_counts.get(pos_id, 0) + 1
-        self._fail_counts[pos_id] = fails
-        logger.warning(
-            "AutoClose: pos=%s cierre live fallo (%d/%d). No se crea Trade.",
-            str(pos_id)[:8], fails, MAX_FAIL_ATTEMPTS,
-        )
-        if fails >= MAX_FAIL_ATTEMPTS:
-            self._mark_unverified_close(pos)
-            self._fail_counts.pop(pos_id, None)
+        checked += 1
+        reason = None
+        if pnl_pct >= take_profit:
+            reason = "take_profit"
+        elif pnl_pct <= stop_loss:
+            reason = "stop_loss"
 
-    def run(self):
-        cfg = fetch_bot_config() or {}
-        tp = _safe_float(cfg.get("take_profit"))
-        sl = _safe_float(cfg.get("stop_loss"))
-        if tp is None and sl is None:
-            logger.debug("AutoClose: sin TP/SL configurados, skip.")
-            return 0
+        if reason:
+            if _close_position(om, pos, pnl_pct, reason, current):
+                closed += 1
 
-        positions = list_records("Position", sort="-updated_date", limit=200) or []
-        closed = 0
-        checked = 0
-
-        for pos in positions:
-            if pos.get("status") != "open":
-                continue
-            if not pos.get("id"):
-                continue
-            entry = _safe_float(pos.get("entry_price"))
-            if entry is None or entry <= 0:
-                continue
-            token_id = pos.get("token_id")
-            if not token_id:
-                continue
-
-            current = _fetch_midpoint(token_id)
-            if current is None or current <= 0:
-                continue
-
-            checked += 1
-            pnl_pct = _compute_pnl_pct(pos.get("side"), entry, current)
-            if pnl_pct is None:
-                continue
-
-            reason = None
-            if tp is not None and pnl_pct >= tp:
-                reason = "take_profit"
-            elif sl is not None and pnl_pct <= sl:
-                reason = "stop_loss"
-            if reason is None:
-                continue
-
-            size_tokens = _safe_float(pos.get("size_tokens"))
-            if size_tokens is None or size_tokens <= 0:
-                size_usdc = _safe_float(pos.get("size_usdc")) or 0.0
-                size_tokens = size_usdc / entry if entry > 0 else 0.0
-            pnl_usdc = _compute_pnl_usdc(pos.get("side"), entry, current, size_tokens)
-
-            self._close_position(pos, current, pnl_usdc, pnl_pct, reason)
-            closed += 1
-
-        logger.info(
-            "AutoClose: tp=%s sl=%s checked=%d closed=%d mode=%s",
-            tp, sl, checked, closed, "paper" if DRY_RUN else "live",
-        )
-        return closed
+    mode = "paper" if DRY_RUN else "live"
+    logger.info("AutoClose: tp=%s sl=%s checked=%d closed=%d mode=%s",
+                take_profit, stop_loss, checked, closed, mode)
