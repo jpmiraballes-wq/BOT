@@ -232,3 +232,18 @@ def check_and_close(om=None):
     mode = "paper" if DRY_RUN else "live"
     logger.info("AutoClose: tp=%s sl=%s checked=%d closed=%d mode=%s",
                 take_profit, stop_loss, checked, closed, mode)
+
+
+# --------------------------------------------------------------------------
+# Wrapper de compatibilidad: main.py espera una clase AutoClose(om) con un
+# metodo check_and_close(). Mantenemos la funcion standalone y agregamos la
+# clase como thin wrapper para no romper la API historica.
+# --------------------------------------------------------------------------
+class AutoClose:
+    """Thin wrapper sobre check_and_close() para compat con main.py."""
+
+    def __init__(self, om=None):
+        self.om = om
+
+    def check_and_close(self):
+        return check_and_close(self.om)
