@@ -146,9 +146,8 @@ def _open_positions_from_base44():
     if _OPEN_POS_CACHE["data"] is not None and (now - _OPEN_POS_CACHE["ts"]) < _OPEN_POS_TTL:
         return _OPEN_POS_CACHE["data"]
     try:
-        from base44_client import Base44Client
-        client = Base44Client()
-        rows = client.list("Position", sort="-updated_date", limit=100) or []
+        from base44_client import list_records
+        rows = list_records("Position", sort="-updated_date", limit=100) or []
     except Exception as exc:
         logger.warning("open_positions_from_base44 fallo: %s", exc)
         return (0, 0.0)
