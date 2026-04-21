@@ -150,7 +150,9 @@ def _passes_filters(market, prices):
         return False
     if prices["spread_pct"] < MIN_SPREAD_PCT:
         return False
-    if prices["mid"] < 0.12 or prices["mid"] > 0.88:
+    # PRICE_RANGE_V2: subimos a 0.20-0.80. En <0.20 o >0.80 el tick de 0.01
+    # es >5% del precio y cualquier SL -7% se gatilla con 1 solo tick.
+    if prices["mid"] < 0.20 or prices["mid"] > 0.80:
         return False
     hours_left = _hours_to_resolution(market)
     if hours_left is not None and hours_left < MIN_DAYS_TO_RESOLUTION * 24:
