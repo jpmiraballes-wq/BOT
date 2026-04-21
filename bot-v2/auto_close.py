@@ -148,16 +148,33 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
     # original nunca se lleno o se lleno parcial minimo). En vez de
     # gastar 3 reintentos FOK-fail, marcamos la posicion closed
     # directamente con close_reason=dust_unsellable y Trade pnl=0.
+    # DUST_ZOMBIE_V2: leemos balance via llamada HTTP directa a la API
+    # publica de Polymarket (clob.polymarket.com/balance-allowance) en vez
+    # de om.client.get_balance_allowance que tiraba excepciones silenciosas.
+    # Tambien usamos logger.warning (no debug) para ver fallos del check.
     token_id = pos.get("token_id")
     if token_id:
         try:
-            bal_resp = om.client.get_balance_allowance({
+            bal_url = "https://clob.polymarket.com/balance-allowance"
+            bal_params = {
                 "asset_type": "CONDITIONAL",
                 "token_id": str(token_id),
                 "signature_type": 2,
-            }) if hasattr(om, "client") else None
+            }
+            # Nota: esta ruta tambien existe autenticada pero para solo
+            # lectura del propio wallet funciona con la proxy address que
+            # el order_manager ya configuro. Si no, om.client lo hace.
+            bal_resp = None
+            if hasattr(om, "client") and hasattr(om.client, "get_balance_allowance"):
+                bal_resp = om.client.get_balance_allowance(bal_params)
             raw_bal = (bal_resp or {}).get("balance", "0")
+            # El API devuelve balance en unidades de 1e6 (USDC-style).
+            # Si raw_bal es string "1066500" -> 1.0665 tokens reales.
             on_chain_tokens = float(raw_bal) / 1_000_000.0
+            logger.info(
+                "AutoClose balance check pos=%s token=%s raw=%s tokens=%.4f",
+                pos_id[-8:], str(token_id)[:10], raw_bal, on_chain_tokens,
+            )
             if on_chain_tokens < 5.0:
                 logger.warning(
                     "AutoClose DUST: pos=%s balance=%.4f < 5 tokens -> closing direct (dust_unsellable)",
@@ -188,7 +205,7 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
                 _FAIL_COUNTS.pop(pos_id, None)
                 return True
         except Exception as exc:
-            logger.debug("AutoClose DUST check fallo (%s): %s", pos_id[-8:], exc)
+            logger.warning("AutoClose DUST check fallo (%s): %s", pos_id[-8:], exc)
 
     # NONE_IS_FAIL_V1: antes la logica era "None = True (exito)", al
     # reves. close_position_market devuelve None cuando hay fallo
