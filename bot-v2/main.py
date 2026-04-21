@@ -131,6 +131,50 @@ def compute_capital_deployed(open_orders):
     return total
 
 
+_OPEN_POS_CACHE = {"ts": 0.0, "data": None}
+_OPEN_POS_TTL = 30.0
+
+
+def _open_positions_from_base44():
+    """Devuelve (count, sum_size_usdc) leyendo Position de Base44.
+
+    Cuenta solo status=open y pending_fill!=true. Cache de 30s.
+    Fallback a (0, 0.0) si falla Base44.
+    """
+    import time as _time
+    now = _time.time()
+    if _OPEN_POS_CACHE["data"] is not None and (now - _OPEN_POS_CACHE["ts"]) < _OPEN_POS_TTL:
+        return _OPEN_POS_CACHE["data"]
+    try:
+        from base44_client import Base44Client
+        client = Base44Client()
+        rows = client.list("Position", sort="-updated_date", limit=100) or []
+    except Exception as exc:
+        logger.warning("open_positions_from_base44 fallo: %s", exc)
+        return (0, 0.0)
+
+    count = 0
+    deployed = 0.0
+    for r in rows:
+        # Base44 externo envuelve en rec["data"]; fallback a raiz.
+        d = r.get("data") if isinstance(r, dict) else None
+        if not isinstance(d, dict):
+            d = r if isinstance(r, dict) else {}
+        if d.get("status") != "open":
+            continue
+        if d.get("pending_fill"):
+            continue
+        count += 1
+        try:
+            deployed += float(d.get("size_usdc") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    data = (count, round(deployed, 4))
+    _OPEN_POS_CACHE["ts"] = now
+    _OPEN_POS_CACHE["data"] = data
+    return data
+
+
 _TRADE_STATS_CACHE = {"ts": 0.0, "data": None}
 _TRADE_STATS_TTL = 60.0
 
@@ -222,8 +266,10 @@ def _trade_stats():
 
 
 def build_snapshot(mode, rm, om, notes="", live_capital=None):
-    open_orders = om.get_open_orders() if om.client else []
-    deployed = compute_capital_deployed(open_orders)
+    # capital_deployed y open_positions vienen de la tabla Position
+    # (fuente de verdad, no de las open orders del CLOB que desaparecen
+    # cuando filean).
+    open_count, deployed = _open_positions_from_base44()
     stats = _trade_stats()
     # Prioridad: capital live del BotConfig (fuente de verdad del usuario)
     # > equity del risk manager > CAPITAL_USDC hardcoded.
@@ -240,8 +286,7 @@ def build_snapshot(mode, rm, om, notes="", live_capital=None):
         "win_rate": stats["win_rate"],
         "total_trades": stats["total_trades"],
         "drawdown_pct": rm.drawdown_pct,
-        "open_positions": len({o.get("market") or o.get("market_id")
-                               for o in open_orders if o}),
+        "open_positions": open_count,
         "notes": notes,
     }
 
