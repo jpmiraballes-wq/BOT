@@ -202,25 +202,32 @@ class OrderManager:
         best_bid = float(opportunity.get("bid") or opportunity.get("best_bid") or 0.0)
         best_ask = float(opportunity.get("ask") or opportunity.get("best_ask") or 0.0)
         if best_bid > 0 and best_ask > 0 and best_ask > best_bid:
-            # Aggressive mode: 1 tick delante del best_bid / best_ask.
-            # Cap inferior en mid - 0.01 y superior en mid + 0.01 para no
-            # tocar el otro lado ni auto-fillearnos.
-            # Subir el bid hasta el mid (no mid-TICK, porque si no se redondea
-            # al best_bid y no sirve de nada). Con mid=0.155 y best_bid=0.14:
-            # best_bid+TICK=0.15 < mid=0.155 -> bid final=0.15 (un tick mejor que best_bid)
-            bid_price = self._round_price(min(best_bid + TICK, mid))
-            ask_price = self._round_price(max(best_ask - TICK, mid))
-            # Si cruzarian, abrir medio tick a cada lado del mid.
-            if ask_price - bid_price < 0.01:
-                bid_price = self._round_price(mid)
-                ask_price = self._round_price(mid + TICK)
+            # TAKER MODE en mercados tight (spread = 1 tick):
+            # Si spread = 0.01 cruzamos: BUY@best_ask, SELL@best_bid.
+            # Pagamos 1 tick pero filleamos al instante en vez de
+            # quedarnos 20min+ sin fill.
+            spread = best_ask - best_bid
+            if spread <= 0.0101:  # 1 tick (con tolerancia por floats)
+                bid_price = self._round_price(best_ask)   # taker BUY
+                ask_price = self._round_price(best_bid)   # taker SELL
+                logger.info("%s: spread tight (%.4f) -> TAKER mode bid=%.3f ask=%.3f",
+                            market_id, spread, bid_price, ask_price)
+            else:
+                # MAKER MODE normal: 1 tick adelante del best, capped a mid.
+                bid_price = self._round_price(min(best_bid + TICK, mid))
+                ask_price = self._round_price(max(best_ask - TICK, mid))
+                if ask_price - bid_price < 0.01:
+                    bid_price = self._round_price(mid)
+                    ask_price = self._round_price(mid + TICK)
         else:
             # Fallback: comportamiento viejo si el opportunity no trae best_bid/best_ask.
             half_spread = max(MIN_SPREAD_PCT / 2.0, 0.01)
             bid_price = self._round_price(mid - half_spread)
             ask_price = self._round_price(mid + half_spread)
 
-        if ask_price - bid_price < 0.01:
+        # Guard solo aplica si NO estamos en taker mode
+        # (en taker, bid>=ask intencionalmente).
+        if ask_price - bid_price < 0.01 and ask_price > bid_price:
             logger.info("Spread insuficiente en %s.", market_id)
             return []
         if position_size_usdc <= 0:
