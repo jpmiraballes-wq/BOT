@@ -527,13 +527,43 @@ class OrderManager:
 
             args = OrderArgs(token_id=token_id, price=price, size=size, side=SELL)
             signed = self.client.create_order(args)
-            # FOK: fill-or-kill. Si no hay liquidez suficiente en el book,
-            # se cancela en lugar de quedar como limit huerfano.
-            post = self.client.post_order(signed, OrderType.FOK)
-            order_id = (post or {}).get("orderID") or (post or {}).get("orderId")
+            # FOK: fill-or-kill. Si no hay liquidez suficiente, intentamos
+            # GTC como fallback (GTC_FALLBACK_V1).
+            post = None
+            try:
+                post = self.client.post_order(signed, OrderType.FOK)
+            except Exception as _fok_exc:
+                logger.warning(
+                    "close FOK tiro excepcion token=%s: %s -> intento GTC",
+                    token_id[:10], _fok_exc,
+                )
+            order_id = (post or {}).get("orderID") or (post or {}).get("orderId") if post else None
             if not order_id:
-                logger.warning("close_position_market sin orderID: %s", post)
-                return None
+                # GTC_FALLBACK_V1: el FOK fallo (o por liquidez o por
+                # excepcion). Reintento con GTC: la orden queda en el
+                # orderbook y se va llenando por partes. Mejor que dejar
+                # la posicion stuck para siempre.
+                logger.warning(
+                    "close FOK sin orderID token=%s price=%.4f size=%.4f -> reintento GTC",
+                    token_id[:10], price, size,
+                )
+                try:
+                    signed_gtc = self.client.create_order(args)
+                    post = self.client.post_order(signed_gtc, OrderType.GTC)
+                    order_id = (post or {}).get("orderID") or (post or {}).get("orderId")
+                except Exception as _gtc_exc:
+                    logger.error(
+                        "close GTC fallback fallo token=%s: %s",
+                        token_id[:10], _gtc_exc,
+                    )
+                    return None
+                if not order_id:
+                    logger.warning("close GTC fallback sin orderID: %s", post)
+                    return None
+                logger.info(
+                    "close GTC OK token=%s order_id=%s (se ira llenando)",
+                    token_id[:10], order_id[:10],
+                )
             log_decision(
                 reason="close_market",
                 market=token_id[:10],
