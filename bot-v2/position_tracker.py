@@ -154,7 +154,14 @@ class PositionTracker:
 
     # ------------------------------------------------------------- price feed
     def _get_current_price(self, token_id):
-        """Consulta el mid-price actual de un token via CLOB orderbook."""
+        """Consulta el mid-price actual de un token via CLOB orderbook.
+
+        SAFETY (phantom-price-fix-v1): exigimos AMBOS lados del book (bid y
+        ask) con ask > bid. Si solo hay un lado o el book esta cruzado,
+        devolvemos None. Antes devolviamos best_bid o best_ask solo, lo que
+        en mercados resueltos/ilíquidos daba 0.5 fantasma y disparaba
+        cierres con pnl irreal (+600%).
+        """
         try:
             url = "%s/book" % CLOB_API_URL
             resp = requests.get(url, params={"token_id": token_id},
@@ -166,9 +173,17 @@ class PositionTracker:
             asks = book.get("asks") or []
             best_bid = float(bids[0]["price"]) if bids else None
             best_ask = float(asks[0]["price"]) if asks else None
-            if best_bid and best_ask:
-                return (best_bid + best_ask) / 2.0
-            return best_bid or best_ask
+            if best_bid is None or best_ask is None:
+                logger.debug("Book incompleto para %s (bid=%s ask=%s), skip",
+                             token_id[:10], best_bid, best_ask)
+                return None
+            if best_bid <= 0 or best_ask <= 0:
+                return None
+            if best_ask <= best_bid:
+                logger.debug("Book cruzado para %s (bid=%.4f ask=%.4f), skip",
+                             token_id[:10], best_bid, best_ask)
+                return None
+            return (best_bid + best_ask) / 2.0
         except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
             logger.debug("Precio no disponible para %s: %s", token_id[:10], exc)
             return None
@@ -311,6 +326,17 @@ class PositionTracker:
             pnl_pct = (current - entry) / entry
             size_usdc = entry * size_tokens
             pnl_abs = (current - entry) * size_tokens
+
+            # SAFETY (phantom-price-fix-v1): descartar PnL irreal.
+            # En un mercado binario 0-1 un PnL > 500% o < -95% solo puede
+            # pasar con precio fantasma. Antes cerramos a pnl=+614% con
+            # current=0.5 que daba "not enough balance" en el CLOB.
+            if pnl_pct > 5.0 or pnl_pct < -0.95:
+                logger.warning(
+                    "PnL irreal en %s: entry=%.4f current=%.4f pnl=%+.1f%% - SKIP (posible precio fantasma)",
+                    pid, entry, current, pnl_pct * 100,
+                )
+                continue
 
             hit_target = pnl_pct >= PROFIT_TARGET_PCT
             hit_stop = pnl_pct <= STOP_LOSS_PCT
