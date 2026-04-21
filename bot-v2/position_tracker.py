@@ -367,7 +367,9 @@ class PositionTracker:
             # SAFETY (phantom-0.5-fix-v2): si current=0.500 exacto y el entry
             # esta lejos (>15c), es book vacio que Polymarket rellena con 0.5.
             # Caso real: Hormuz entry=0.830, "current"=0.500 -> pnl -40%.
-            if abs(current - 0.5) < 1e-6 and abs(entry - 0.5) > 0.15:
+            # PHANTOM_GUARD_V2: threshold 0.05. Republicans 0.39 habia
+            # cerrado con +28% fantasma porque |0.39-0.5|=0.11 < 0.15.
+            if abs(current - 0.5) < 1e-6 and abs(entry - 0.5) > 0.05:
                 logger.warning(
                     "Phantom 0.500 en %s: entry=%.3f, book vacio - SKIP",
                     pid, entry,
