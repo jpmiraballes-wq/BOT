@@ -291,24 +291,39 @@ def build_snapshot(mode, rm, om, notes="", live_capital=None):
 
 
 def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
+    """FLAT sizing (v2 flat-sizing-fix-2026-04-21).
+
+    Kelly con <30 trades historicos da sizes absurdos (ej $0.75) que
+    hacen que con $30 de budget apenas despleguemos $6. Volvemos a
+    sizing plano: 15%% del strategy_budget disponible por trade, con
+    floor $5 y cap $20. Kelly vuelve cuando tengamos muestra suficiente.
+    """
+    FLAT_PCT = 0.15
+    FLAT_MIN = 5.0
+    FLAT_MAX = 20.0
+
     def _size(opp):
         mid = float(opp.get("mid") or 0.0)
         edge = float(opp.get("spread_pct") or 0.0) / 2.0
-        sizer.record_tick(opp["market_id"], mid)
+        sizer.record_tick(opp["market_id"], mid)  # mantenemos record para cuando volvamos a Kelly
+
+        if edge <= 0:
+            return 0.0
 
         rm_capital = rm.deployable_capital(deployed_fn())
         strategy_budget = budget_fn()
         capital_available = min(rm_capital, strategy_budget)
-        if capital_available <= 0:
+        if capital_available <= FLAT_MIN:
             return 0.0
 
-        kelly_size = sizer.compute_size(
-            market_id=opp["market_id"], edge=edge,
-            capital_available=capital_available, price=mid,
-            strategy=MM_STRATEGY,
-        )
+        # Flat: 15%% del capital disponible, con floor y cap.
+        raw = capital_available * FLAT_PCT
+        size = max(FLAT_MIN, min(FLAT_MAX, raw))
+        # Nunca superar el capital disponible.
+        size = min(size, capital_available)
+
         factor = cb.get_size_factor(mid)
-        final = kelly_size * factor
+        final = size * factor
         if factor < 1.0:
             log_warning(
                 "size_reducido_precio_extremo",
