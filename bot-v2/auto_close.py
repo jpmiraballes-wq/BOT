@@ -247,3 +247,8 @@ class AutoClose:
 
     def check_and_close(self):
         return check_and_close(self.om)
+
+    # main.py historico llama aclose.run(). Mantenemos el alias para
+    # compat, apunta exactamente a check_and_close.
+    def run(self):
+        return check_and_close(self.om)
