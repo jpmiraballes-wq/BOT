@@ -42,6 +42,20 @@ class RiskManager:
         self.halt_reason: str = ""
         self._load()
 
+    def set_dynamic_max_position_pct(self, pct) -> None:
+        """DYNAMIC_MAX_POSITION_PCT_V1: permite a main.py setear el cap
+        dinamico de position size leido desde BotConfig.max_position_pct.
+        Si pct es None o invalido, se usa MAX_POSITION_PCT del config.
+        """
+        try:
+            val = float(pct) if pct is not None else None
+            if val is not None and 0 < val <= 0.5:
+                self._dynamic_max_position_pct = val
+                return
+        except (TypeError, ValueError):
+            pass
+        self._dynamic_max_position_pct = None
+
     def update_capital(self, live_capital) -> None:
         """Sincroniza current_equity con BotConfig.capital_usdc (override total).
 
@@ -160,9 +174,11 @@ class RiskManager:
 
     # ----------------------------------------------------- sizing / exposicion
     def max_position_size_usdc(self) -> float:
-        # Usar equity actual (live) en vez del hardcoded CAPITAL_USDC=30.
+        # DYNAMIC_MAX_POSITION_PCT_V1: usamos el pct dinamico de BotConfig
+        # si esta seteado, sino caemos al hardcoded MAX_POSITION_PCT.
         base = self.current_equity if self.current_equity > 0 else CAPITAL_USDC
-        return base * MAX_POSITION_PCT
+        pct = getattr(self, "_dynamic_max_position_pct", None) or MAX_POSITION_PCT
+        return base * pct
 
     def deployable_capital(self, currently_deployed: float) -> float:
         # Usar equity actual (live) en vez del hardcoded CAPITAL_USDC=30.
