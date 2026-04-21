@@ -143,6 +143,53 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
         return True
 
     # --- Live mode: intentar cierre real ---
+    # DUST_ZOMBIE_V1: antes de intentar el close, chequeamos balance
+    # on-chain. Si balance < 5 tokens, es dust unsellable (el BUY
+    # original nunca se lleno o se lleno parcial minimo). En vez de
+    # gastar 3 reintentos FOK-fail, marcamos la posicion closed
+    # directamente con close_reason=dust_unsellable y Trade pnl=0.
+    token_id = pos.get("token_id")
+    if token_id:
+        try:
+            bal_resp = om.client.get_balance_allowance({
+                "asset_type": "CONDITIONAL",
+                "token_id": str(token_id),
+                "signature_type": 2,
+            }) if hasattr(om, "client") else None
+            raw_bal = (bal_resp or {}).get("balance", "0")
+            on_chain_tokens = float(raw_bal) / 1_000_000.0
+            if on_chain_tokens < 5.0:
+                logger.warning(
+                    "AutoClose DUST: pos=%s balance=%.4f < 5 tokens -> closing direct (dust_unsellable)",
+                    pos_id[-8:], on_chain_tokens,
+                )
+                update_record("Position", pos_id, {
+                    "status": "closed",
+                    "close_time": _iso_now(),
+                    "close_reason": "dust_unsellable",
+                    "current_price": current_price,
+                })
+                entry = _safe_float(pos.get("entry_price")) or 0
+                size = _safe_float(pos.get("size_usdc")) or 0
+                create_record("Trade", {
+                    "market": pos.get("market"),
+                    "side": pos.get("side"),
+                    "entry_price": entry,
+                    "exit_price": current_price,
+                    "size_usdc": size,
+                    "pnl": 0,
+                    "pnl_pct": 0,
+                    "strategy": pos.get("strategy") or "unknown",
+                    "status": "closed",
+                    "entry_time": pos.get("opened_at"),
+                    "exit_time": _iso_now(),
+                    "notes": f"dust_unsellable: on_chain_balance={on_chain_tokens:.4f} tokens (BUY never filled)",
+                })
+                _FAIL_COUNTS.pop(pos_id, None)
+                return True
+        except Exception as exc:
+            logger.debug("AutoClose DUST check fallo (%s): %s", pos_id[-8:], exc)
+
     # NONE_IS_FAIL_V1: antes la logica era "None = True (exito)", al
     # reves. close_position_market devuelve None cuando hay fallo
     # silencioso (balance 0, API error manejado, skip por token_id
