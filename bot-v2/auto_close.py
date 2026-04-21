@@ -247,6 +247,13 @@ def check_and_close(om=None):
             continue
         if pos.get("pending_fill"):
             continue
+        # SKIP_ORPHANED_V1: si la posicion fue marcada orphan en un ciclo
+        # anterior pero volvio a estar "open" (probablemente porque
+        # syncPositionsWithWallet la re-importo desde la wallet real),
+        # no reintentamos cerrarla. Evita el loop que genero 75 trades
+        # duplicados el 21-apr-2026.
+        if pos.get("close_reason") == "unverified_orphan":
+            continue
 
         current = _fetch_midpoint(token_id)
         if current is None:
