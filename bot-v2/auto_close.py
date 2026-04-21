@@ -143,9 +143,20 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
         return True
 
     # --- Live mode: intentar cierre real ---
+    # NONE_IS_FAIL_V1: antes la logica era "None = True (exito)", al
+    # reves. close_position_market devuelve None cuando hay fallo
+    # silencioso (balance 0, API error manejado, skip por token_id
+    # faltante). Eso produjo 13 trades fantasma en 1 minuto el 21-abr.
+    # Ahora: solo consideramos ok si result es truthy (dict con order_id,
+    # hash, o True). None/False/{}/[] = fallo -> NO se crea Trade.
     try:
         result = _call_close_market(om, pos)
-        ok = bool(result) if result is not None else True
+        ok = bool(result)
+        if not ok:
+            logger.warning(
+                "close live sin confirmacion (%s, reason=%s, result=%r) -> NO crear Trade",
+                pos_id[-8:], reason, result,
+            )
     except Exception as exc:
         logger.warning("close live fallo (%s): %s", pos_id[-8:], exc)
         ok = False
