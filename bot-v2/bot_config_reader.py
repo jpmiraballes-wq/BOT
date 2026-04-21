@@ -24,7 +24,7 @@ from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 10
-CACHE_TTL_SECONDS = 30
+CACHE_TTL_SECONDS = 5
 
 _CACHE: Dict[str, Any] = {}
 _CACHE_TS: float = 0.0
