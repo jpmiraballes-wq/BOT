@@ -330,7 +330,11 @@ def check_and_close(om=None):
         # syncPositionsWithWallet la re-importo desde la wallet real),
         # no reintentamos cerrarla. Evita el loop que genero 75 trades
         # duplicados el 21-apr-2026.
-        if pos.get("close_reason") == "unverified_orphan":
+        # DUST_LOOP_FIX_V1: tambien saltamos dust_unsellable. Si el
+        # AutoClose ya marco la posicion como dust antes, no tiene sentido
+        # re-intentarla cada 2 min solo porque syncPositionsWithWallet la
+        # re-importo como open (el balance on-chain existe pero es dust).
+        if pos.get("close_reason") in ("unverified_orphan", "dust_unsellable"):
             continue
 
         current = _fetch_midpoint(token_id)
