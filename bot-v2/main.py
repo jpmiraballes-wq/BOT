@@ -310,6 +310,16 @@ def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
         if edge <= 0:
             return 0.0
 
+        # Skip trades con edge minusculo. Con fees + slippage + 1 tick
+        # en contra perdemos siempre. Minimo 1.5% (configurable via BotConfig).
+        try:
+            _cfg_min = fetch_bot_config() or {}
+            _min_edge = float(_cfg_min.get("min_spread_pct") or 0.03) / 2.0
+        except Exception:
+            _min_edge = 0.015
+        if edge < _min_edge:
+            return 0.0
+
         rm_capital = rm.deployable_capital(deployed_fn())
         strategy_budget = budget_fn()
         capital_available = min(rm_capital, strategy_budget)
