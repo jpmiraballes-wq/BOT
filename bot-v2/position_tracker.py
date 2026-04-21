@@ -237,6 +237,36 @@ class PositionTracker:
         except requests.RequestException as exc:
             logger.error("mark_no_balance fallo: %s", exc)
 
+    def _cancel_active_sells(self, clob_client, token_id):
+        """Cancela las ordenes SELL activas del CLOB sobre este token.
+
+        El MM deja SELL vivas que reservan balance. Si no las cancelamos,
+        la SELL del take-profit/stop-loss rebota con "not enough balance".
+        """
+        try:
+            orders = clob_client.get_orders() or []
+        except Exception as exc:
+            logger.warning("cancel_active_sells: get_orders fallo: %s", exc)
+            return 0
+        tid = str(token_id)
+        cancelled = 0
+        for o in orders:
+            side = (o.get("side") or "").upper()
+            oid = o.get("id") or o.get("orderID") or o.get("orderId")
+            ot = str(o.get("asset_id") or o.get("token_id") or o.get("tokenId") or "")
+            if side == "SELL" and ot == tid and oid:
+                try:
+                    clob_client.cancel(order_id=oid)
+                    cancelled += 1
+                    logger.info("Cancelada SELL MM %s (token %s) para liberar balance",
+                                str(oid)[:12], tid[:10])
+                except Exception as exc:
+                    logger.warning("cancel SELL %s fallo: %s", str(oid)[:12], exc)
+        if cancelled:
+            # Dar tiempo al CLOB para liberar la reserva antes de la nueva SELL.
+            time.sleep(0.4)
+        return cancelled
+
     def check_and_close(self, clob_client):
         """Revisa posiciones abiertas y coloca SELL si alcanzan el target.
 
@@ -291,6 +321,10 @@ class PositionTracker:
             reason = "profit_target" if hit_target else "stop_loss"
             logger.info("Cerrando posicion %s: entry=%.3f current=%.3f pnl=%+.2f%% (%s)",
                         pid, entry, current, pnl_pct * 100, reason)
+
+            # Liberar balance cancelando las SELL del MM sobre este token
+            # antes de mandar la SELL de auto-close.
+            self._cancel_active_sells(clob_client, token_id)
 
             try:
                 from py_clob_client.clob_types import OrderArgs, OrderType
