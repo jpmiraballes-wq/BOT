@@ -174,6 +174,32 @@ class PositionTracker:
             best_bid = float(bids[0]["price"]) if bids else None
             best_ask = float(asks[0]["price"]) if asks else None
             if best_bid is None or best_ask is None:
+                # PHANTOM_PRICE_FALLBACK_V1: fallback a /price?side=BUY y /price?side=SELL.
+                # El endpoint /price de Polymarket es mas tolerante y
+                # devuelve el last trade cuando el book esta vacio.
+                try:
+                    p_buy = requests.get(
+                        "%s/price" % CLOB_API_URL,
+                        params={"token_id": token_id, "side": "BUY"},
+                        timeout=REQUEST_TIMEOUT,
+                    ).json().get("price")
+                    p_sell = requests.get(
+                        "%s/price" % CLOB_API_URL,
+                        params={"token_id": token_id, "side": "SELL"},
+                        timeout=REQUEST_TIMEOUT,
+                    ).json().get("price")
+                    if p_buy and p_sell:
+                        fb_bid = float(p_buy)
+                        fb_ask = float(p_sell)
+                        if 0 < fb_bid < fb_ask <= 1:
+                            mid = (fb_bid + fb_ask) / 2.0
+                            logger.debug(
+                                "price fallback %s: bid=%.4f ask=%.4f mid=%.4f",
+                                token_id[:10], fb_bid, fb_ask, mid,
+                            )
+                            return mid
+                except (requests.RequestException, ValueError, KeyError) as exc:
+                    logger.debug("price fallback fallo %s: %s", token_id[:10], exc)
                 logger.debug("Book incompleto para %s (bid=%s ask=%s), skip",
                              token_id[:10], best_bid, best_ask)
                 return None
