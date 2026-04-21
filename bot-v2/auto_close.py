@@ -194,26 +194,16 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
                     "AutoClose DUST: pos=%s balance=%.4f < 5 tokens -> closing direct (dust_unsellable)",
                     pos_id[-8:], on_chain_tokens,
                 )
+                # NO_DUST_TRADE_V1: solo cerramos la Position. NO
+                # creamos Trade porque el trade nunca ocurrio (la orden
+                # BUY original nunca se lleno). Crear un Trade con pnl=0
+                # solo ensuciaba stats, equity y dashboard.
                 update_record("Position", pos_id, {
                     "status": "closed",
                     "close_time": _iso_now(),
                     "close_reason": "dust_unsellable",
                     "current_price": current_price,
-                })
-                entry = _safe_float(pos.get("entry_price")) or 0
-                size = _safe_float(pos.get("size_usdc")) or 0
-                create_record("Trade", {
-                    "market": pos.get("market"),
-                    "side": pos.get("side"),
-                    "entry_price": entry,
-                    "exit_price": current_price,
-                    "size_usdc": size,
-                    "pnl": 0,
-                    "pnl_pct": 0,
-                    "strategy": pos.get("strategy") or "unknown",
-                    "status": "closed",
-                    "entry_time": pos.get("opened_at"),
-                    "exit_time": _iso_now(),
+                    "pnl_unrealized": 0,
                     "notes": f"dust_unsellable: on_chain_balance={on_chain_tokens:.4f} tokens (BUY never filled)",
                 })
                 _FAIL_COUNTS.pop(pos_id, None)
