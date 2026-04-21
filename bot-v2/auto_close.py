@@ -197,15 +197,34 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
                    pos_id[-8:], attempts, MAX_FAIL_ATTEMPTS)
 
     if attempts >= MAX_FAIL_ATTEMPTS:
-        # Demasiados fallos -> marcar closed con reason especial SIN Trade
+        # ORPHAN_TRADE_V1: marcar closed + crear Trade "orphan" con pnl=0
+        # para que el dashboard refleje que la posicion se retiro. Antes
+        # simplemente desaparecia del listado sin dejar traza, haciendo
+        # que el capital "desapareciera" de la vista del user.
         update_record("Position", pos_id, {
             "status": "closed",
             "close_time": _iso_now(),
-            "close_reason": "unverified_no_trade",
+            "close_reason": "unverified_orphan",
             "current_price": current_price,
         })
-        logger.warning("AutoClose: pos=%s marcada closed sin Trade (live close fallo %dx)",
-                       pos_id[-8:], MAX_FAIL_ATTEMPTS)
+        entry = _safe_float(pos.get("entry_price")) or 0
+        size = _safe_float(pos.get("size_usdc")) or 0
+        create_record("Trade", {
+            "market": pos.get("market"),
+            "side": pos.get("side"),
+            "entry_price": entry,
+            "exit_price": current_price,
+            "size_usdc": size,
+            "pnl": 0,
+            "pnl_pct": 0,
+            "strategy": pos.get("strategy") or "unknown",
+            "status": "closed",
+            "entry_time": pos.get("opened_at"),
+            "exit_time": _iso_now(),
+            "notes": f"orphan: live close fallo {MAX_FAIL_ATTEMPTS}x reason={reason}",
+        })
+        logger.warning("AutoClose: pos=%s marcada closed ORPHAN (Trade pnl=0 registrado)",
+                       pos_id[-8:])
         _FAIL_COUNTS.pop(pos_id, None)
     return False
 
