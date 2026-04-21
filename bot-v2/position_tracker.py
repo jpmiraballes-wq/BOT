@@ -380,7 +380,9 @@ class PositionTracker:
             # (0.02) antes de cerrar por SL. TP no se toca: queremos tomar
             # profit apenas cruza.
             price_move_abs = abs(current - entry)
-            if pnl_pct <= STOP_LOSS_PCT and price_move_abs < 0.02:
+            # TICK_GUARD_V2: <= 0.02 (inclusivo) para que 1 tick exacto
+            # (0.01) no dispare SL por float drift.
+            if pnl_pct <= STOP_LOSS_PCT and price_move_abs <= 0.02:
                 logger.debug(
                     "SL skip %s: pnl=%+.1f%% pero mov=%.3f<2ticks (noise)",
                     pid, pnl_pct * 100, price_move_abs,
