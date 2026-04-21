@@ -561,6 +561,15 @@ def main() -> int:
             rm.update_capital(bot_cfg.get("capital_usdc"))
         except Exception as _sync_exc:
             logger.warning("rm.update_capital fallo: %s", _sync_exc)
+        # WIRE_DYNAMIC_PCT_V1: sincronizamos tambien max_position_pct
+        # desde BotConfig. Si el setter existe (patch DYNAMIC_MAX_POSITION_PCT_V1)
+        # se usa; sino es noop.
+        try:
+            _setter = getattr(rm, "set_dynamic_max_position_pct", None)
+            if callable(_setter):
+                _setter(bot_cfg.get("max_position_pct"))
+        except Exception as _pct_exc:
+            logger.warning("rm.set_dynamic_max_position_pct fallo: %s", _pct_exc)
         if iteration == 1 or iteration % 5 == 0:
             logger.info(
                 "BotConfig leido: paused=%s emergency_stop=%s mode=%s id=%s",
