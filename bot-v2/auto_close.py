@@ -103,7 +103,7 @@ class AutoClose:
             if callable(fn):
                 fn(
                     token_id=token_id,
-                    size=size_tokens,
+                    shares=size_tokens,
                     side=close_side,
                     market_id=pos.get("market"),
                     strategy=pos.get("strategy"),
