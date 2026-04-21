@@ -78,7 +78,16 @@ def _call_close_market(om, pos):
       - close_position_market(position_id, size=N)  
       - close_position_market(position_id)  (sin cantidad, toma toda la pos)
     """
-    pos_id = pos.get("id")
+    # TOKEN_ID_FIX_V1: antes se pasaba pos.get("id") (ID de Base44)
+    # como primer argumento, y close_position_market lo mandaba a
+    # /balance-allowance como asset_id => Polymarket 400 "assetId invalid".
+    # El primer argumento DEBE ser el token_id real de Polymarket (numero
+    # gigante de 70+ digitos). Si no hay token_id, no podemos cerrar live.
+    token_id = pos.get("token_id")
+    if not token_id:
+        logger.warning("close: posicion %s sin token_id, no se puede cerrar live",
+                       str(pos.get("id"))[:10])
+        return None
     shares = _safe_float(pos.get("size_tokens")) or _safe_float(pos.get("size_usdc"))
     
     try:
@@ -86,7 +95,7 @@ def _call_close_market(om, pos):
         params = sig.parameters
     except (ValueError, TypeError):
         # Fallback: sin introspeccion, intentar sin kwarg de cantidad.
-        return om.close_position_market(pos_id)
+        return om.close_position_market(token_id)
     
     # Construir kwargs segun lo que acepta la funcion
     kwargs = {}
@@ -96,7 +105,7 @@ def _call_close_market(om, pos):
         kwargs["size"] = shares
     # Si no tiene ninguno, simplemente no pasamos cantidad
     
-    return om.close_position_market(pos_id, **kwargs)
+    return om.close_position_market(token_id, **kwargs)
 
 
 def _close_position(om, pos, pnl_pct, reason, current_price):
