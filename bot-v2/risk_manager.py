@@ -43,10 +43,11 @@ class RiskManager:
         self._load()
 
     def update_capital(self, live_capital) -> None:
-        """Sincroniza current_equity con el capital real (BotConfig / wallet).
+        """Sincroniza current_equity con BotConfig.capital_usdc (override total).
 
-        Solo sube: si live > current_equity, lo actualiza. Nunca baja
-        automaticamente para preservar PnL realizado del high-watermark.
+        BotConfig es la fuente de verdad del capital configurado por el
+        usuario. Siempre se sobreescribe (sube o baja). El high_watermark
+        solo sube para preservar el tope historico.
         """
         if live_capital is None:
             return
@@ -57,7 +58,7 @@ class RiskManager:
         if live <= 0:
             return
         changed = False
-        if live > self.current_equity + 0.01:
+        if abs(live - self.current_equity) > 0.01:
             self.current_equity = live
             changed = True
         if live > self.high_watermark:
@@ -65,7 +66,7 @@ class RiskManager:
             changed = True
         if changed:
             self._save()
-            logger.info("RiskManager capital sync -> equity=%.2f hwm=%.2f",
+            logger.info("RiskManager capital override -> equity=%.2f hwm=%.2f",
                         self.current_equity, self.high_watermark)
 
     # --------------------------------------------------------- persistencia
