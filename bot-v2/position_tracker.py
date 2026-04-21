@@ -338,6 +338,29 @@ class PositionTracker:
                 )
                 continue
 
+            # SAFETY (phantom-0.5-fix-v2): si current=0.500 exacto y el entry
+            # esta lejos (>15c), es book vacio que Polymarket rellena con 0.5.
+            # Caso real: Hormuz entry=0.830, "current"=0.500 -> pnl -40%.
+            if abs(current - 0.5) < 1e-6 and abs(entry - 0.5) > 0.15:
+                logger.warning(
+                    "Phantom 0.500 en %s: entry=%.3f, book vacio - SKIP",
+                    pid, entry,
+                )
+                continue
+
+            # SAFETY (min-tick-buffer-v1): en precios <0.25 o >0.75 un solo
+            # tick de ruido (0.01) es >4%% y dispara SL -2.5%% constantemente.
+            # Exigimos que el movimiento ABSOLUTO del precio sea >= 2 ticks
+            # (0.02) antes de cerrar por SL. TP no se toca: queremos tomar
+            # profit apenas cruza.
+            price_move_abs = abs(current - entry)
+            if pnl_pct <= STOP_LOSS_PCT and price_move_abs < 0.02:
+                logger.debug(
+                    "SL skip %s: pnl=%+.1f%% pero mov=%.3f<2ticks (noise)",
+                    pid, pnl_pct * 100, price_move_abs,
+                )
+                continue
+
             hit_target = pnl_pct >= PROFIT_TARGET_PCT
             hit_stop = pnl_pct <= STOP_LOSS_PCT
 
