@@ -153,15 +153,53 @@ class PositionTracker:
             logger.error("_mark_closed fallo: %s", exc)
 
     # ------------------------------------------------------------- price feed
-    def _get_current_price(self, token_id):
-        """Consulta el mid-price actual de un token via CLOB orderbook.
+    def _gamma_price(self, token_id):
+        """GAMMA_PRICE_SOURCE_V1: consulta Gamma API para obtener el precio real del token.
 
-        SAFETY (phantom-price-fix-v1): exigimos AMBOS lados del book (bid y
-        ask) con ask > bid. Si solo hay un lado o el book esta cruzado,
-        devolvemos None. Antes devolviamos best_bid o best_ask solo, lo que
-        en mercados resueltos/ilíquidos daba 0.5 fantasma y disparaba
-        cierres con pnl irreal (+600%).
+        Gamma devuelve outcomePrices como ['0.38', '0.62'] paralelo a
+        clobTokenIds. Buscamos el token y devolvemos su precio.
+        Retorna None si no encuentra o el mercado esta cerrado.
         """
+        try:
+            url = "https://gamma-api.polymarket.com/markets"
+            resp = requests.get(url, params={"clob_token_ids": str(token_id)},
+                                timeout=REQUEST_TIMEOUT)
+            if resp.status_code >= 400:
+                return None
+            data = resp.json() or []
+            if not data:
+                return None
+            mkt = data[0] if isinstance(data, list) else data
+            if mkt.get("closed") or not mkt.get("active", True):
+                return None
+            import json as _json
+            raw_ids = mkt.get("clobTokenIds") or "[]"
+            raw_px = mkt.get("outcomePrices") or "[]"
+            ids = _json.loads(raw_ids) if isinstance(raw_ids, str) else raw_ids
+            pxs = _json.loads(raw_px) if isinstance(raw_px, str) else raw_px
+            for i, tid in enumerate(ids):
+                if str(tid) == str(token_id) and i < len(pxs):
+                    px = float(pxs[i])
+                    if 0 < px < 1:
+                        return px
+            return None
+        except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+            logger.debug("gamma price fallo %s: %s", str(token_id)[:10], exc)
+            return None
+
+    def _get_current_price(self, token_id):
+        """Consulta el mid-price actual: Gamma primero, CLOB book despues.
+
+        GAMMA_PRICE_SOURCE_V1: Gamma API es la fuente primaria (misma que usa el scanner).
+        CLOB /book es backup. Ademas: si el book tiene spread >30% lo
+        descartamos como basura (caso tipico: bid=0.01 ask=0.99 -> mid=0.5).
+        """
+        # 1) Gamma API - fuente primaria
+        px = self._gamma_price(token_id)
+        if px is not None:
+            return px
+
+        # 2) CLOB /book - backup con guards duros
         try:
             url = "%s/book" % CLOB_API_URL
             resp = requests.get(url, params={"token_id": token_id},
@@ -173,6 +211,13 @@ class PositionTracker:
             asks = book.get("asks") or []
             best_bid = float(bids[0]["price"]) if bids else None
             best_ask = float(asks[0]["price"]) if asks else None
+            # GAMMA_PRICE_SOURCE_V1: si el spread es >30% el book es basura
+            # (caso: bid=0.01 ask=0.99 -> mid=0.5 fantasma).
+            if (best_bid is not None and best_ask is not None
+                    and (best_ask - best_bid) > 0.30):
+                logger.debug("book basura %s: bid=%.3f ask=%.3f spread>30%%",
+                             str(token_id)[:10], best_bid, best_ask)
+                return None
             if best_bid is None or best_ask is None:
                 # PHANTOM_PRICE_FALLBACK_V1: fallback a /price?side=BUY y /price?side=SELL.
                 # El endpoint /price de Polymarket es mas tolerante y
