@@ -207,18 +207,19 @@ class OrderManager:
             # Pagamos 1 tick pero filleamos al instante en vez de
             # quedarnos 20min+ sin fill.
             spread = best_ask - best_bid
-            if spread <= 0.0101:  # 1 tick (con tolerancia por floats)
-                bid_price = self._round_price(best_ask)   # taker BUY
-                ask_price = self._round_price(best_bid)   # taker SELL
-                logger.info("%s: spread tight (%.4f) -> TAKER mode bid=%.3f ask=%.3f",
-                            market_id, spread, bid_price, ask_price)
-            else:
-                # MAKER MODE normal: 1 tick adelante del best, capped a mid.
-                bid_price = self._round_price(min(best_bid + TICK, mid))
-                ask_price = self._round_price(max(best_ask - TICK, mid))
-                if ask_price - bid_price < 0.01:
-                    bid_price = self._round_price(mid)
-                    ask_price = self._round_price(mid + TICK)
+            # ANTI-SANGRIA: si spread <= 1 tick NO operamos.
+            # Cruzar el book (TAKER) garantiza perder 1 tick + fees + slippage.
+            # Solo hacemos MM puro con spread >= 2 ticks.
+            if spread <= 0.0101:
+                logger.info("%s: spread tight (%.4f) -> SKIP (no-taker policy)",
+                            market_id, spread)
+                return []
+            # MAKER MODE: 1 tick adelante del best, capped a mid.
+            bid_price = self._round_price(min(best_bid + TICK, mid))
+            ask_price = self._round_price(max(best_ask - TICK, mid))
+            if ask_price - bid_price < 0.01:
+                bid_price = self._round_price(mid)
+                ask_price = self._round_price(mid + TICK)
         else:
             # Fallback: comportamiento viejo si el opportunity no trae best_bid/best_ask.
             half_spread = max(MIN_SPREAD_PCT / 2.0, 0.01)
