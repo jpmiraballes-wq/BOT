@@ -469,12 +469,25 @@ class OrderManager:
             # El balance viene en unidades de 6 decimales (USDC-like).
             available = float(raw_bal) / 1_000_000.0
             if available < size:
-                logger.warning(
-                    "close SKIP: balance=%.4f < size=%.4f token=%s "
-                    "(probable BUY original con filled=0)",
-                    available, size, token_id[:10],
-                )
-                return None
+                # USE_REAL_BALANCE_V1: antes retornabamos None y la
+                # posicion quedaba stuck para siempre. Ahora, si el
+                # balance real es >= 5 tokens, cerramos con el balance
+                # real (size_tokens en DB estaba inflado por un BUY con
+                # fill parcial). Solo abortamos si balance < 5.
+                if available >= 5.0:
+                    logger.warning(
+                        "close AJUSTE: balance=%.4f < size_pedido=%.4f token=%s "
+                        "-> cerrando con balance real",
+                        available, size, token_id[:10],
+                    )
+                    size = self._round_size(available)
+                else:
+                    logger.warning(
+                        "close SKIP: balance=%.4f < 5 tokens token=%s "
+                        "(BUY original con filled=0, nada que vender)",
+                        available, token_id[:10],
+                    )
+                    return None
         except Exception as _exc:
             logger.warning("close: get_balance_allowance fallo token=%s: %s",
                            token_id[:10], _exc)
