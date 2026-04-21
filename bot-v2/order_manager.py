@@ -475,12 +475,24 @@ class OrderManager:
                 # real (size_tokens en DB estaba inflado por un BUY con
                 # fill parcial). Solo abortamos si balance < 5.
                 if available >= 5.0:
+                    # FLOOR_REAL_BALANCE_V1: usar floor con margen -0.01
+                    # para evitar off-by-rounding. _round_size hace round()
+                    # que puede subir size sobre balance real (ej 22.7364
+                    # -> 22.74) y el CLOB rechaza con "not enough balance".
+                    import math as _m
+                    safe_size = _m.floor((available - 0.01) * 100) / 100.0
+                    if safe_size < 5.0:
+                        logger.warning(
+                            "close SKIP: balance=%.4f token=%s pero safe_size=%.4f < 5",
+                            available, token_id[:10], safe_size,
+                        )
+                        return None
                     logger.warning(
                         "close AJUSTE: balance=%.4f < size_pedido=%.4f token=%s "
-                        "-> cerrando con balance real",
-                        available, size, token_id[:10],
+                        "-> cerrando con safe_size=%.4f",
+                        available, size, token_id[:10], safe_size,
                     )
-                    size = self._round_size(available)
+                    size = safe_size
                 else:
                     logger.warning(
                         "close SKIP: balance=%.4f < 5 tokens token=%s "
