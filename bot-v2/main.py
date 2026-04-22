@@ -298,9 +298,12 @@ def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
     sizing plano: 15%% del strategy_budget disponible por trade, con
     floor $5 y cap $20. Kelly vuelve cuando tengamos muestra suficiente.
     """
+    # FLAT_MAX_75_V1 (2026-04-22): subido de $20 a $75 para tickets
+    # reales ~15% del budget MM. Capital ~$500, MM allocated ~$450,
+    # 15% = $67.5 -> cap en $75 con margen.
     FLAT_PCT = 0.15
     FLAT_MIN = 5.0
-    FLAT_MAX = 20.0
+    FLAT_MAX = 75.0
 
     def _size(opp):
         mid = float(opp.get("mid") or 0.0)
