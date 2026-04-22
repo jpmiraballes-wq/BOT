@@ -95,8 +95,19 @@ class CapitalAllocator:
         return self._cache.get(strategy)
 
     def is_enabled(self, strategy: str) -> bool:
+        # STABILITY_PATCH_A_V1: execution_mode es fuente unica de verdad.
+        # disabled -> off. paper/live -> on (paper no ejecuta capital real,
+        # pero el flag 'enabled' sigue permitiendo que la estrategia corra).
         rec = self.get(strategy)
-        return bool(rec and rec.get("enabled"))
+        if not rec:
+            return False
+        mode = (rec.get("execution_mode") or "").lower().strip()
+        if mode == "disabled":
+            return False
+        if mode in ("live", "paper"):
+            return True
+        # Fallback legacy: si no hay execution_mode, respetar `enabled`.
+        return bool(rec.get("enabled"))
 
     def get_allocated(self, strategy: str) -> float:
         rec = self.get(strategy)
