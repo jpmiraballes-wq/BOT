@@ -109,6 +109,17 @@ class CapitalAllocator:
         # Fallback legacy: si no hay execution_mode, respetar `enabled`.
         return bool(rec.get("enabled"))
 
+    def get_execution_mode(self, strategy: str) -> str:
+        """Devuelve 'live' | 'paper' | 'disabled'. 'disabled' si no existe."""
+        rec = self.get(strategy)
+        if not rec:
+            return "disabled"
+        mode = (rec.get("execution_mode") or "").lower().strip()
+        if mode in ("live", "paper", "disabled"):
+            return mode
+        # Legacy: respetar enabled
+        return "live" if rec.get("enabled") else "disabled"
+
     def get_allocated(self, strategy: str) -> float:
         rec = self.get(strategy)
         # La entity externa usa 'allocated_usdc'. Fallback a 'allocated' por compat.
