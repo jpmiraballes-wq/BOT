@@ -378,7 +378,25 @@ def check_and_close(om=None):
 
         # Phantom guard: descartar PnL irreal
         pnl_pct = _compute_pnl_pct(pos, current)
+        # AUTOCLOSE_LOOP_TRACE_V1 (2026-04-22): log detallado por pos para
+        # diagnosticar "checked=N closed=0" sin pistas. Imprime id, entry,
+        # current, pnl_pct y decision final.
+        pos_short = str(pos.get("id") or "NONE")[-8:]
+        market_label = (pos.get("market") or "")[:30]
+        logger.info(
+            "AutoClose LOOP: pos=%s market=%r entry=%.4f current=%.4f pnl=%s tp=%.3f sl=%.3f",
+            pos_short, market_label,
+            _safe_float(pos.get("entry_price")) or 0,
+            current or 0,
+            ("%.2f%%" % (pnl_pct * 100)) if pnl_pct is not None else "None",
+            take_profit, stop_loss,
+        )
         if pnl_pct is None or pnl_pct > 5.0 or pnl_pct < -0.95:
+            logger.info(
+                "AutoClose LOOP SKIP phantom: pos=%s pnl=%s (fuera de rango)",
+                pos_short,
+                ("%.2f%%" % (pnl_pct * 100)) if pnl_pct is not None else "None",
+            )
             continue
 
         checked += 1
@@ -389,8 +407,17 @@ def check_and_close(om=None):
             reason = "stop_loss"
 
         if reason:
+            logger.info(
+                "AutoClose LOOP TRIGGER: pos=%s reason=%s pnl=%.2f%% -> llamando _close_position",
+                pos_short, reason, pnl_pct * 100,
+            )
             if _close_position(om, pos, pnl_pct, reason, current):
                 closed += 1
+        else:
+            logger.info(
+                "AutoClose LOOP HOLD: pos=%s pnl=%.2f%% dentro de rango (sl=%.3f, tp=%.3f)",
+                pos_short, pnl_pct * 100, stop_loss, take_profit,
+            )
 
     mode = "paper" if DRY_RUN else "live"
     logger.info("AutoClose: tp=%s sl=%s checked=%d closed=%d mode=%s",
