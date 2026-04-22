@@ -28,6 +28,8 @@ from logical_arb import scan_logical_arb
 from news_trading import NewsTrader
 from stat_arb import StatArb
 from resolution_snipe import ResolutionSniper
+from whale_consensus import WhaleConsensus  # PAPER_LAB_PHASE3
+from contrarian_fade import ContrarianFade  # PAPER_LAB_PHASE3
 from market_scanner import scan_markets
 from order_manager import OrderManager
 from reporter import Reporter
@@ -505,6 +507,8 @@ def main() -> int:
     # ----- ResolutionSniper (Fase 4) -----
     try:
         res_sniper = ResolutionSniper(om, allocator)
+    whale_consensus = WhaleConsensus(allocator=allocator)  # PAPER_LAB_PHASE3
+    contrarian_fade = ContrarianFade(allocator=allocator)  # PAPER_LAB_PHASE3
         logger.info("ResolutionSniper activo.")
     except Exception as _exc:
         logger.error("No se pudo inicializar ResolutionSniper: %s", _exc)
@@ -701,6 +705,20 @@ def main() -> int:
                     res_sniper.run_cycle()
                 except Exception as _exc:
                     logger.error("resolution_snipe fallo: %s", _exc)
+
+            # PAPER_LAB_PHASE3: whale_consensus (paper-only)
+            if whale_consensus is not None and allocator.is_enabled("whale_consensus"):
+                try:
+                    whale_consensus.run_cycle()
+                except Exception as _exc:
+                    logger.error("whale_consensus fallo: %s", _exc)
+
+            # PAPER_LAB_PHASE3: contrarian_fade (paper-only)
+            if contrarian_fade is not None and allocator.is_enabled("contrarian_fade"):
+                try:
+                    contrarian_fade.run_cycle()
+                except Exception as _exc:
+                    logger.error("contrarian_fade fallo: %s", _exc)
 
             try:
                 arb_opps = scan_logical_arb()
