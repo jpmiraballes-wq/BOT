@@ -99,11 +99,13 @@ class OrderManager:
                     fee = int(c)
                     break
         except Exception as exc:
-            logger.warning("No se pudo obtener fee_rate para %s (%s); usando 0",
-                           token_id[:10], exc)
+            # LOG_NOISE_CLEANUP_V1: 404 es esperado cuando token_id no es condition_id.
+            # Fallback a 0 bps funciona bien, no necesitamos warning.
+            logger.debug("No se pudo obtener fee_rate para %s (%s); usando 0",
+                         token_id[:10], exc)
             fee = 0
         self._fee_cache[token_id] = fee
-        logger.info("Fee rate %s: %d bps", token_id[:10], fee)
+        logger.debug("Fee rate %s: %d bps", token_id[:10], fee)
         return fee
 
     # ----------------------------------------------------------------- utils
@@ -211,8 +213,9 @@ class OrderManager:
             # Cruzar el book (TAKER) garantiza perder 1 tick + fees + slippage.
             # Solo hacemos MM puro con spread >= 2 ticks.
             if spread <= 0.0101:
-                logger.info("%s: spread tight (%.4f) -> SKIP (no-taker policy)",
-                            market_id, spread)
+                # LOG_NOISE_CLEANUP_V1: 7 markets/ciclo x 1 ciclo/min = ruido.
+                logger.debug("%s: spread tight (%.4f) -> SKIP (no-taker policy)",
+                             market_id, spread)
                 return []
             # MAKER MODE: 1 tick adelante del best, capped a mid.
             bid_price = self._round_price(min(best_bid + TICK, mid))
@@ -297,8 +300,9 @@ class OrderManager:
                 if "not enough balance" in exc_str and side == SELL:
                     # Esperado en MM: no tenemos tokens hasta que el BUY se llene.
                     # El SELL se colocara despues via close_profitable_positions.
-                    logger.info("SELL skip %s en %s: sin tokens aun (BUY pendiente fill)",
-                                token_id[:10], market_id)
+                    # LOG_NOISE_CLEANUP_V1: baja a debug, se repite cada ciclo.
+                    logger.debug("SELL skip %s en %s: sin tokens aun (BUY pendiente fill)",
+                                 token_id[:10], market_id)
                 else:
                     logger.error("Error %s en %s: %s", side, market_id, exc)
 
