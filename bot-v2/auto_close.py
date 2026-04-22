@@ -22,6 +22,23 @@ CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 REQUEST_TIMEOUT = 8
 MAX_FAIL_ATTEMPTS = 3
 _FAIL_COUNTS = {}
+# DEDUP_REENTRY_V1: pos_ids cerrados recientemente (epoch timestamp).
+# Previene duplicar Trades cuando list_records devuelve la misma pos
+# dos veces por latencia de Base44 en el PUT de status=closed.
+import time as _t_dedup
+_CLOSED_RECENTLY = {}
+_DEDUP_TTL_SEC = 300  # 5 minutos
+
+def _was_closed_recently(pos_id):
+    now = _t_dedup.time()
+    # cleanup old entries
+    stale = [k for k, ts in _CLOSED_RECENTLY.items() if now - ts > _DEDUP_TTL_SEC]
+    for k in stale:
+        _CLOSED_RECENTLY.pop(k, None)
+    return pos_id in _CLOSED_RECENTLY
+
+def _mark_closed_recently(pos_id):
+    _CLOSED_RECENTLY[pos_id] = _t_dedup.time()
 
 
 def _iso_now():
@@ -113,6 +130,13 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
     if not pos_id:
         return False
 
+    # DEDUP_REENTRY_V1: si ya se cerro esta pos en los ultimos 5 min,
+    # saltar para no crear Trade duplicado. Esto bloquea el race
+    # condition con la latencia del write de Base44.
+    if _was_closed_recently(pos_id):
+        logger.info("AutoClose: pos=%s cerrada recientemente, skip reentry", pos_id[-8:])
+        return False
+
     # --- Paper mode ---
     if DRY_RUN or not om:
         update_record("Position", pos_id, {
@@ -140,6 +164,7 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
             "notes": f"auto_close paper {reason}",
         })
         _FAIL_COUNTS.pop(pos_id, None)
+        _mark_closed_recently(pos_id)
         return True
 
     # --- Live mode: intentar cierre real ---
@@ -255,6 +280,7 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
             "exit_time": _iso_now(),
             "notes": f"auto_close live {reason}",
         })
+        _mark_closed_recently(pos_id)
         _FAIL_COUNTS.pop(pos_id, None)
         return True
 
