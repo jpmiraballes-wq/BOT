@@ -128,6 +128,7 @@ class WhaleConsensus:
             logger.warning("whale_consensus en live mode pero no hay ejecutor live; skip.")
             return
         # mode == "paper"
+        global MIN_CONSENSUS
         rec = self.allocator.get(STRATEGY) or {}
         cfg = rec.get("config") or {}
         min_consensus = int(cfg.get("min_whales_consensus") or MIN_CONSENSUS)
@@ -135,7 +136,6 @@ class WhaleConsensus:
         min_vol = float(cfg.get("min_market_volume") or MIN_MARKET_VOLUME_USDC)
         size_usdc = float(rec.get("trade_size_min") or POSITION_SIZE_USDC)
 
-        global MIN_CONSENSUS
         MIN_CONSENSUS = min_consensus
 
         signals = _fetch_recent_signals(max_age)
