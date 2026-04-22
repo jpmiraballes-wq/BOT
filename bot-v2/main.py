@@ -681,19 +681,22 @@ def main() -> int:
             allocator.report_deployed(MM_STRATEGY, mm_deployed)
 
             # ---- LOGICAL ARB (detection + umbrella execution) ----
-            if news_trader is not None and iteration % NEWS_TRADING_EVERY_N_ITERATIONS == 0:
+            # STABILITY_PATCH_B_V1: solo corren estrategias is_enabled segun dashboard.
+            if (news_trader is not None
+                    and allocator.is_enabled("news_trading")
+                    and iteration % NEWS_TRADING_EVERY_N_ITERATIONS == 0):
                 try:
                     news_trader.run_cycle()
                 except Exception as _exc:
                     logger.error("news_trading fallo: %s", _exc)
 
-            if stat_arb is not None:
+            if stat_arb is not None and allocator.is_enabled("stat_arb"):
                 try:
                     stat_arb.run_cycle()
                 except Exception as _exc:
                     logger.error("stat_arb fallo: %s", _exc)
 
-            if res_sniper is not None:
+            if res_sniper is not None and allocator.is_enabled("resolution_snipe"):
                 try:
                     res_sniper.run_cycle()
                 except Exception as _exc:
