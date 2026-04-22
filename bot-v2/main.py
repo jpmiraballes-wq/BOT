@@ -507,12 +507,24 @@ def main() -> int:
     # ----- ResolutionSniper (Fase 4) -----
     try:
         res_sniper = ResolutionSniper(om, allocator)
-    whale_consensus = WhaleConsensus(allocator=allocator)  # PAPER_LAB_PHASE3
-    contrarian_fade = ContrarianFade(allocator=allocator)  # PAPER_LAB_PHASE3
         logger.info("ResolutionSniper activo.")
     except Exception as _exc:
         logger.error("No se pudo inicializar ResolutionSniper: %s", _exc)
         res_sniper = None
+
+    # ----- WhaleConsensus + ContrarianFade (Paper Lab Phase 3) -----
+    try:
+        whale_consensus = WhaleConsensus(allocator=allocator)
+        logger.info("WhaleConsensus activo (paper-only).")
+    except Exception as _exc:
+        logger.error("No se pudo inicializar WhaleConsensus: %s", _exc)
+        whale_consensus = None
+    try:
+        contrarian_fade = ContrarianFade(allocator=allocator)
+        logger.info("ContrarianFade activo (paper-only).")
+    except Exception as _exc:
+        logger.error("No se pudo inicializar ContrarianFade: %s", _exc)
+        contrarian_fade = None
 
     # Sync capital real desde BotConfig antes del primer heartbeat.
     try:
