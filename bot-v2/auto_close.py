@@ -126,25 +126,15 @@ def _call_close_market(om, pos):
 
 
 def _close_position(om, pos, pnl_pct, reason, current_price):
-    # AUTOCLOSE_DEBUG_TRACE_V1 (2026-04-22): loguear entrada y cada branch
-    # para ver por que "checked=N closed=0" sin pistas. Antes _close_position
-    # tenia 4+ return False silenciosos.
     pos_id = pos.get("id")
-    market_short = (pos.get("market") or "")[:30]
-    logger.info(
-        "AutoClose ENTRY: pos=%s market=%r reason=%s pnl=%.2f%% price=%.4f",
-        str(pos_id)[-8:] if pos_id else "NONE",
-        market_short, reason, (pnl_pct or 0) * 100, current_price or 0,
-    )
     if not pos_id:
-        logger.warning("AutoClose SKIP: pos sin id")
         return False
 
     # DEDUP_REENTRY_V1: si ya se cerro esta pos en los ultimos 5 min,
     # saltar para no crear Trade duplicado. Esto bloquea el race
     # condition con la latencia del write de Base44.
     if _was_closed_recently(pos_id):
-        logger.info("AutoClose SKIP: pos=%s cerrada recientemente (dedup 5min)", pos_id[-8:])
+        logger.info("AutoClose: pos=%s cerrada recientemente, skip reentry", pos_id[-8:])
         return False
 
     # --- Paper mode ---
@@ -252,26 +242,16 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
     # faltante). Eso produjo 13 trades fantasma en 1 minuto el 21-abr.
     # Ahora: solo consideramos ok si result es truthy (dict con order_id,
     # hash, o True). None/False/{}/[] = fallo -> NO se crea Trade.
-    logger.info(
-        "AutoClose LIVE CLOSE: pos=%s reason=%s intentando venta al mercado...",
-        pos_id[-8:], reason,
-    )
     try:
         result = _call_close_market(om, pos)
         ok = bool(result)
-        if ok:
-            logger.info(
-                "AutoClose LIVE OK: pos=%s reason=%s result=%r",
-                pos_id[-8:], reason, result,
-            )
-        else:
+        if not ok:
             logger.warning(
-                "AutoClose LIVE FAIL: pos=%s reason=%s result=%r -> NO crear Trade",
+                "close live sin confirmacion (%s, reason=%s, result=%r) -> NO crear Trade",
                 pos_id[-8:], reason, result,
             )
     except Exception as exc:
-        logger.warning("AutoClose LIVE EXCEPTION: pos=%s reason=%s err=%s",
-                       pos_id[-8:], reason, exc)
+        logger.warning("close live fallo (%s): %s", pos_id[-8:], exc)
         ok = False
 
     if ok:
@@ -378,25 +358,7 @@ def check_and_close(om=None):
 
         # Phantom guard: descartar PnL irreal
         pnl_pct = _compute_pnl_pct(pos, current)
-        # AUTOCLOSE_LOOP_TRACE_V1 (2026-04-22): log detallado por pos para
-        # diagnosticar "checked=N closed=0" sin pistas. Imprime id, entry,
-        # current, pnl_pct y decision final.
-        pos_short = str(pos.get("id") or "NONE")[-8:]
-        market_label = (pos.get("market") or "")[:30]
-        logger.info(
-            "AutoClose LOOP: pos=%s market=%r entry=%.4f current=%.4f pnl=%s tp=%.3f sl=%.3f",
-            pos_short, market_label,
-            _safe_float(pos.get("entry_price")) or 0,
-            current or 0,
-            ("%.2f%%" % (pnl_pct * 100)) if pnl_pct is not None else "None",
-            take_profit, stop_loss,
-        )
         if pnl_pct is None or pnl_pct > 5.0 or pnl_pct < -0.95:
-            logger.info(
-                "AutoClose LOOP SKIP phantom: pos=%s pnl=%s (fuera de rango)",
-                pos_short,
-                ("%.2f%%" % (pnl_pct * 100)) if pnl_pct is not None else "None",
-            )
             continue
 
         checked += 1
@@ -407,17 +369,8 @@ def check_and_close(om=None):
             reason = "stop_loss"
 
         if reason:
-            logger.info(
-                "AutoClose LOOP TRIGGER: pos=%s reason=%s pnl=%.2f%% -> llamando _close_position",
-                pos_short, reason, pnl_pct * 100,
-            )
             if _close_position(om, pos, pnl_pct, reason, current):
                 closed += 1
-        else:
-            logger.info(
-                "AutoClose LOOP HOLD: pos=%s pnl=%.2f%% dentro de rango (sl=%.3f, tp=%.3f)",
-                pos_short, pnl_pct * 100, stop_loss, take_profit,
-            )
 
     mode = "paper" if DRY_RUN else "live"
     logger.info("AutoClose: tp=%s sl=%s checked=%d closed=%d mode=%s",
