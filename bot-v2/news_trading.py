@@ -31,6 +31,7 @@ from xml.etree import ElementTree as ET
 import requests
 
 from capital_allocator import CapitalAllocator
+from paper_lab import emit_paper_trade  # PAPER_LAB_PATCHED
 from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL, GAMMA_API_URL
 
 logger = logging.getLogger(__name__)
@@ -499,6 +500,33 @@ class NewsTrader:
         if size_usdc < MIN_SHARE_SIZE_USDC:
             return False
 
+        # --- Paper mode branch (PAPER_LAB_PATCHED) ---
+        if self.ca.get_execution_mode(STRATEGY_NAME) == "paper":
+            emit_paper_trade(
+                strategy=STRATEGY_NAME,
+                market=(market.get("question") or market_id)[:300],
+                side="BUY",
+                entry_price=ask_price,
+                size_usdc=size_usdc,
+                token_id=token_id,
+                condition_id=market_id,
+                outcome=direction.upper() if direction else None,
+                tp_pct=0.15,
+                sl_pct=-0.08,
+                max_hold_hours=min(decay_min / 60.0, MAX_HOLD_SECONDS / 3600.0),
+                features={
+                    "ask_price": ask_price,
+                    "book_ask_size": ask_size,
+                    "signal_confidence": confidence,
+                    "decay_min": decay_min,
+                },
+                signal_meta={
+                    "headline": state.title[:200],
+                    "direction": direction,
+                },
+            )
+            return True
+        # --- End paper branch ---
         # Ejecuta BUY limite al mejor ask via OrderManager
         shares = size_usdc / ask_price
         order_id = self.om.place_limit_buy(token_id, ask_price, shares,
