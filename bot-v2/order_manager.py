@@ -23,6 +23,7 @@ from py_clob_client.order_builder.constants import BUY, SELL
 from config import (
     CLOB_API_URL, POLYGON_CHAIN_ID, PRIVATE_KEY, WALLET_ADDRESS,
     MAX_CONCURRENT_MARKETS, ORDER_MAX_AGE_SECONDS, MIN_SPREAD_PCT,
+    # TOKEN_COOLDOWN_V1: ver _TOKEN_COOLDOWN abajo
     POLYMARKET_FUNDER, POLYMARKET_SIGNATURE_TYPE,
 )
 try:
@@ -173,6 +174,48 @@ class OrderManager:
         except TypeError:
             return OrderArgs(token_id=token_id, price=price, size=size, side=side)
 
+    # TOKEN_COOLDOWN_V1: previene loop cancel->reopen cuando Polymarket
+    # cancela nuestras ordenes maker al moverse el best bid/ask. Tras
+    # un cancel sin fill, bloqueamos ese token 15 min.
+    _TOKEN_COOLDOWN_SEC = 15 * 60
+
+    def _token_in_cooldown(self, token_id):
+        cd = getattr(self, "_cooldowns", None)
+        if not cd:
+            return False
+        now = time.time()
+        # Cleanup entradas expiradas
+        stale = [k for k, ts in cd.items() if ts < now]
+        for k in stale:
+            cd.pop(k, None)
+        return token_id in cd
+
+    def _detect_cancels_and_cooldown(self):
+        """Compara self._orders vs CLOB. Los que ya no estan = cancelados."""
+        if not hasattr(self, "_cooldowns"):
+            self._cooldowns = {}
+        if not self._orders:
+            return
+        try:
+            live_orders = self.get_open_orders()
+            live_ids = {str(o.get("id") or o.get("orderID")) for o in live_orders}
+        except Exception:
+            return
+        now = time.time()
+        for order_id, meta in list(self._orders.items()):
+            if order_id not in live_ids:
+                # Desaparecio del CLOB -> fue cancelado (o fillado).
+                # Si hubiera sido fillado, portfolio_sync lo confirma;
+                # ante la duda, aplicamos cooldown igual (el SKIP del
+                # dedup tambien atrapa posiciones activas, asi que no
+                # bloqueamos tokens con fills).
+                token_id = str(meta.get("token_id") or "")
+                if token_id:
+                    self._cooldowns[token_id] = now + self._TOKEN_COOLDOWN_SEC
+                    logger.info("Token cooldown activado %s (15min) tras cancel",
+                                token_id[:10])
+                self._orders.pop(order_id, None)
+
     # ----------------------------------------------------------------- place
     def place_market_making_pair(self, opportunity, position_size_usdc,
                                  blocked_tokens: Optional[Set[str]] = None):
@@ -183,6 +226,12 @@ class OrderManager:
                         extra={"market": market_id})
             return []
         token_id = str(token_ids[0])
+
+        # TOKEN_COOLDOWN_V1: tras cancel reciente, esperar 15min antes de retry
+        if self._token_in_cooldown(token_id):
+            logger.info("SKIP %s: token %s en cooldown post-cancel",
+                        market_id, token_id[:10])
+            return []
 
         # DEDUP: si ya hay posicion abierta u orden BUY viva en este token, saltar.
         if blocked_tokens and token_id in blocked_tokens:
@@ -359,6 +408,8 @@ class OrderManager:
             return 0
 
     def refresh(self, opportunities, size_fn):
+        # TOKEN_COOLDOWN_V1: detectar cancels antes de reposicionar
+        self._detect_cancels_and_cooldown()
         self.cancel_stale_orders()
 
         orders_per_market = self.get_orders_per_market()
