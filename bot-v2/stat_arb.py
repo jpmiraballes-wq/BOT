@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from capital_allocator import CapitalAllocator
+from paper_lab import emit_paper_trade  # PAPER_LAB_PATCHED
 from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL, GAMMA_API_URL
 from decision_logger import log_decision, log_warning
 
@@ -404,6 +405,30 @@ class StatArb:
         size_tokens = round(POSITION_SIZE_USDC / price, 2)
         if size_tokens < 5:
             return
+        # --- Paper mode branch (PAPER_LAB_PATCHED) ---
+        if self.allocator.get_execution_mode(STRATEGY) == "paper":
+            emit_paper_trade(
+                strategy=STRATEGY,
+                market=side_market.get("question") or market_id,
+                side="BUY",
+                entry_price=price,
+                size_usdc=POSITION_SIZE_USDC,
+                token_id=side_market.get("yes_token"),
+                condition_id=market_id,
+                tp_pct=0.05,
+                sl_pct=-0.06,
+                max_hold_hours=float(MAX_HOLD_HOURS),
+                features={
+                    "z_score": zscore,
+                    "yes_price": price,
+                },
+                signal_meta={
+                    "z_entry_threshold": Z_ENTRY,
+                    "z_exit_threshold": Z_EXIT,
+                },
+            )
+            return
+        # --- End paper branch ---
         try:
             order_ids = self.om.place_limit_buy(
                 token_id=side_market["yes_token"],
