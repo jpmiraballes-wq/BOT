@@ -335,9 +335,26 @@ def check_and_close(om=None):
         if pos.get("close_reason") in ("unverified_orphan", "dust_unsellable"):
             continue
 
+        # MIDPOINT_FALLBACK_V1 (2026-04-22): si el book del CLOB esta
+        # roto (sin bid/ask o cruzado), _fetch_midpoint devuelve None y
+        # antes saltabamos la posicion -> NUNCA disparaba SL. Ahora
+        # caemos al current_price guardado por position_tracker. Si
+        # tampoco hay, usamos entry_price (PnL=0, no cierra, pero al
+        # menos no bloquea el loop). Esto permitio que Monero llegara
+        # a -18% sin stop-loss.
         current = _fetch_midpoint(token_id)
         if current is None:
-            continue
+            current = _safe_float(pos.get("current_price"))
+            if current is None or current <= 0:
+                logger.warning(
+                    "AutoClose: pos=%s sin midpoint ni current_price, skip",
+                    str(pos.get("id"))[-8:],
+                )
+                continue
+            logger.info(
+                "AutoClose: pos=%s book CLOB roto, usando current_price=%.4f",
+                str(pos.get("id"))[-8:], current,
+            )
 
         # Phantom guard: descartar PnL irreal
         pnl_pct = _compute_pnl_pct(pos, current)
