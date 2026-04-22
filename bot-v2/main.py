@@ -301,7 +301,9 @@ def build_size_fn(sizer, rm, cb, deployed_fn, budget_fn):
     # FLAT_MAX_75_V1 (2026-04-22): subido de $20 a $75 para tickets
     # reales ~15% del budget MM. Capital ~$500, MM allocated ~$450,
     # 15% = $67.5 -> cap en $75 con margen.
-    FLAT_PCT = 0.15
+    # FLAT_PCT_25_V1 (2026-04-22): subido de 0.15 a 0.25 para tickets mas
+    # grandes. El risk_manager.deployable_capital ya protege del over-deploy.
+    FLAT_PCT = 0.25
     FLAT_MIN = 5.0
     FLAT_MAX = 75.0
 
