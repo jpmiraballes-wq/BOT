@@ -126,15 +126,25 @@ def _call_close_market(om, pos):
 
 
 def _close_position(om, pos, pnl_pct, reason, current_price):
+    # AUTOCLOSE_DEBUG_TRACE_V1 (2026-04-22): loguear entrada y cada branch
+    # para ver por que "checked=N closed=0" sin pistas. Antes _close_position
+    # tenia 4+ return False silenciosos.
     pos_id = pos.get("id")
+    market_short = (pos.get("market") or "")[:30]
+    logger.info(
+        "AutoClose ENTRY: pos=%s market=%r reason=%s pnl=%.2f%% price=%.4f",
+        str(pos_id)[-8:] if pos_id else "NONE",
+        market_short, reason, (pnl_pct or 0) * 100, current_price or 0,
+    )
     if not pos_id:
+        logger.warning("AutoClose SKIP: pos sin id")
         return False
 
     # DEDUP_REENTRY_V1: si ya se cerro esta pos en los ultimos 5 min,
     # saltar para no crear Trade duplicado. Esto bloquea el race
     # condition con la latencia del write de Base44.
     if _was_closed_recently(pos_id):
-        logger.info("AutoClose: pos=%s cerrada recientemente, skip reentry", pos_id[-8:])
+        logger.info("AutoClose SKIP: pos=%s cerrada recientemente (dedup 5min)", pos_id[-8:])
         return False
 
     # --- Paper mode ---
@@ -242,16 +252,26 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
     # faltante). Eso produjo 13 trades fantasma en 1 minuto el 21-abr.
     # Ahora: solo consideramos ok si result es truthy (dict con order_id,
     # hash, o True). None/False/{}/[] = fallo -> NO se crea Trade.
+    logger.info(
+        "AutoClose LIVE CLOSE: pos=%s reason=%s intentando venta al mercado...",
+        pos_id[-8:], reason,
+    )
     try:
         result = _call_close_market(om, pos)
         ok = bool(result)
-        if not ok:
+        if ok:
+            logger.info(
+                "AutoClose LIVE OK: pos=%s reason=%s result=%r",
+                pos_id[-8:], reason, result,
+            )
+        else:
             logger.warning(
-                "close live sin confirmacion (%s, reason=%s, result=%r) -> NO crear Trade",
+                "AutoClose LIVE FAIL: pos=%s reason=%s result=%r -> NO crear Trade",
                 pos_id[-8:], reason, result,
             )
     except Exception as exc:
-        logger.warning("close live fallo (%s): %s", pos_id[-8:], exc)
+        logger.warning("AutoClose LIVE EXCEPTION: pos=%s reason=%s err=%s",
+                       pos_id[-8:], reason, exc)
         ok = False
 
     if ok:
