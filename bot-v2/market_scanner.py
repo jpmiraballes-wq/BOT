@@ -16,8 +16,8 @@ from config import GAMMA_API_URL, MIN_SPREAD_PCT
 
 logger = logging.getLogger(__name__)
 
-MIN_VOLUME_USDC = 250_000.0
-MIN_LIQUIDITY_USDC = 25_000.0
+MIN_VOLUME_USDC = 500_000.0
+MIN_LIQUIDITY_USDC = 50_000.0
 MAX_DAYS_TO_RESOLUTION = 90
 TOP_N = 8
 REQUEST_TIMEOUT = 15
@@ -101,7 +101,7 @@ def _passes_filters(market, prices):
         return False
     if prices["spread_pct"] < MIN_SPREAD_PCT:
         return False
-    if prices["mid"] < 0.10 or prices["mid"] > 0.90:
+    if prices["mid"] < 0.20 or prices["mid"] > 0.80:
         return False
     days = _days_to_resolution(market)
     if days is not None:
