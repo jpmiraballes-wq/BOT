@@ -150,6 +150,13 @@ def _passes_filters(market, prices):
         return False
     if prices["spread_pct"] < MIN_SPREAD_PCT:
         return False
+    # MIN_SPREAD_ABS_V1: filtro de spread absoluto. Mercados con bid/ask
+    # a 1¢ de distancia son trampas: el tick minimo (0.01) contra un mid
+    # de 0.06 equivale a ~16% del precio. Un SL de -1.5% se gatilla con
+    # medio tick de ruido natural del orderbook -> el bot churnea
+    # abriendo/cerrando y sangra fees. Exigimos al menos 2¢ de colchon.
+    if prices["spread_abs"] < 0.02:
+        return False
     # PRICE_RANGE_V2: subimos a 0.20-0.80. En <0.20 o >0.80 el tick de 0.01
     # es >5% del precio y cualquier SL -7% se gatilla con 1 solo tick.
     if prices["mid"] < 0.20 or prices["mid"] > 0.80:
