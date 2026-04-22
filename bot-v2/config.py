@@ -52,7 +52,7 @@ MAX_DRAWDOWN_PCT = 0.15
 RESERVE_PCT = 0.20
 MAX_TOTAL_EXPOSURE_USDC = 150.0
 MAX_LOSS_PER_POSITION_USDC = 1.5
-MAX_CONCURRENT_MARKETS = 5
+MAX_CONCURRENT_MARKETS = 2
 ORDER_MAX_AGE_SECONDS = 2 * 60 * 60
 
 # ---------------------------------------------------------------------------
