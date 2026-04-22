@@ -265,34 +265,16 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
                    pos_id[-8:], attempts, MAX_FAIL_ATTEMPTS)
 
     if attempts >= MAX_FAIL_ATTEMPTS:
-        # ORPHAN_TRADE_V1: marcar closed + crear Trade "orphan" con pnl=0
-        # para que el dashboard refleje que la posicion se retiro. Antes
-        # simplemente desaparecia del listado sin dejar traza, haciendo
-        # que el capital "desapareciera" de la vista del user.
-        update_record("Position", pos_id, {
-            "status": "closed",
-            "close_time": _iso_now(),
-            "close_reason": "unverified_orphan",
-            "current_price": current_price,
-        })
-        entry = _safe_float(pos.get("entry_price")) or 0
-        size = _safe_float(pos.get("size_usdc")) or 0
-        create_record("Trade", {
-            "market": pos.get("market"),
-            "side": pos.get("side"),
-            "entry_price": entry,
-            "exit_price": current_price,
-            "size_usdc": size,
-            "pnl": 0,
-            "pnl_pct": 0,
-            "strategy": pos.get("strategy") or "unknown",
-            "status": "closed",
-            "entry_time": pos.get("opened_at"),
-            "exit_time": _iso_now(),
-            "notes": f"orphan: live close fallo {MAX_FAIL_ATTEMPTS}x reason={reason}",
-        })
-        logger.warning("AutoClose: pos=%s marcada closed ORPHAN (Trade pnl=0 registrado)",
-                       pos_id[-8:])
+        # NO_ORPHAN_TRADE_V1: cuando close live falla 3x, NO creamos Trade
+        # fantasma con pnl=0 (ensuciaba stats historicos). Tampoco marcamos
+        # la Position como closed, porque la posicion SIGUE ABIERTA on-chain.
+        # Reseteamos el contador y dejamos que AutoClose la reintente en
+        # el proximo ciclo. Si nunca cierra, el user la cierra manual.
+        logger.warning(
+            "AutoClose: pos=%s cierre fallo %dx. Position queda abierta, "
+            "se reintentara proximo ciclo. NO se crea Trade fantasma.",
+            pos_id[-8:], MAX_FAIL_ATTEMPTS,
+        )
         _FAIL_COUNTS.pop(pos_id, None)
     return False
 
