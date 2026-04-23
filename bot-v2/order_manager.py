@@ -673,6 +673,25 @@ class OrderManager:
         if not pending:
             return 0
 
+        # DRAIN_LOGGING_V1 — loggear start del batch a Base44
+        try:
+            import requests as _rq_log
+            import os as _os_log
+            _base = _os_log.environ.get("BASE44_BASE_URL", "https://app.base44.com")
+            _app = _os_log.environ.get("EXTERNAL_BASE44_APP_ID") or _os_log.environ.get("BASE44_APP_ID")
+            _key = _os_log.environ.get("EXTERNAL_BASE44_API_KEY") or _os_log.environ.get("BASE44_API_KEY")
+            if _app and _key:
+                _rq_log.post(
+                    "%s/api/apps/%s/entities/LogEvent" % (_base, _app),
+                    json={"level": "info", "module": "drain_pending_fills",
+                          "message": "Procesando %d copy-trade(s) aprobado(s)" % len(pending),
+                          "data": {"pos_ids": [pid for pid, _ in pending][:10]}},
+                    headers={"api_key": _key, "Content-Type": "application/json"},
+                    timeout=5,
+                )
+        except Exception:
+            pass
+
         processed = 0
         for pos_id, pos in pending:
             token_id = pos.get("token_id")
