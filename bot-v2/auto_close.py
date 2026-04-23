@@ -363,7 +363,12 @@ def check_and_close(om=None):
 
         checked += 1
         reason = None
-        if pnl_pct >= take_profit:
+        # FIX #2 (2026-04-23): Sell anticipado al +25% sin esperar resolución.
+        # Si la posición subió 25% desde entrada, lockeamos ganancia aunque
+        # el take_profit configurado sea mayor. Evita devolver profit al mercado.
+        if pnl_pct >= 0.25:
+            reason = "early_profit_exit"
+        elif pnl_pct >= take_profit:
             reason = "take_profit"
         elif pnl_pct <= stop_loss:
             reason = "stop_loss"
