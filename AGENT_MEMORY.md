@@ -63,3 +63,25 @@ _Última actualización: 2026-04-23 (fix copy-trade executor)_
 - **2026-04-23 — Copy-trade jamás llega al CLOB.**
   Causa: `bot-v2/whale_consensus.py` es paper-only, `bot-v2/main.py` no llamaba `drain_pending_fills`, y el método ni existía en `bot-v2/order_manager.py` (estaba en `bot/order_manager.py`, carpeta huérfana). Además `syncPositionsWithWallet` mataba las Positions pending_fill por race condition.
   Fix: (1) guard `pending_fill=true` en `syncPositionsWithWallet`, (2) método `drain_pending_fills` añadido a `bot-v2/order_manager.py`, (3) llamada inyectada en `bot-v2/main.py` al inicio del loop. Redeploy via `pushCopyTradeExecutor`.
+
+---
+
+## 🍎 REGLA DURA — INSTRUCCIONES PARA LA MAC (paso a paso, siempre)
+
+**Cuando pushee un cambio al repo, SIEMPRE darle al usuario el bloque exacto para copiar-pegar en la terminal de la Mac.** Nada de "hacé git pull y restart" vago. El usuario copia-pega y listo.
+
+Formato obligatorio (copiar tal cual, ajustando ruta/nombre del proceso):
+
+\`\`\`bash
+# 1. En la ventana donde corre el bot: Ctrl+C
+# 2. Después:
+cd ~/BOT
+git pull
+cd bot-v2
+python3 main.py
+\`\`\`
+
+Notas:
+- El usuario corre el bot manualmente con `python3 main.py` dentro de `bot-v2/` (no hay systemd en su Mac).
+- Si en algún momento se cambia a systemd/launchd, actualizar este bloque.
+- NUNCA pedir logs ni screenshots si el usuario no los ofrece. Confiar en heartbeat + lectura de código en GitHub.
