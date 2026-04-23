@@ -1,0 +1,21 @@
+# Build context — no incluir secrets ni artefactos locales
+.env
+.env.*
+**/.env
+**/.env.*
+*.log
+**/*.log
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.DS_Store
+bot/
+bot-v3-fix/
+*.md
+shutdown.flag
+venv/
+.venv/
+node_modules/
