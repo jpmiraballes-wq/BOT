@@ -34,7 +34,7 @@ MAX_HOLD_HOURS = 48.0
 
 
 def _endpoint(entity: str) -> str:
-    return "%s/api/apps/%s/entities/%s/records" % (
+    return "%s/api/apps/%s/entities/%s" % (
         BASE44_BASE_URL, BASE44_APP_ID, entity,
     )
 
