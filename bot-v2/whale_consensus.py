@@ -125,7 +125,7 @@ class WhaleConsensus:
         if mode == "disabled":
             return
         if mode == "live":
-            logger.warning("whale_consensus en live mode pero no hay ejecutor live; skip.")
+            logger.debug("whale_consensus en live mode; ejecucion real via drain_pending_fills (order_manager).")
             return
         # mode == "paper"
         global MIN_CONSENSUS
