@@ -68,6 +68,10 @@ _Última actualización: 2026-04-23 (fix copy-trade executor)_
 
 ## 🍎 REGLA DURA — INSTRUCCIONES PARA LA MAC (paso a paso, siempre)
 
+**RUTA REAL DEL REPO EN LA MAC:** `~/Desktop/bot-repo/` (NO `~/BOT`).
+**Entorno Python:** system python3 (3.9). Dependencias en `~/Library/Python/3.9`. Si falla `ModuleNotFoundError` → `pip3 install -r bot-v2/requirements.txt` (o instalar el módulo suelto).
+
+
 **Cuando pushee un cambio al repo, SIEMPRE darle al usuario el bloque exacto para copiar-pegar en la terminal de la Mac.** Nada de "hacé git pull y restart" vago. El usuario copia-pega y listo.
 
 Formato obligatorio (copiar tal cual, ajustando ruta/nombre del proceso):
@@ -75,7 +79,7 @@ Formato obligatorio (copiar tal cual, ajustando ruta/nombre del proceso):
 \`\`\`bash
 # 1. En la ventana donde corre el bot: Ctrl+C
 # 2. Después:
-cd ~/BOT
+cd ~/Desktop/bot-repo
 git pull
 cd bot-v2
 python3 main.py
