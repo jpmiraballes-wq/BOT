@@ -24,7 +24,7 @@ REQUEST_TIMEOUT = 15
 
 
 def _endpoint() -> str:
-    return "%s/api/apps/%s/entities/PaperTrade/records" % (
+    return "%s/api/apps/%s/entities/PaperTrade" % (
         BASE44_BASE_URL, BASE44_APP_ID,
     )
 
