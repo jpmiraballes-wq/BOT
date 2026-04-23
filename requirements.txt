@@ -1,3 +1,7 @@
-requests==2.31.0
-python-dotenv==1.0.0
-py-clob-client==0.17.0
+# Polymarket bot-v2 runtime dependencies
+python-dotenv>=1.0.0
+requests>=2.31.0
+py-clob-client>=0.17.0
+web3>=6.11.0
+eth-account>=0.10.0
+eth-utils>=2.3.0
