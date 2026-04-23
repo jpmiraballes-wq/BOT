@@ -599,6 +599,12 @@ def main() -> int:
                 bot_cfg.get("mode"),
                 bot_cfg.get("id"),
             )
+        # ─── COPY-TRADE EXECUTOR: correr SIEMPRE (antes de pausas) ───
+        try:
+            om.drain_pending_fills()
+        except Exception as _drain_exc:
+            logger.error("drain_pending_fills fallo: %s", _drain_exc)
+
         if bot_cfg.get("emergency_stop"):
             logger.critical("EMERGENCY STOP desde dashboard (at=%s). Cancelando todo y saliendo.",
                             bot_cfg.get("emergency_stop_at"))
