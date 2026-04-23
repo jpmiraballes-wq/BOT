@@ -1,0 +1,16 @@
+# fly.toml — Polymarket bot-v2 24/7
+app = "polymarket-bot"
+primary_region = "mad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+# El bot es un worker (no HTTP), así que no exponemos puertos.
+# Fly mantendrá 1 máquina viva con auto-restart.
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512
