@@ -119,49 +119,45 @@ def best_bid_ask(token_id: str) -> Tuple[Optional[float], Optional[float]]:
 
 
 def compute_order_size(size_usdc: float, price: float, min_notional: float = 5.0) -> Optional[float]:
-    """COMPUTE_ORDER_SIZE_V2: calcula shares para que notional respete reglas CLOB.
+    """COMPUTE_ORDER_SIZE_V3_INTEGER: shares enteros para notional CLOB-compliant.
 
-    Polymarket exige que `maker_amount` (shares*price para BUY) se pueda expresar
-    en USDC con <= 6 decimales (USDC es 1e6). En la practica el CLOB valida a 4dp.
+    Polymarket CLOB rechaza ordenes cuyo notional (shares*price) no sea
+    multiplo exacto del tick_size del mercado (tipicamente 0.01 USDC).
+    La forma mas simple y 100% robusta: usar shares ENTEROS.
 
-    Estrategia:
-      1. Partimos de floor(size_usdc/price) en pasos de 0.01 shares.
-      2. Escaneamos hasta 101 iteraciones (~ $1 de rango) buscando el mayor
-         size_shares tal que shares*price sea limpio a 4 decimales.
-      3. Si ni eso encontramos, devolvemos None (orden se rechazara arriba).
+    Con price a 2dp (0.54) y shares ENTERO (18), notional = 18*0.54 = 9.72
+    siempre es de 2dp. Funciona para cualquier price, cualquier size.
 
-    Devuelve size_shares (>= min_notional/price) o None.
+    Args:
+        size_usdc: presupuesto deseado en USDC (ej 10.0)
+        price: precio del share (0-1, ej 0.54)
+        min_notional: notional minimo (default $5 que exige Polymarket)
+
+    Returns:
+        shares (float entero, ej 18.0) o None si no alcanza min_notional.
     """
     if price <= 0 or size_usdc <= 0:
         return None
 
-    # Presupuesto exacto a 2dp (floor para no exceder)
-    budget = math.floor(size_usdc * 100) / 100.0
-    if budget < min_notional:
+    # Floor al entero mas cercano que no exceda el presupuesto
+    raw_shares = size_usdc / price
+    size_shares = math.floor(raw_shares)
+
+    # Si el floor da 0 shares (ej size=$5 price=$0.90 -> 5.55 -> 5? no, 5 si),
+    # pero si price > size_usdc (ej $5 size, price=$0.99 -> 5.05 shares -> 5),
+    # entonces size_shares=5, notional=$4.95, por debajo del min.
+    # Verificar notional minimo.
+    notional = size_shares * price
+    if size_shares <= 0 or notional < min_notional:
+        # Probar 1 share extra para ver si alcanzamos min_notional sin superar budget
+        alt = size_shares + 1
+        alt_notional = alt * price
+        if alt_notional >= min_notional and alt_notional <= size_usdc * 1.05:
+            # Permitimos 5% de overshoot para alcanzar min_notional
+            return float(alt)
         return None
 
-    raw_shares = budget / price
-    size_shares = math.floor(raw_shares * 100) / 100.0
-
-    # Escaneamos bajando de a 0.01 share hasta encontrar notional limpio a 4dp.
-    # 101 iteraciones = $1 de rango, suficiente para cualquier price realista.
-    best = None
-    for _ in range(101):
-        if size_shares <= 0:
-            break
-        notional_real = size_shares * price
-        # Limpio a 4 decimales (lo que exige el CLOB, no 2)
-        if abs(notional_real * 10000 - round(notional_real * 10000)) < 1e-6:
-            best = size_shares
-            break
-        size_shares = round(size_shares - 0.01, 2)
-
-    if best is None or best <= 0 or best * price < min_notional:
-        return None
-
-    return round(best, 2)
-
-
+    return float(size_shares)
 def classify_error(exc: Exception) -> str:
     """Clasifica una excepcion de la API CLOB.
 
