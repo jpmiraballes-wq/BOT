@@ -378,8 +378,8 @@ def check_and_close(om=None):
 
         checked += 1
         reason = None
-        # FIX #2 (2026-04-23): Sell anticipado al +25% sin esperar resoluciÃ³n.
-        # Si la posiciÃ³n subiÃ³ 25% desde entrada, lockeamos ganancia aunque
+        # FIX #2 (2026-04-23): Sell anticipado al +25% sin esperar resoluciÃÂ³n.
+        # Si la posiciÃÂ³n subiÃÂ³ 25% desde entrada, lockeamos ganancia aunque
         # el take_profit configurado sea mayor. Evita devolver profit al mercado.
         if pnl_pct >= 0.25:
             reason = "early_profit_exit"
@@ -427,9 +427,19 @@ def _settle_copy_trade_accounting(pos, pos_id, reason, current_price, pnl_pct):
        - si hay CopyTradeProposal linkeada: set proposal.pnl
     """
     try:
+        # PNL_ACCOUNTING_V2: distinguir fills reales de rebotes
         entry = _safe_float(pos.get("entry_price")) or 0.0
         size = _safe_float(pos.get("size_usdc")) or 0.0
-        pnl_realized = round(size * (pnl_pct or 0.0), 4)
+        reason_lc = str(reason or "").lower()
+        _UNFILLED_REASONS = {"fak_no_fill", "dust_unsellable", "cancelled_no_fill", "gtc_timeout_no_fill"}
+        is_unfilled = (
+            reason_lc in _UNFILLED_REASONS
+            or reason_lc.startswith("price_drifted")
+            or reason_lc.startswith("stale_price_drift")
+            or reason_lc.startswith("rejected")
+            or reason_lc.startswith("expired_")
+        )
+        pnl_realized = 0.0 if is_unfilled else round(size * (pnl_pct or 0.0), 4)
 
         # 1) Update Position con pnl_realized + exit_price (patch sobre el update ya hecho)
         update_record("Position", pos_id, {
@@ -453,10 +463,11 @@ def _settle_copy_trade_accounting(pos, pos_id, reason, current_price, pnl_pct):
                     new_deployed = max(0.0, round(deployed - size, 2))
                     new_pnl_total = round(pnl_total + pnl_realized, 4)
                     new_pnl_today = round(pnl_today + pnl_realized, 4)
-                    if pnl_realized > 0:
-                        wins += 1
-                    elif pnl_realized < 0:
-                        losses += 1
+                    if not is_unfilled:
+                        if pnl_realized > 0:
+                            wins += 1
+                        elif pnl_realized < 0:
+                            losses += 1
 
                     update_record("WhaleCopyWallet", wid, {
                         "deployed_usdc": new_deployed,
