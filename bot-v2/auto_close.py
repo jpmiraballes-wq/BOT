@@ -177,6 +177,11 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
     # publica de Polymarket (clob.polymarket.com/balance-allowance) en vez
     # de om.client.get_balance_allowance que tiraba excepciones silenciosas.
     # Tambien usamos logger.warning (no debug) para ver fallos del check.
+    # TOKEN_ID_UNBOUND_FIX_V1: asegurar token_id definido antes de cualquier
+    # rama condicional. Sin esto, Python lo trata como local y tira
+    # UnboundLocalError cuando strategy != whale_consensus.
+    token_id = pos.get("token_id")
+
     # WHALE_CONSENSUS_GRACE_V1: las Positions de copy-trade recien creadas
         # necesitan >2min para que el copy_executor complete el fill via FAK.
         # Si marcamos dust_unsellable antes, perdemos la oportunidad de retry.
