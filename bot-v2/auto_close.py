@@ -182,17 +182,15 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
     # UnboundLocalError cuando strategy != whale_consensus.
     token_id = pos.get("token_id")
 
-    # WHALE_CONSENSUS_GRACE_V1: las Positions de copy-trade recien creadas
-        # necesitan >2min para que el copy_executor complete el fill via FAK.
-        # Si marcamos dust_unsellable antes, perdemos la oportunidad de retry.
-        if pos.get("strategy") == "whale_consensus":
-            import time as _t
-            opened_ts = pos.get("opened_at_ts") or 0
-            if opened_ts and (_t.time() - float(opened_ts)) < 120:
-                logger.info("AutoClose SKIP whale_consensus <120s old: pos=%s", pos_id[-8:] if pos_id else "?")
-                return False
-        
-        token_id = pos.get("token_id")
+    # WHALE_CONSENSUS_GRACE_V1 + REINDENT_GRACE_V2: las Positions copy-trade
+    # recien creadas necesitan >2min para que copy_executor complete el fill via FAK.
+    # Si marcamos dust_unsellable antes, perdemos la oportunidad de retry.
+    if pos.get("strategy") == "whale_consensus":
+        import time as _t
+        opened_ts = pos.get("opened_at_ts") or 0
+        if opened_ts and (_t.time() - float(opened_ts)) < 120:
+            logger.info("AutoClose SKIP whale_consensus <120s old: pos=%s", pos_id[-8:] if pos_id else "?")
+            return False
     if token_id:
         try:
             bal_url = "https://clob.polymarket.com/balance-allowance"
