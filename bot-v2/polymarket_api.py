@@ -119,41 +119,47 @@ def best_bid_ask(token_id: str) -> Tuple[Optional[float], Optional[float]]:
 
 
 def compute_order_size(size_usdc: float, price: float, min_notional: float = 5.0) -> Optional[float]:
-    """Calcula shares para que notional (shares*price) tenga EXACTAMENTE 2 decimales USDC.
+    """COMPUTE_ORDER_SIZE_V2: calcula shares para que notional respete reglas CLOB.
 
-    Polymarket exige maker_amount con max 2 decimales. 'shares * price' debe
-    redondear a 2dp sin perder precision. Usamos floor para nunca exceder size_usdc.
+    Polymarket exige que `maker_amount` (shares*price para BUY) se pueda expresar
+    en USDC con <= 6 decimales (USDC es 1e6). En la practica el CLOB valida a 4dp.
 
-    Devuelve size_shares o None si notional < min_notional.
+    Estrategia:
+      1. Partimos de floor(size_usdc/price) en pasos de 0.01 shares.
+      2. Escaneamos hasta 101 iteraciones (~ $1 de rango) buscando el mayor
+         size_shares tal que shares*price sea limpio a 4 decimales.
+      3. Si ni eso encontramos, devolvemos None (orden se rechazara arriba).
+
+    Devuelve size_shares (>= min_notional/price) o None.
     """
     if price <= 0 or size_usdc <= 0:
         return None
 
-    # Redondeamos notional a 2 decimales (floor para no exceder presupuesto)
-    notional_cents = math.floor(size_usdc * 100) / 100.0
-
-    if notional_cents < min_notional:
+    # Presupuesto exacto a 2dp (floor para no exceder)
+    budget = math.floor(size_usdc * 100) / 100.0
+    if budget < min_notional:
         return None
 
-    # Derivamos shares. Floor a 2 decimales para que shares*price <= notional_cents.
-    raw_shares = notional_cents / price
+    raw_shares = budget / price
     size_shares = math.floor(raw_shares * 100) / 100.0
 
-    # Verificacion: shares * price debe tener <= 2 decimales.
-    # floor(shares*100)/100 * price = puede dar 3dp si price tiene 3dp.
-    # Ajuste fino: buscar el mayor multiplo de 0.01 shares que cumpla.
-    for _ in range(5):
-        notional_real = round(size_shares * price, 4)
-        # Si cabe en 2 decimales EXACTOS (sin error de float)
-        if abs(notional_real * 100 - round(notional_real * 100)) < 1e-6:
+    # Escaneamos bajando de a 0.01 share hasta encontrar notional limpio a 4dp.
+    # 101 iteraciones = $1 de rango, suficiente para cualquier price realista.
+    best = None
+    for _ in range(101):
+        if size_shares <= 0:
             break
-        # Ajustar bajando 0.01 share
-        size_shares = max(0.0, size_shares - 0.01)
+        notional_real = size_shares * price
+        # Limpio a 4 decimales (lo que exige el CLOB, no 2)
+        if abs(notional_real * 10000 - round(notional_real * 10000)) < 1e-6:
+            best = size_shares
+            break
+        size_shares = round(size_shares - 0.01, 2)
 
-    if size_shares <= 0 or size_shares * price < min_notional:
+    if best is None or best <= 0 or best * price < min_notional:
         return None
 
-    return round(size_shares, 2)
+    return round(best, 2)
 
 
 def classify_error(exc: Exception) -> str:
