@@ -661,7 +661,7 @@ def main() -> int:
             mm_budget = allocator.get_available(MM_STRATEGY)
 
             if not mm_enabled:
-                logger.info("MM pausado desde dashboard. Solo mantenimiento.")
+                logger.info("market_maker strategy disabled via BotConfig.strategy_market_maker=False. Solo mantenimiento.")
                 om.cancel_stale_orders()
             elif mm_budget <= 0:
                 logger.info("MM sin capital disponible (deployed=%.2f / allocated=%.2f).",
