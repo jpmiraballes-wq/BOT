@@ -177,7 +177,17 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
     # publica de Polymarket (clob.polymarket.com/balance-allowance) en vez
     # de om.client.get_balance_allowance que tiraba excepciones silenciosas.
     # Tambien usamos logger.warning (no debug) para ver fallos del check.
-    token_id = pos.get("token_id")
+    # WHALE_CONSENSUS_GRACE_V1: las Positions de copy-trade recien creadas
+        # necesitan >2min para que el copy_executor complete el fill via FAK.
+        # Si marcamos dust_unsellable antes, perdemos la oportunidad de retry.
+        if pos.get("strategy") == "whale_consensus":
+            import time as _t
+            opened_ts = pos.get("opened_at_ts") or 0
+            if opened_ts and (_t.time() - float(opened_ts)) < 120:
+                logger.info("AutoClose SKIP whale_consensus <120s old: pos=%s", pos_id[-8:] if pos_id else "?")
+                return False
+        
+        token_id = pos.get("token_id")
     if token_id:
         try:
             bal_url = "https://clob.polymarket.com/balance-allowance"
