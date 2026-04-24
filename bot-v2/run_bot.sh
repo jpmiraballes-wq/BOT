@@ -30,16 +30,17 @@ while true; do
 
   echo "[run_bot $(date '+%Y-%m-%d %H:%M:%S')] starting main.py..."
 
-  # Activar venv (.venv o venv)
-  if [[ -f "$BOT_DIR/.venv/bin/activate" ]]; then
-    # shellcheck source=/dev/null
-    source "$BOT_DIR/.venv/bin/activate"
-  elif [[ -f "$BOT_DIR/venv/bin/activate" ]]; then
-    # shellcheck source=/dev/null
-    source "$BOT_DIR/venv/bin/activate"
+  # Elegir binario python del venv (launchd no carga shells interactivos,
+  # por eso apuntamos directo al binario en vez de 'source activate').
+  if [[ -x "$BOT_DIR/.venv/bin/python" ]]; then
+    PY_BIN="$BOT_DIR/.venv/bin/python"
+  elif [[ -x "$BOT_DIR/venv/bin/python" ]]; then
+    PY_BIN="$BOT_DIR/venv/bin/python"
+  else
+    PY_BIN="python3"
   fi
 
-  python3 main.py >> "$LOG_FILE" 2>&1 &
+  "$PY_BIN" main.py >> "$LOG_FILE" 2>&1 &
   CHILD=$!
   wait $CHILD
   EXIT_CODE=$?
