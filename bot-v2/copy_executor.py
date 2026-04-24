@@ -44,7 +44,8 @@ RETRY_BACKOFF_BASE = 1.5               # 1.5s, 2.25s, 3.4s entre reintentos
 FILL_POLL_ATTEMPTS = 3                 # polls post-FAK para confirmar matching
 FILL_POLL_DELAY_MS = 500               # delay entre polls
 MIN_NOTIONAL_USDC = 5.0                # minimo real de Polymarket
-PRICE_SLIPPAGE_TICKS = 1               # takers: 1 tick mas agresivo que best
+PRICE_SLIPPAGE_TICKS = 2               # GTC_5MIN_V1: +2 ticks (2c) para mejor fill rate
+GTC_FILL_TIMEOUT_SEC = 300.0           # GTC_5MIN_V1: orden viva hasta 5min antes de cancelar
 MAX_PRICE_DRIFT_PCT = 0.20             # si precio se movio >20% desde proposal, abortar
 
 # Dedup de alertas Telegram (en memoria, se resetea al reiniciar bot)
@@ -150,7 +151,7 @@ class CopyExecutor:
     # --------------------------------------------------------- fetch list
     def _fetch_pending(self) -> List[Dict[str, Any]]:
         """Lee Positions con pending_fill=true y status=open."""
-        # list_records(entity, sort, limit) Ã¢ÂÂ sin filtros server-side
+        # list_records(entity, sort, limit) ÃÂ¢ÃÂÃÂ sin filtros server-side
         # filtramos en Python para mantener la firma publica simple.
         records = list_records(
             "Position",
@@ -203,13 +204,13 @@ class CopyExecutor:
                 created_ts = float(raw)
                 break
 
-        # ÃÂltimo recurso: opened_at_ts (puede venir con offset horario raro).
+        # ÃÂÃÂltimo recurso: opened_at_ts (puede venir con offset horario raro).
         if created_ts is None:
             ts_raw = pos.get("opened_at_ts")
             if isinstance(ts_raw, (int, float)) and ts_raw > 0:
                 created_ts = float(ts_raw)
 
-        # Si aÃÂºn no tenemos nada, tratamos como reciÃÂ©n creada.
+        # Si aÃÂÃÂºn no tenemos nada, tratamos como reciÃÂÃÂ©n creada.
         if created_ts is None:
             created_ts = time.time()
 
@@ -283,7 +284,7 @@ class CopyExecutor:
                                   market_label)
                 _alert_once(
                     f"usdc_low:{pos_id}",
-                    f"Ã¢ÂÂ Ã¯Â¸Â <b>Sin USDC suficiente</b>\n{market_label}\n"
+                    f"ÃÂ¢ÃÂÃÂ ÃÂ¯ÃÂ¸ÃÂ <b>Sin USDC suficiente</b>\n{market_label}\n"
                     f"Necesita ${size_usdc:.2f}, hay ${usdc_avail:.2f}",
                 )
                 return True
@@ -302,10 +303,10 @@ class CopyExecutor:
         tick = pmapi.get_tick_size(token_id)
 
         # ---- STALE_PRICE_GUARD_V1 ----
-        # Si el libro se alejÃ³ >25% del entry_price original (que viene del
+        # Si el libro se alejÃÂ³ >25% del entry_price original (que viene del
         # proposal = precio al que las ballenas compraron), abortamos.
         # No tiene sentido "copiar" a un whale a un precio completamente
-        # distinto â es otro trade.
+        # distinto Ã¢ÂÂ es otro trade.
         entry_original = float(pos.get("entry_price") or 0.0)
         mid_now = None
         if best_bid is not None and best_ask is not None:
@@ -389,7 +390,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, "size_below_min_notional", market_label)
             _alert_once(
                 f"small:{pos_id}",
-                f"Ã¢ÂÂ Ã¯Â¸Â <b>Copy-trade saltado</b>\n{market_label}\n"
+                f"ÃÂ¢ÃÂÃÂ ÃÂ¯ÃÂ¸ÃÂ <b>Copy-trade saltado</b>\n{market_label}\n"
                 f"Size ${size_usdc:.2f} insuficiente con price {limit_price:.3f}",
             )
             return True
@@ -418,12 +419,21 @@ class CopyExecutor:
             return True
 
         if order_id and filled_shares == 0:
-            # Orden aceptada pero no lleno (FAK sin matching)
-            self._mark_closed(pos_id, "fak_no_fill", market_label)
+            # GTC_5MIN_V1: orden aceptada sin match inmediato. Esperamos hasta 5min.
+            filled_shares_late, fill_err = self._wait_gtc_fill_or_cancel(
+                order_id, GTC_FILL_TIMEOUT_SEC, market_label, pos_id
+            )
+            if filled_shares_late > 0:
+                filled_usdc = round(filled_shares_late * limit_price, 2)
+                self._mark_filled(pos_id, order_id, limit_price, filled_shares_late,
+                                  filled_usdc, market_label, side_str)
+                return True
+            # No lleno tras 5min -> ya cancelada por _wait_gtc_fill_or_cancel
+            self._mark_closed(pos_id, "gtc_timeout_no_fill", market_label)
             _alert_once(
                 f"nofill:{pos_id}",
-                f"Ã¢ÂÂ Ã¯Â¸Â <b>Copy-trade no llenÃÂ³</b>\n{market_label}\n"
-                f"FAK @ {limit_price:.3f} sin liquidez tras {FILL_POLL_ATTEMPTS} polls.",
+                f"ÃÂ¢ÃÂÃÂ ÃÂ¯ÃÂ¸ÃÂ <b>Copy-trade no llenÃÂÃÂ³</b>\n{market_label}\n"
+                f"GTC @ {limit_price:.3f} viva 5min, sin match. Orden cancelada.",
             )
             return True
 
@@ -433,7 +443,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, f"rejected:{str(error)[:80]}", market_label)
             _alert_once(
                 f"rej:{pos_id}",
-                f"Ã¢ÂÂ <b>Copy-trade rechazado</b>\n{market_label}\n"
+                f"ÃÂ¢ÃÂÃÂ <b>Copy-trade rechazado</b>\n{market_label}\n"
                 f"Motivo: <code>{str(error)[:150]}</code>",
             )
             return True
@@ -464,7 +474,7 @@ class CopyExecutor:
                     size=size_shares, side=side_const,
                 )
                 signed = self.client.create_order(args)
-                resp = self.client.post_order(signed, OrderType.FAK) or {}
+                resp = self.client.post_order(signed, OrderType.GTC) or {}  # GTC_5MIN_V1
                 order_id = resp.get("orderID") or resp.get("orderId")
                 status = resp.get("status")
 
@@ -529,6 +539,51 @@ class CopyExecutor:
         return 0.0
 
     # ---------------------------------------------------- mark helpers
+    def _wait_gtc_fill_or_cancel(
+        self,
+        order_id: str,
+        timeout_sec: float,
+        market_label: str,
+        pos_id: str,
+    ) -> Tuple[float, Optional[str]]:
+        """GTC_5MIN_V1: espera fill hasta timeout_sec polleando cada 2s.
+
+        Si matchea → devuelve (shares_filled, None).
+        Si expira → intenta cancel_order(order_id) y devuelve (0, reason).
+        """
+        start = time.time()
+        poll_interval = 2.0
+        last_filled = 0.0
+        while time.time() - start < timeout_sec:
+            time.sleep(poll_interval)
+            try:
+                status = self.client.get_order(order_id) or {}
+                size_matched = float(status.get("size_matched") or 0.0)
+                if size_matched > last_filled:
+                    last_filled = size_matched
+                # estado "MATCHED" final
+                if str(status.get("status", "")).upper() in ("MATCHED", "FILLED"):
+                    return last_filled, None
+                # si polymarket ya la cancelo por otra razon, salimos
+                if str(status.get("status", "")).upper() in ("CANCELED", "CANCELLED"):
+                    return last_filled, "cancelled_by_server"
+            except Exception as exc:  # polling no rompe el bot
+                log_warning(
+                    "gtc_poll_error",
+                    module="copy_executor",
+                    extra={"pos_id": pos_id, "order_id": order_id, "err": str(exc)[:120]},
+                )
+        # Timeout → intentar cancelar
+        try:
+            self.client.cancel_order(order_id)
+        except Exception as exc:
+            log_warning(
+                "gtc_cancel_failed",
+                module="copy_executor",
+                extra={"pos_id": pos_id, "order_id": order_id, "err": str(exc)[:120]},
+            )
+        return last_filled, "timeout"
+
     def _mark_filled(self, pos_id, order_id, price, shares, filled_usdc,
                      market_label, side_str):
         """Position filleada: update + notify."""
@@ -542,7 +597,7 @@ class CopyExecutor:
         })
         _alert_once(
             f"ok:{pos_id}",
-            f"Ã¢ÂÂ <b>COPY-TRADE LLENADO</b>\n{market_label}\n"
+            f"ÃÂ¢ÃÂÃÂ <b>COPY-TRADE LLENADO</b>\n{market_label}\n"
             f"{side_str} {shares:.2f} sh @ {price:.3f} (~${filled_usdc:.2f})\n"
             f"order_id: <code>{order_id}</code>",
         )
@@ -577,6 +632,6 @@ class CopyExecutor:
         self._mark_closed(pos_id, f"expired_{int(age_sec)}s", market_label)
         _alert_once(
             f"exp:{pos_id}",
-            f"Ã¢ÂÂ± <b>Copy-trade expirÃÂ³</b>\n{market_label}\n"
-            f"Pending por {age_sec/60:.1f}min sin fillear Ã¢ÂÂ precio probablemente cambiÃÂ³.",
+            f"ÃÂ¢ÃÂÃÂ± <b>Copy-trade expirÃÂÃÂ³</b>\n{market_label}\n"
+            f"Pending por {age_sec/60:.1f}min sin fillear ÃÂ¢ÃÂÃÂ precio probablemente cambiÃÂÃÂ³.",
         )
