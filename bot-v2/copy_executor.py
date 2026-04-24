@@ -150,7 +150,7 @@ class CopyExecutor:
     # --------------------------------------------------------- fetch list
     def _fetch_pending(self) -> List[Dict[str, Any]]:
         """Lee Positions con pending_fill=true y status=open."""
-        # list_records(entity, sort, limit) — sin filtros server-side
+        # list_records(entity, sort, limit) â sin filtros server-side
         # filtramos en Python para mantener la firma publica simple.
         records = list_records(
             "Position",
@@ -203,13 +203,13 @@ class CopyExecutor:
                 created_ts = float(raw)
                 break
 
-        # Último recurso: opened_at_ts (puede venir con offset horario raro).
+        # Ãltimo recurso: opened_at_ts (puede venir con offset horario raro).
         if created_ts is None:
             ts_raw = pos.get("opened_at_ts")
             if isinstance(ts_raw, (int, float)) and ts_raw > 0:
                 created_ts = float(ts_raw)
 
-        # Si aún no tenemos nada, tratamos como recién creada.
+        # Si aÃºn no tenemos nada, tratamos como reciÃ©n creada.
         if created_ts is None:
             created_ts = time.time()
 
@@ -243,7 +243,7 @@ class CopyExecutor:
                                   market_label)
                 _alert_once(
                     f"usdc_low:{pos_id}",
-                    f"⚠️ <b>Sin USDC suficiente</b>\n{market_label}\n"
+                    f"â ï¸ <b>Sin USDC suficiente</b>\n{market_label}\n"
                     f"Necesita ${size_usdc:.2f}, hay ${usdc_avail:.2f}",
                 )
                 return True
@@ -260,6 +260,47 @@ class CopyExecutor:
             return False
 
         tick = pmapi.get_tick_size(token_id)
+
+        # ---- STALE_PRICE_GUARD_V1 ----
+        # Si el libro se alejó >25% del entry_price original (que viene del
+        # proposal = precio al que las ballenas compraron), abortamos.
+        # No tiene sentido "copiar" a un whale a un precio completamente
+        # distinto — es otro trade.
+        entry_original = float(pos.get("entry_price") or 0.0)
+        mid_now = None
+        if best_bid is not None and best_ask is not None:
+            mid_now = (float(best_bid) + float(best_ask)) / 2.0
+        elif best_ask is not None:
+            mid_now = float(best_ask)
+        elif best_bid is not None:
+            mid_now = float(best_bid)
+
+        if entry_original > 0 and mid_now is not None:
+            drift = abs(mid_now - entry_original) / entry_original
+            if drift > 0.25:
+                log_warning(
+                    "copy_stale_price_abort",
+                    module="copy_executor",
+                    extra={
+                        "pos_id": pos_id,
+                        "entry_original": entry_original,
+                        "mid_now": mid_now,
+                        "drift_pct": round(drift * 100, 1),
+                    },
+                )
+                self._mark_closed(
+                    pos_id,
+                    f"stale_price_drift_{int(drift * 100)}pct",
+                    market_label,
+                )
+                _alert_once(
+                    f"stale_price:{pos_id}",
+                    f"WARN <b>Copy-trade abortado - precio stale</b>\n"
+                    f"{market_label}\n"
+                    f"Whales @ {entry_original:.3f} - Libro ahora {mid_now:.3f} "
+                    f"(drift {drift*100:.1f}%)",
+                )
+                return True
 
         # Precio agresivo: cruzamos el spread por 1 tick para asegurar fill
         if side_str == "BUY":
@@ -308,7 +349,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, "size_below_min_notional", market_label)
             _alert_once(
                 f"small:{pos_id}",
-                f"⚠️ <b>Copy-trade saltado</b>\n{market_label}\n"
+                f"â ï¸ <b>Copy-trade saltado</b>\n{market_label}\n"
                 f"Size ${size_usdc:.2f} insuficiente con price {limit_price:.3f}",
             )
             return True
@@ -341,7 +382,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, "fak_no_fill", market_label)
             _alert_once(
                 f"nofill:{pos_id}",
-                f"⚠️ <b>Copy-trade no llenó</b>\n{market_label}\n"
+                f"â ï¸ <b>Copy-trade no llenÃ³</b>\n{market_label}\n"
                 f"FAK @ {limit_price:.3f} sin liquidez tras {FILL_POLL_ATTEMPTS} polls.",
             )
             return True
@@ -352,7 +393,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, f"rejected:{str(error)[:80]}", market_label)
             _alert_once(
                 f"rej:{pos_id}",
-                f"❌ <b>Copy-trade rechazado</b>\n{market_label}\n"
+                f"â <b>Copy-trade rechazado</b>\n{market_label}\n"
                 f"Motivo: <code>{str(error)[:150]}</code>",
             )
             return True
@@ -461,7 +502,7 @@ class CopyExecutor:
         })
         _alert_once(
             f"ok:{pos_id}",
-            f"✅ <b>COPY-TRADE LLENADO</b>\n{market_label}\n"
+            f"â <b>COPY-TRADE LLENADO</b>\n{market_label}\n"
             f"{side_str} {shares:.2f} sh @ {price:.3f} (~${filled_usdc:.2f})\n"
             f"order_id: <code>{order_id}</code>",
         )
@@ -496,6 +537,6 @@ class CopyExecutor:
         self._mark_closed(pos_id, f"expired_{int(age_sec)}s", market_label)
         _alert_once(
             f"exp:{pos_id}",
-            f"⏱ <b>Copy-trade expiró</b>\n{market_label}\n"
-            f"Pending por {age_sec/60:.1f}min sin fillear — precio probablemente cambió.",
+            f"â± <b>Copy-trade expirÃ³</b>\n{market_label}\n"
+            f"Pending por {age_sec/60:.1f}min sin fillear â precio probablemente cambiÃ³.",
         )
