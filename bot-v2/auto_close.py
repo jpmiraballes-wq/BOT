@@ -165,6 +165,7 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
         })
         _FAIL_COUNTS.pop(pos_id, None)
         _mark_closed_recently(pos_id)
+        _settle_copy_trade_accounting(pos, pos_id, reason, current_price, pnl_pct)  # PNL_ACCOUNTING_V1
         return True
 
     # --- Live mode: intentar cierre real ---
@@ -295,6 +296,7 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
         })
         _mark_closed_recently(pos_id)
         _FAIL_COUNTS.pop(pos_id, None)
+        _settle_copy_trade_accounting(pos, pos_id, reason, current_price, pnl_pct)  # PNL_ACCOUNTING_V1
         return True
 
     # Cierre live fallo -> incrementar contador, NO crear Trade
@@ -376,8 +378,8 @@ def check_and_close(om=None):
 
         checked += 1
         reason = None
-        # FIX #2 (2026-04-23): Sell anticipado al +25% sin esperar resolución.
-        # Si la posición subió 25% desde entrada, lockeamos ganancia aunque
+        # FIX #2 (2026-04-23): Sell anticipado al +25% sin esperar resoluciÃ³n.
+        # Si la posiciÃ³n subiÃ³ 25% desde entrada, lockeamos ganancia aunque
         # el take_profit configurado sea mayor. Evita devolver profit al mercado.
         if pnl_pct >= 0.25:
             reason = "early_profit_exit"
@@ -413,3 +415,77 @@ class AutoClose:
     # compat, apunta exactamente a check_and_close.
     def run(self):
         return check_and_close(self.om)
+
+
+# ============================================================================
+# PNL_ACCOUNTING_V1 (2026-04-24): contabilidad correcta al cerrar posiciones
+# ============================================================================
+def _settle_copy_trade_accounting(pos, pos_id, reason, current_price, pnl_pct):
+    """Cierra correctamente una Position:
+       - escribe pnl_realized + exit_price en Position
+       - si strategy=whale_consensus: actualiza WhaleCopyWallet (deployed/wins/losses/pnl_total)
+       - si hay CopyTradeProposal linkeada: set proposal.pnl
+    """
+    try:
+        entry = _safe_float(pos.get("entry_price")) or 0.0
+        size = _safe_float(pos.get("size_usdc")) or 0.0
+        pnl_realized = round(size * (pnl_pct or 0.0), 4)
+
+        # 1) Update Position con pnl_realized + exit_price (patch sobre el update ya hecho)
+        update_record("Position", pos_id, {
+            "pnl_realized": pnl_realized,
+            "exit_price": current_price,
+        })
+
+        # 2) Si es whale_consensus -> actualizar WhaleCopyWallet
+        if pos.get("strategy") == "whale_consensus":
+            try:
+                wallets = list_records("WhaleCopyWallet", {}, limit=1)
+                if wallets:
+                    w = wallets[0]
+                    wid = w.get("id")
+                    deployed = _safe_float(w.get("deployed_usdc")) or 0.0
+                    pnl_total = _safe_float(w.get("pnl_total_usdc")) or 0.0
+                    pnl_today = _safe_float(w.get("pnl_today_usdc")) or 0.0
+                    wins = int(_safe_float(w.get("wins")) or 0)
+                    losses = int(_safe_float(w.get("losses")) or 0)
+
+                    new_deployed = max(0.0, round(deployed - size, 2))
+                    new_pnl_total = round(pnl_total + pnl_realized, 4)
+                    new_pnl_today = round(pnl_today + pnl_realized, 4)
+                    if pnl_realized > 0:
+                        wins += 1
+                    elif pnl_realized < 0:
+                        losses += 1
+
+                    update_record("WhaleCopyWallet", wid, {
+                        "deployed_usdc": new_deployed,
+                        "pnl_total_usdc": new_pnl_total,
+                        "pnl_today_usdc": new_pnl_today,
+                        "wins": wins,
+                        "losses": losses,
+                    })
+                    logger.info(
+                        "PNL_ACCOUNTING_V1 wallet update: pos=%s pnl=%.2f deployed=%.2f->%.2f",
+                        pos_id[-8:], pnl_realized, deployed, new_deployed,
+                    )
+            except Exception as exc:
+                logger.warning("PNL_ACCOUNTING_V1 wallet update fallo: %s", exc)
+
+            # 3) CopyTradeProposal linkeada (pos_id == proposal.executed_position_id)
+            try:
+                proposals = list_records(
+                    "CopyTradeProposal",
+                    {"executed_position_id": pos_id},
+                    limit=1,
+                )
+                if proposals:
+                    prop = proposals[0]
+                    update_record("CopyTradeProposal", prop.get("id"), {
+                        "pnl": pnl_realized,
+                    })
+            except Exception as exc:
+                logger.warning("PNL_ACCOUNTING_V1 proposal update fallo: %s", exc)
+    except Exception as exc:
+        logger.warning("PNL_ACCOUNTING_V1 fallo general: %s (pos=%s)", exc, pos_id[-8:] if pos_id else "?")
+
