@@ -150,7 +150,7 @@ class CopyExecutor:
     # --------------------------------------------------------- fetch list
     def _fetch_pending(self) -> List[Dict[str, Any]]:
         """Lee Positions con pending_fill=true y status=open."""
-        # list_records(entity, sort, limit) â sin filtros server-side
+        # list_records(entity, sort, limit) Ã¢ÂÂ sin filtros server-side
         # filtramos en Python para mantener la firma publica simple.
         records = list_records(
             "Position",
@@ -203,13 +203,13 @@ class CopyExecutor:
                 created_ts = float(raw)
                 break
 
-        # Ãltimo recurso: opened_at_ts (puede venir con offset horario raro).
+        # ÃÂltimo recurso: opened_at_ts (puede venir con offset horario raro).
         if created_ts is None:
             ts_raw = pos.get("opened_at_ts")
             if isinstance(ts_raw, (int, float)) and ts_raw > 0:
                 created_ts = float(ts_raw)
 
-        # Si aÃºn no tenemos nada, tratamos como reciÃ©n creada.
+        # Si aÃÂºn no tenemos nada, tratamos como reciÃÂ©n creada.
         if created_ts is None:
             created_ts = time.time()
 
@@ -230,6 +230,46 @@ class CopyExecutor:
             self._mark_closed(pos_id, "invalid_position_data", market_label)
             return True
 
+        # ---- DEDUP_TOKEN_ID_V1 ----
+        # Si ya hay OTRA Position abierta sobre el mismo token_id, abortar.
+        # El balance on-chain es compartido (ERC1155), y si abrimos varias,
+        # al cerrar una rompemos las otras con "not enough balance".
+        try:
+            sibling_open = list_records(
+                "Position",
+                filter={"token_id": token_id, "status": "open"},
+                limit=10,
+            ) or []
+            sibling_open = [p for p in sibling_open if p.get("id") != pos_id]
+            if sibling_open:
+                other_id = (sibling_open[0].get("id") or "")[-8:]
+                log_warning(
+                    "copy_duplicate_token",
+                    module="copy_executor",
+                    extra={
+                        "pos_id": pos_id,
+                        "token_id": token_id[-12:] if token_id else "?",
+                        "siblings_open": len(sibling_open),
+                        "other_id_tail": other_id,
+                    },
+                )
+                self._mark_closed(
+                    pos_id,
+                    f"duplicate_token_id (already open: {other_id})",
+                    market_label,
+                )
+                _alert_once(
+                    f"dup_token:{pos_id}",
+                    f"WARN <b>Copy-trade abortado - token duplicado</b>\n"
+                    f"{market_label}\n"
+                    f"Ya hay {len(sibling_open)} Position abierta sobre este token. "
+                    f"Evitando conflicto de balance on-chain.",
+                )
+                return True
+        except Exception as exc:  # pragma: no cover
+            # Si falla el dedup query, seguimos (mejor abrir que perder la senal).
+            logger.warning("dedup_token_check_failed pos=%s err=%s", pos_id, exc)
+
         # ---- Gate 3: balance USDC (solo BUY) ----
         if side_str == "BUY":
             usdc_avail = pmapi.check_usdc_balance(self.client, self.funder)
@@ -243,7 +283,7 @@ class CopyExecutor:
                                   market_label)
                 _alert_once(
                     f"usdc_low:{pos_id}",
-                    f"â ï¸ <b>Sin USDC suficiente</b>\n{market_label}\n"
+                    f"Ã¢ÂÂ Ã¯Â¸Â <b>Sin USDC suficiente</b>\n{market_label}\n"
                     f"Necesita ${size_usdc:.2f}, hay ${usdc_avail:.2f}",
                 )
                 return True
@@ -262,10 +302,10 @@ class CopyExecutor:
         tick = pmapi.get_tick_size(token_id)
 
         # ---- STALE_PRICE_GUARD_V1 ----
-        # Si el libro se alejó >25% del entry_price original (que viene del
+        # Si el libro se alejÃ³ >25% del entry_price original (que viene del
         # proposal = precio al que las ballenas compraron), abortamos.
         # No tiene sentido "copiar" a un whale a un precio completamente
-        # distinto — es otro trade.
+        # distinto â es otro trade.
         entry_original = float(pos.get("entry_price") or 0.0)
         mid_now = None
         if best_bid is not None and best_ask is not None:
@@ -349,7 +389,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, "size_below_min_notional", market_label)
             _alert_once(
                 f"small:{pos_id}",
-                f"â ï¸ <b>Copy-trade saltado</b>\n{market_label}\n"
+                f"Ã¢ÂÂ Ã¯Â¸Â <b>Copy-trade saltado</b>\n{market_label}\n"
                 f"Size ${size_usdc:.2f} insuficiente con price {limit_price:.3f}",
             )
             return True
@@ -382,7 +422,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, "fak_no_fill", market_label)
             _alert_once(
                 f"nofill:{pos_id}",
-                f"â ï¸ <b>Copy-trade no llenÃ³</b>\n{market_label}\n"
+                f"Ã¢ÂÂ Ã¯Â¸Â <b>Copy-trade no llenÃÂ³</b>\n{market_label}\n"
                 f"FAK @ {limit_price:.3f} sin liquidez tras {FILL_POLL_ATTEMPTS} polls.",
             )
             return True
@@ -393,7 +433,7 @@ class CopyExecutor:
             self._mark_closed(pos_id, f"rejected:{str(error)[:80]}", market_label)
             _alert_once(
                 f"rej:{pos_id}",
-                f"â <b>Copy-trade rechazado</b>\n{market_label}\n"
+                f"Ã¢ÂÂ <b>Copy-trade rechazado</b>\n{market_label}\n"
                 f"Motivo: <code>{str(error)[:150]}</code>",
             )
             return True
@@ -502,7 +542,7 @@ class CopyExecutor:
         })
         _alert_once(
             f"ok:{pos_id}",
-            f"â <b>COPY-TRADE LLENADO</b>\n{market_label}\n"
+            f"Ã¢ÂÂ <b>COPY-TRADE LLENADO</b>\n{market_label}\n"
             f"{side_str} {shares:.2f} sh @ {price:.3f} (~${filled_usdc:.2f})\n"
             f"order_id: <code>{order_id}</code>",
         )
@@ -537,6 +577,6 @@ class CopyExecutor:
         self._mark_closed(pos_id, f"expired_{int(age_sec)}s", market_label)
         _alert_once(
             f"exp:{pos_id}",
-            f"â± <b>Copy-trade expirÃ³</b>\n{market_label}\n"
-            f"Pending por {age_sec/60:.1f}min sin fillear â precio probablemente cambiÃ³.",
+            f"Ã¢ÂÂ± <b>Copy-trade expirÃÂ³</b>\n{market_label}\n"
+            f"Pending por {age_sec/60:.1f}min sin fillear Ã¢ÂÂ precio probablemente cambiÃÂ³.",
         )
