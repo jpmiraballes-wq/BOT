@@ -39,7 +39,7 @@ while true; do
     source "$BOT_DIR/venv/bin/activate"
   fi
 
-  python main.py >> "$LOG_FILE" 2>&1 &
+  python3 main.py >> "$LOG_FILE" 2>&1 &
   CHILD=$!
   wait $CHILD
   EXIT_CODE=$?
