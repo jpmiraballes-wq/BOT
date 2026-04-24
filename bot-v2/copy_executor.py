@@ -185,17 +185,34 @@ class CopyExecutor:
         side_str = (pos.get("side") or "BUY").upper()
         size_usdc = float(pos.get("size_usdc") or 0.0)
         market_label = (pos.get("question") or pos.get("market") or "?")[:60]
-        created_ts = pos.get("created_date") or pos.get("opened_at_ts") or time.time()
+        # Prioridad: opened_at (ISO string fresca) > created_date > opened_at_ts (epoch, a veces descuadrado).
+        # Si todo falla, asumimos que la Position es nueva (age=0) para no expirar mal.
+        created_ts = None
+        for key in ("opened_at", "created_date"):
+            raw = pos.get(key)
+            if not raw:
+                continue
+            if isinstance(raw, str):
+                try:
+                    created_ts = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+                    break
+                except Exception:
+                    continue
+            elif isinstance(raw, (int, float)) and raw > 0:
+                created_ts = float(raw)
+                break
 
-        # Normalizar timestamp
-        if isinstance(created_ts, str):
-            try:
-                from datetime import datetime
-                created_ts = datetime.fromisoformat(created_ts.replace("Z", "+00:00")).timestamp()
-            except Exception:
-                created_ts = time.time()
+        # Último recurso: opened_at_ts (puede venir con offset horario raro).
+        if created_ts is None:
+            ts_raw = pos.get("opened_at_ts")
+            if isinstance(ts_raw, (int, float)) and ts_raw > 0:
+                created_ts = float(ts_raw)
 
-        age_sec = time.time() - float(created_ts)
+        # Si aún no tenemos nada, tratamos como recién creada.
+        if created_ts is None:
+            created_ts = time.time()
+
+        age_sec = max(0.0, time.time() - created_ts)
 
         # ---- Gate 1: timeout de 5min ----
         if age_sec > PENDING_TIMEOUT_SEC:
