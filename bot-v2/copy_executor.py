@@ -27,8 +27,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
+import os
 import polymarket_api as pmapi
-from base44_client import list_records, update_record, send_telegram
+from base44_client import list_records, update_record
 from decision_logger import log_decision, log_warning, log_error
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,33 @@ PRICE_SLIPPAGE_TICKS = 1               # takers: 1 tick mas agresivo que best
 _ALERT_HISTORY: set = set()
 
 
+def _send_telegram(html: str) -> None:
+    """Envia mensaje HTML a Telegram usando env vars. Best-effort.
+
+    Usa TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (mismo patron que telegramNotify).
+    Si faltan env vars o la API falla, loggea y sigue -> no rompe el bot.
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat:
+        logger.debug("Telegram: vars faltantes, skip")
+        return
+    try:
+        import requests
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat, "text": html,
+                "parse_mode": "HTML", "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
+        if r.status_code >= 400:
+            logger.warning("Telegram HTTP %d: %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        logger.warning("Telegram send fallo: %s", exc)
+
+
 def _alert_once(key: str, html: str) -> bool:
     """Manda alerta Telegram solo si no se envio antes (key unica).
     Devuelve True si mando, False si ya existia.
@@ -55,10 +83,7 @@ def _alert_once(key: str, html: str) -> bool:
     if key in _ALERT_HISTORY:
         return False
     _ALERT_HISTORY.add(key)
-    try:
-        send_telegram(html)
-    except Exception as exc:
-        logger.warning("send_telegram fallo: %s", exc)
+    _send_telegram(html)
     return True
 
 
