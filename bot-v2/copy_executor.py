@@ -22,6 +22,7 @@ USO:
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from py_clob_client.clob_types import OrderArgs, OrderType
@@ -438,7 +439,7 @@ class CopyExecutor:
                 "status": "closed",
                 "pending_fill": False,
                 "close_reason": str(reason)[:120],
-                "close_time": time.time(),
+                "close_time": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as exc:
             logger.warning("mark_closed pos=%s fallo: %s", pos_id, exc)
