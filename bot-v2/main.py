@@ -39,6 +39,7 @@ from strategies.umbrella_executor import run_umbrella_cycle
 from portfolio_sync import PortfolioSync
 from auto_close import AutoClose
 from llm_filter import filter_opportunities
+from auto_updater import check_and_update  # AUTO_UPDATE_V1
 
 AUTO_CLOSE_EVERY_N_ITERATIONS = 2
 
@@ -565,6 +566,14 @@ def main() -> int:
     iteration = 0
     while not _stop_requested:
         iteration += 1
+        # AUTO_UPDATE_V1: si hay commit nuevo en origin/main, pull + exit(0).
+        # El wrapper run_bot.sh nos relanza con código fresco.
+        try:
+            if check_and_update():
+                logger.info("AUTO_UPDATE_V1: código actualizado, saliendo para reiniciar con versión nueva.")
+                return 0
+        except Exception as _upd_exc:
+            logger.warning("auto_updater lanzó excepción: %s", _upd_exc)
         # Refrescar caps Kelly cada 60 iteraciones desde Base44
         if iteration % 60 == 0:
             _refresh_kelly_caps(sizer)
@@ -599,7 +608,7 @@ def main() -> int:
                 bot_cfg.get("mode"),
                 bot_cfg.get("id"),
             )
-        # ─── COPY-TRADE EXECUTOR: correr SIEMPRE (antes de pausas) ───
+        # âââ COPY-TRADE EXECUTOR: correr SIEMPRE (antes de pausas) âââ
         try:
             om.drain_pending_fills()
         except Exception as _drain_exc:
