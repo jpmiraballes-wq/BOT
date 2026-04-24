@@ -45,6 +45,7 @@ FILL_POLL_ATTEMPTS = 3                 # polls post-FAK para confirmar matching
 FILL_POLL_DELAY_MS = 500               # delay entre polls
 MIN_NOTIONAL_USDC = 5.0                # minimo real de Polymarket
 PRICE_SLIPPAGE_TICKS = 1               # takers: 1 tick mas agresivo que best
+MAX_PRICE_DRIFT_PCT = 0.20             # si precio se movio >20% desde proposal, abortar
 
 # Dedup de alertas Telegram (en memoria, se resetea al reiniciar bot)
 _ALERT_HISTORY: set = set()
@@ -271,6 +272,30 @@ class CopyExecutor:
             limit_price = pmapi.round_price_to_tick(
                 max(0.01, (base_price or 0.01) - PRICE_SLIPPAGE_TICKS * tick), tick
             )
+
+        # ---- Gate 4.5: slippage guard (precio se movio vs proposal) ----
+        proposal_entry = float(pos.get("entry_price") or 0.0)
+        if proposal_entry > 0 and limit_price > 0:
+            drift = abs(limit_price - proposal_entry) / proposal_entry
+            if drift > MAX_PRICE_DRIFT_PCT:
+                log_warning(
+                    "copy_price_drifted",
+                    module="copy_executor",
+                    extra={"pos_id": pos_id, "proposal": proposal_entry,
+                           "current": limit_price, "drift_pct": round(drift, 3)},
+                )
+                self._mark_closed(
+                    pos_id,
+                    f"price_drifted ({proposal_entry:.3f}->{limit_price:.3f}, {drift*100:.0f}%)",
+                    market_label,
+                )
+                _alert_once(
+                    f"drift:{pos_id}",
+                    f"\u26a0\ufe0f <b>Copy-trade abortado</b>\n{market_label}\n"
+                    f"Precio se movio de <b>{proposal_entry:.3f}</b> a <b>{limit_price:.3f}</b> "
+                    f"({drift*100:.0f}%). El bot NO compra a precio muy distinto del aprobado.",
+                )
+                return True
 
         # ---- Gate 5: size shares con notional 2dp ----
         size_shares = pmapi.compute_order_size(size_usdc, limit_price, MIN_NOTIONAL_USDC)
