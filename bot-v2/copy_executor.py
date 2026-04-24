@@ -148,11 +148,12 @@ class CopyExecutor:
     # --------------------------------------------------------- fetch list
     def _fetch_pending(self) -> List[Dict[str, Any]]:
         """Lee Positions con pending_fill=true y status=open."""
+        # list_records(entity, sort, limit) — sin filtros server-side
+        # filtramos en Python para mantener la firma publica simple.
         records = list_records(
             "Position",
-            limit=50,
-            query={"status": "open", "strategy": "whale_consensus"},
             sort="-created_date",
+            limit=100,
         ) or []
 
         pending = []
@@ -160,6 +161,10 @@ class CopyExecutor:
             # list_records puede devolver dict anidado en 'data'
             data = rec.get("data") if isinstance(rec.get("data"), dict) else rec
             if not data:
+                continue
+            if data.get("status") != "open":
+                continue
+            if data.get("strategy") != "whale_consensus":
                 continue
             if not data.get("pending_fill"):
                 continue
