@@ -793,13 +793,12 @@ def main() -> int:
                 except Exception as _min_exc:
                     logger.error("minimal_heartbeat tambien fallo: %s", _min_exc)
 
-            # AUTOCLOSE_RESPECT_PAUSED_V1: si el bot esta pausado desde
-            # el dashboard, NO corremos AutoClose. Antes corria igual y
-            # seguia cerrando dust + creando Trades fantasma (pnl=0)
-            # incluso con paused=true. Esto creaba cientos de trades
-            # basura por noche.
-            _paused_now = bool(bot_cfg.get("paused"))
-            if aclose is not None and not _paused_now and iteration % AUTO_CLOSE_EVERY_N_ITERATIONS == 0:
+            # AUTOCLOSE_ALWAYS_RUN_V2 (2026-04-25 JP): AutoClose corre SIEMPRE,
+            # incluso con bot_cfg.paused=true. Pausar el bot debe bloquear
+            # solo la APERTURA de posiciones nuevas, nunca el cierre de las
+            # existentes. Si no, los SL/TP quedan muertos cuando pausamos
+            # a mano y las posiciones sangran (caso Moutet 2026-04-25).
+            if aclose is not None and iteration % AUTO_CLOSE_EVERY_N_ITERATIONS == 0:
                 try:
                     aclose.run()
                 except Exception as _exc:
