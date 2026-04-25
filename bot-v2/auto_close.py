@@ -377,6 +377,23 @@ def check_and_close(om=None):
             continue
 
         checked += 1
+
+        # BREAKEVEN_TRAILING_V1: si ganamos >=+6%, subir stop_loss_price a entry_price (breakeven lock).
+        # Esto NO cierra la posicion, solo blinda contra dar la vuelta. Idempotente:
+        # si ya tiene SL en breakeven (o mejor), no toca nada.
+        try:
+            if pnl_pct >= 0.06:
+                cur_sl = _safe_float(pos.get("stop_loss_price"))
+                if cur_sl is None or cur_sl < entry:
+                    pos_id_be = pos.get("id")
+                    update_record("Position", pos_id_be, {"stop_loss_price": float(entry)})
+                    logger.info(
+                        "sl_moved_to_breakeven pos=%s entry=%.4f pnl_pct=%.4f",
+                        str(pos_id_be)[-8:], entry, pnl_pct,
+                    )
+        except Exception as _be_err:
+            logger.warning("breakeven_trailing_failed: %s", _be_err)
+
         reason = None
         # FIX #2 (2026-04-23): Sell anticipado al +25% sin esperar resoluciÃÂ³n.
         # Si la posiciÃÂ³n subiÃÂ³ 25% desde entrada, lockeamos ganancia aunque
