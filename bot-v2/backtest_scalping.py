@@ -3,8 +3,8 @@
 Backtest Scalping - RSI(14)/EMA(50) en BTCUSDT y ETHUSDT, 15m, ultimos 6 meses.
 
 Logica:
-- RSI cruza < 30 -> abrir LONG
-- RSI cruza > 70 -> abrir SHORT
+- RSI cruza < 30  -> abrir LONG
+- RSI cruza > 70  -> abrir SHORT
 - TP: +1.5% / SL: -0.6%
 - Size $150 por trade, max 3 posiciones concurrentes
 - Sin fees ni slippage (analisis puro de la senal)
@@ -19,7 +19,7 @@ import math
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 # ---------------- Config ----------------
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -33,14 +33,13 @@ TP_PCT = 0.015
 SL_PCT = 0.006
 SIZE_USDC = 150.0
 MAX_CONCURRENT = 3
-BARS_PER_DAY = 24 * 4  # 15m -> 96 velas/dia
 
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 LIMIT_PER_REQ = 1000
 
 
 # ---------------- Data fetch ----------------
-def fetch_klines(symbol: str, start_ms: int, end_ms: int) -> pd.DataFrame:
+def fetch_klines(symbol, start_ms, end_ms):
     rows = []
     cursor = start_ms
     while cursor < end_ms:
@@ -64,7 +63,7 @@ def fetch_klines(symbol: str, start_ms: int, end_ms: int) -> pd.DataFrame:
         cursor = next_cursor
         if len(chunk) < LIMIT_PER_REQ:
             break
-        time.sleep(0.15)  # respetar rate limit
+        time.sleep(0.15)
     df = pd.DataFrame(rows, columns=[
         "open_time", "open", "high", "low", "close", "volume",
         "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore"
@@ -79,31 +78,31 @@ def fetch_klines(symbol: str, start_ms: int, end_ms: int) -> pd.DataFrame:
 
 
 # ---------------- Indicators ----------------
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
+def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
 
-def ema(series: pd.Series, period: int = 50) -> pd.Series:
+def ema(series, period=50):
     return series.ewm(span=period, adjust=False, min_periods=period).mean()
 
 
 # ---------------- Backtest ----------------
-def backtest(df: pd.DataFrame, symbol: str) -> list:
+def backtest(df, symbol):
     df = df.copy()
     df["rsi"] = rsi(df["close"], RSI_PERIOD)
     df["ema"] = ema(df["close"], EMA_PERIOD)
     df["rsi_prev"] = df["rsi"].shift(1)
 
     trades = []
-    open_positions = []  # cada uno: {side, entry, tp, sl, opened_at}
+    open_positions = []
 
-    for i, row in df.iterrows():
+    for _, row in df.iterrows():
         if pd.isna(row["rsi"]) or pd.isna(row["rsi_prev"]) or pd.isna(row["ema"]):
             continue
 
@@ -117,7 +116,7 @@ def backtest(df: pd.DataFrame, symbol: str) -> list:
                     hit_sl = True
                 elif row["high"] >= pos["tp"]:
                     hit_tp = True
-            else:  # SHORT
+            else:
                 if row["high"] >= pos["sl"]:
                     hit_sl = True
                 elif row["low"] <= pos["tp"]:
@@ -176,7 +175,7 @@ def backtest(df: pd.DataFrame, symbol: str) -> list:
 
 
 # ---------------- Stats ----------------
-def compute_stats(trades: list) -> dict:
+def compute_stats(trades):
     if not trades:
         return {"trades": 0}
 
@@ -202,8 +201,8 @@ def compute_stats(trades: list) -> dict:
 
     df["month"] = pd.to_datetime(df["closed_at"]).dt.to_period("M").astype(str)
     by_month = df.groupby("month")["pnl_usd"].sum().sort_values()
-    worst_month = (by_month.index[0], float(by_month.iloc[0])) if len(by_month) else (None, 0)
-    best_month = (by_month.index[-1], float(by_month.iloc[-1])) if len(by_month) else (None, 0)
+    worst_month = (by_month.index[0], float(by_month.iloc[0])) if len(by_month) else (None, 0.0)
+    best_month = (by_month.index[-1], float(by_month.iloc[-1])) if len(by_month) else (None, 0.0)
 
     tp_count = (df["result"] == "tp").sum()
     sl_count = (df["result"] == "sl").sum()
@@ -227,33 +226,34 @@ def compute_stats(trades: list) -> dict:
     }
 
 
-def print_report(symbol: str, stats: dict):
-    print(")
+def fmt_money(v):
+    return ("+$" if v >= 0 else "-$") + "{:,.2f}".format(abs(v))
+
+
+def print_report(symbol, stats):
+    print("")
     print("=" * 60)
-    print(f"  {symbol}  ({INTERVAL}, {MONTHS} months)")
+    print("  " + str(symbol) + "  (" + INTERVAL + ", " + str(MONTHS) + " months)")
     print("=" * 60)
     if stats.get("trades", 0) == 0:
         print("  No trades.")
         return
-    print(f"  Total trades       : {stats['trades']}")
-    print(f"  Wins / Losses      : {stats['wins']} / {stats['losses']}")
-    print(f"  Win Rate           : {stats['wr_pct']}%")
-    print(f"  TP hits / SL hits  : {stats['tp_hits']} / {stats['sl_hits']}")
-    pnl_total = stats['pnl_total_usd']
-    print(f"  PnL total          : ${pnl_total:+,2.2f}")
-    avg_p = stats['avg_pnl_per_trade']
-    print(f"  Avg PnL per trade  : ${avg_p:+,4.4f}")
-    print(f"  Avg duration       : {stats['avg_duration_min']} min")
-    dd_usd = stats['max_drawdown_usd']
-    print(f"  Max drawdown       : ${dd_usd:+,2.2f} ({stats['max_drawdown_pct_of_size']}% of trade size)")
-    print(f"  Sharpe (annualized): {stats['sharpe_annualized']}")
+    print("  Total trades       : " + str(stats["trades"]))
+    print("  Wins / Losses      : " + str(stats["wins"]) + " / " + str(stats["losses"]))
+    print("  Win Rate           : " + str(stats["wr_pct"]) + "%")
+    print("  TP hits / SL hits  : " + str(stats["tp_hits"]) + " / " + str(stats["sl_hits"]))
+    print("  PnL total          : " + fmt_money(stats["pnl_total_usd"]))
+    print("  Avg PnL per trade  : " + fmt_money(stats["avg_pnl_per_trade"]))
+    print("  Avg duration       : " + str(stats["avg_duration_min"]) + " min")
+    print("  Max drawdown       : " + fmt_money(stats["max_drawdown_usd"]) + "  (" + str(stats["max_drawdown_pct_of_size"]) + "% of trade size)")
+    print("  Sharpe (annualized): " + str(stats["sharpe_annualized"]))
     bm_label, bm_val = stats["best_month"]
     wm_label, wm_val = stats["worst_month"]
-    print(f"  Best month         : {bm_label}  ${bm_val:+,2.2f}")
-    print(f"  Worst month        : {wm_label}  ${wm_val:+,2.2f}")
+    print("  Best month         : " + str(bm_label) + "  " + fmt_money(bm_val))
+    print("  Worst month        : " + str(wm_label) + "  " + fmt_money(wm_val))
     print("  PnL by month:")
     for m, v in stats["by_month"].items():
-        print(f"    {m}  ${v:+,2.2f}")
+        print("    " + str(m) + "  " + fmt_money(v))
 
 
 # ---------------- Main ----------------
@@ -262,20 +262,23 @@ def main():
     start_ms = end_ms - MONTHS * 30 * 24 * 60 * 60 * 1000
 
     all_trades = []
-    per_symbol = {}
 
     for sym in SYMBOLS:
-        print(f"\nDescargando {sym} ({INTERVAL}) {MONTHS}m...")
+        print("")
+        print("Descargando " + sym + " (" + INTERVAL + ") " + str(MONTHS) + "m...")
         df = fetch_klines(sym, start_ms, end_ms)
-        print(f"  {len(df)} velas descargadas (entre {df['open_time'].iloc[0]} y {df['open_time'].iloc[-1]})")
+        if df.empty:
+            print("  No data.")
+            continue
+        print("  " + str(len(df)) + " velas (" + str(df["open_time"].iloc[0]) + " -> " + str(df["open_time"].iloc[-1]) + ")")
         trades = backtest(df, sym)
-        per_symbol[sym] = trades
         all_trades.extend(trades)
         stats = compute_stats(trades)
         print_report(sym, stats)
 
-    print("\n" + "#" * 60)
-    print(f"  COMBINED ({', '.join(SYMBOLS)})")
+    print("")
+    print("#" * 60)
+    print("  COMBINED (" + ", ".join(SYMBOLS) + ")")
     print("#" * 60)
     print_report("ALL", compute_stats(all_trades))
 
