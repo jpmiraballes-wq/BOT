@@ -1,28 +1,20 @@
 """
 position_tp_sl.py — TP/SL loop con fallback para Positions whale_consensus.
 
-Por que existe:
-  Los cierres dust_unsellable (Merida, Moutet) ocurrian porque Polymarket
-  exige minimo 5 shares por orden. Cuando el bot intentaba cerrar una
-  posicion de $9-$30 a precios bajos, las shares restantes caian bajo 5,
-  el CLOB rechazaba y el bot dejaba la perdida correr hasta resolucion.
+Por qué existe:
+  Los cierres dust_unsellable / not-enough-balance que vimos en Merida,
+  Moutet, Etcheverry y Genoa ocurrían por dos bugs:
+    1) Polymarket exige mínimo 5 shares por orden. Posiciones de $9-$30
+       a precios bajos caían bajo 5 → CLOB rechaza.
+    2) shares = size_usdc / entry_price recalculaba shares teóricas,
+       pero la wallet on-chain a veces tenía 0.5% menos por fills
+       parciales → CLOB rechazaba "not enough balance".
 
-Logica:
-  1) Cada ciclo lee Positions abiertas con strategy=whale_consensus.
-  2) Para cada una, fetcha precio del CLOB (best_bid/ask).
-  3) Calcula PnL%. Dispara cierre si:
-       - PnL% >= take_profit_pct (proposal o default 0.12)
-       - PnL% <= stop_loss_pct (proposal o default -0.08)
-  4) Cierre intenta 2 estrategias en orden:
-       a) GTC al best_bid/ask (limit que entra inmediato).
-       b) Si rechaza por algo recuperable, precio agresivo (-2c bid o +2c ask).
-       c) Si todo falla, marca como dust_exit y notifica TG.
-          NUNCA deja correr la perdida hasta resolucion del mercado.
-
-  Crea Trade record + actualiza Position.status=closed con pnl_realized.
-  Update CopyTradeProposal.pnl si esta linkeada.
-
-Llamado desde main.py cada iteracion (entre drain_pending_fills y scan_logical_arb).
+Fixes 2026-04-26 (JP):
+  - Usamos size_tokens directo (lo que realmente fillearon los fills).
+  - Si CLOB dice balance insuficiente, retry con shares*0.98 (dust safe).
+  - _fetch_book ignora libros rotos (bid+ask <0.02 o spread >50¢) que
+    venían disparando SL falsos al -98%.
 """
 
 import logging
@@ -55,12 +47,26 @@ def _round_price(p: float) -> float:
 
 
 def _fetch_book(client, token_id: str) -> Optional[Dict[str, float]]:
-    """Devuelve {bid, ask, mid} o None si falla."""
+    """Devuelve {"bid": x, "ask": y, "mid": z} o None si falla.
+
+    FIX (2026-04-26 JP): si el book devuelve precios sospechosos (bid+ask
+    <0.02 o spread >50¢), no confiamos y devolvemos None. Eso evita SL
+    falsos al -98% como pasó con Etcheverry/Genoa cuando el CLOB devolvía
+    book con price=0.01 momentáneamente.
+    """
     try:
         book = client.get_order_book(token_id)
         best_bid = float(book.bids[0].price) if book and book.bids else 0.0
         best_ask = float(book.asks[0].price) if book and book.asks else 0.0
         if best_bid <= 0 or best_ask <= 0:
+            return None
+        if best_bid < 0.02 and best_ask < 0.02:
+            logger.warning("book sospechoso en %s (bid=%.4f ask=%.4f); ignorando",
+                           token_id[:12], best_bid, best_ask)
+            return None
+        if (best_ask - best_bid) > 0.50:
+            logger.warning("spread anómalo en %s (bid=%.3f ask=%.3f); ignorando",
+                           token_id[:12], best_bid, best_ask)
             return None
         return {
             "bid": best_bid,
@@ -90,7 +96,6 @@ def _try_close(client, token_id: str, side_str: str, shares: float,
         return {"ok": False, "filled_shares": 0.0, "filled_price": 0.0,
                 "error": "size_below_min (%.2f<%.1f)" % (shares, POLYMARKET_MIN_SHARES)}
     try:
-        # Para cerrar BUY position vendemos. Para cerrar SELL position compramos.
         close_side = SELL if side_str == "BUY" else BUY
         args = OrderArgs(
             token_id=token_id,
@@ -127,7 +132,7 @@ def _try_close(client, token_id: str, side_str: str, shares: float,
 
 def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                     reason: str, pnl_pct: float) -> bool:
-    """Aplica fallback en cascada: GTC limit -> agresivo -> dust_exit."""
+    """Aplica fallback en cascada: GTC limit -> balance retry -> agresivo -> dust_exit."""
     pos_id = pos.get("id")
     token_id = pos.get("token_id")
     side_str = (pos.get("side") or "BUY").upper()
@@ -135,20 +140,37 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
     size_usdc = float(pos.get("size_usdc") or 0.0)
     market_label = (pos.get("question") or pos.get("market") or "?")[:60]
 
-    # Para BUY salimos al bid. Para SELL salimos al ask.
     current_price = book["bid"] if side_str == "BUY" else book["ask"]
-    shares = size_usdc / max(0.01, entry)
+
+    # FIX (2026-04-26 JP): usar size_tokens (real on-chain) en vez de
+    # recalcular desde size_usdc/entry. Caso Etcheverry/Genoa.
+    size_tokens_persisted = float(pos.get("size_tokens") or 0.0)
+    if size_tokens_persisted > 0:
+        shares = size_tokens_persisted
+    else:
+        shares = size_usdc / max(0.01, entry)
 
     attempts = []
     res = _try_close(client, token_id, side_str, shares, current_price)
-    attempts.append({"strategy": "limit_at_book", "price": current_price})
+    attempts.append({"strategy": "limit_at_book", "price": current_price,
+                     "shares": shares})
 
-    # 2do intento: precio agresivo si el fallo es recuperable
+    # 2do intento: si CLOB dice balance insuficiente, retry con -2% shares.
+    if not res["ok"] and "balance" in (res.get("error") or "").lower():
+        reduced_shares = round(shares * 0.98, 2)
+        res = _try_close(client, token_id, side_str, reduced_shares, current_price)
+        attempts.append({"strategy": "balance_reduce_2pct", "price": current_price,
+                         "shares": reduced_shares})
+        if res["ok"]:
+            shares = reduced_shares
+
+    # 3er intento: precio agresivo si fallo recuperable.
     if not res["ok"] and "size_below_min" not in (res.get("error") or ""):
         agg_price = (current_price - AGGRESSIVE_DISCOUNT_USD if side_str == "BUY"
                      else current_price + AGGRESSIVE_DISCOUNT_USD)
         res = _try_close(client, token_id, side_str, shares, agg_price)
-        attempts.append({"strategy": "aggressive", "price": agg_price})
+        attempts.append({"strategy": "aggressive", "price": agg_price,
+                         "shares": shares})
 
     now_ts = time.time()
 
@@ -212,7 +234,6 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         )
         return True
 
-    # Todos los intentos fallaron -> dust_exit
     last_err = (res.get("error") or "unknown")[:80]
     update_record("Position", pos_id, {
         "status": "closed",
@@ -230,8 +251,8 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         "%s\n"
         "%s entry %.3f → mercado %.3f (%+.1f%%)\n"
         "Motivo intentado: <code>%s</code>\n"
-        "Ultimo error CLOB: <code>%s</code>\n"
-        "Posicion marcada cerrada con PnL=$0. Saldo on-chain queda hasta resolucion." % (
+        "Último error CLOB: <code>%s</code>\n"
+        "Posición marcada cerrada con PnL=$0. Saldo on-chain queda hasta resolución." % (
             market_label, side_str, entry, current_price, pnl_pct * 100,
             reason, last_err,
         )
@@ -248,7 +269,7 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
 
 def manage_open_positions(client) -> Dict[str, int]:
     """
-    Loop principal. Lee Positions abiertas whale_consensus, evalua TP/SL,
+    Loop principal. Lee Positions abiertas whale_consensus, evalúa TP/SL,
     cierra las que toquen aplicando fallback.
     Devuelve {checked, closed_tp, closed_sl, dust_exits}.
     """
@@ -264,7 +285,6 @@ def manage_open_positions(client) -> Dict[str, int]:
     if not positions:
         return {"checked": 0, "closed_tp": 0, "closed_sl": 0, "dust_exits": 0}
 
-    # Saltamos las que aun estan en pending_fill (no entraron en CLOB).
     positions = [p for p in positions if not p.get("pending_fill")]
 
     closed_tp = 0
@@ -284,7 +304,6 @@ def manage_open_positions(client) -> Dict[str, int]:
         exit_price_now = book["bid"] if side_str == "BUY" else book["ask"]
         pnl_pct = _compute_pnl_pct(entry, exit_price_now, side_str)
 
-        # Mantener current_price actualizado para UI
         try:
             update_record("Position", pos.get("id"), {
                 "current_price": exit_price_now,
@@ -295,7 +314,6 @@ def manage_open_positions(client) -> Dict[str, int]:
         except Exception:
             pass
 
-        # TP/SL desde la proposal linkeada (sino defaults)
         tp_pct = DEFAULT_TP_PCT
         sl_pct = DEFAULT_SL_PCT
         try:
