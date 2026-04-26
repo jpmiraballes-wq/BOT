@@ -1,10 +1,13 @@
 """
 base44_client.py — Cliente HTTP fino para escribir en entidades de Base44.
 
-Centraliza POST/GET/PUT a /api/apps/<APP_ID>/entities/<Entity>/records con
-la API key, para que módulos como reporter.py, decision_logger.py,
+Centraliza POST/GET/PUT a /api/apps/<APP_ID>/entities/<Entity> con la API
+key, para que módulos como reporter.py, decision_logger.py,
 order_manager.py o position_tp_sl.py puedan registrar/leer eventos sin
 duplicar código.
+
+NOTA: el endpoint NO lleva "/records" al final. Base44 acepta directamente
+GET /entities/<Entity> para listar y POST /entities/<Entity> para crear.
 """
 
 import logging
@@ -22,7 +25,7 @@ REQUEST_TIMEOUT = 15
 
 
 def _endpoint(entity: str) -> str:
-    return f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/entities/{entity}/records"
+    return f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/entities/{entity}"
 
 
 def _headers() -> Dict[str, str]:
@@ -66,12 +69,6 @@ def list_records(entity: str, limit: int = 1,
                  sort: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Lista registros de una entidad. Devuelve lista o [] en error.
-
-    Args:
-        entity: nombre de la entidad.
-        limit: máximo de registros a devolver.
-        query: dict de filtros a aplicar (igualdad). Ej: {"status": "open"}.
-        sort: campo de ordenación, '-campo' para descendente.
     """
     if not BASE44_API_KEY:
         return []
