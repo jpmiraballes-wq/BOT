@@ -1,20 +1,20 @@
 """
-position_tp_sl.py — TP/SL loop con fallback para Positions whale_consensus.
+position_tp_sl.py â TP/SL loop con fallback para Positions whale_consensus.
 
-Por qué existe:
+Por quÃ© existe:
   Los cierres dust_unsellable / not-enough-balance que vimos en Merida,
-  Moutet, Etcheverry y Genoa ocurrían por dos bugs:
-    1) Polymarket exige mínimo 5 shares por orden. Posiciones de $9-$30
-       a precios bajos caían bajo 5 → CLOB rechaza.
-    2) shares = size_usdc / entry_price recalculaba shares teóricas,
-       pero la wallet on-chain a veces tenía 0.5% menos por fills
-       parciales → CLOB rechazaba "not enough balance".
+  Moutet, Etcheverry y Genoa ocurrÃ­an por dos bugs:
+    1) Polymarket exige mÃ­nimo 5 shares por orden. Posiciones de $9-$30
+       a precios bajos caÃ­an bajo 5 â CLOB rechaza.
+    2) shares = size_usdc / entry_price recalculaba shares teÃ³ricas,
+       pero la wallet on-chain a veces tenÃ­a 0.5% menos por fills
+       parciales â CLOB rechazaba "not enough balance".
 
 Fixes 2026-04-26 (JP):
   - Usamos size_tokens directo (lo que realmente fillearon los fills).
   - Si CLOB dice balance insuficiente, retry con shares*0.98 (dust safe).
-  - _fetch_book ignora libros rotos (bid+ask <0.02 o spread >50¢) que
-    venían disparando SL falsos al -98%.
+  - _fetch_book ignora libros rotos (bid+ask <0.02 o spread >50Â¢) que
+    venÃ­an disparando SL falsos al -98%.
 """
 
 import logging
@@ -50,14 +50,16 @@ def _fetch_book(client, token_id: str) -> Optional[Dict[str, float]]:
     """Devuelve {"bid": x, "ask": y, "mid": z} o None si falla.
 
     FIX (2026-04-26 JP): si el book devuelve precios sospechosos (bid+ask
-    <0.02 o spread >50¢), no confiamos y devolvemos None. Eso evita SL
-    falsos al -98% como pasó con Etcheverry/Genoa cuando el CLOB devolvía
-    book con price=0.01 momentáneamente.
+    <0.02 o spread >50Â¢), no confiamos y devolvemos None. Eso evita SL
+    falsos al -98% como pasÃ³ con Etcheverry/Genoa cuando el CLOB devolvÃ­a
+    book con price=0.01 momentÃ¡neamente.
     """
     try:
         book = client.get_order_book(token_id)
-        best_bid = float(book.bids[0].price) if book and book.bids else 0.0
-        best_ask = float(book.asks[0].price) if book and book.asks else 0.0
+        # FIX 2026-04-26 v2: CLOB devuelve bids/asks SIN ordenar por mejor precio.
+        # bids[0] puede ser oportunista a 0.01c, no el best. Usar max/min.
+        best_bid = max((float(b.price) for b in book.bids), default=0.0) if book and book.bids else 0.0
+        best_ask = min((float(a.price) for a in book.asks), default=0.0) if book and book.asks else 0.0
         if best_bid <= 0 or best_ask <= 0:
             return None
         if best_bid < 0.02 and best_ask < 0.02:
@@ -65,7 +67,7 @@ def _fetch_book(client, token_id: str) -> Optional[Dict[str, float]]:
                            token_id[:12], best_bid, best_ask)
             return None
         if (best_ask - best_bid) > 0.50:
-            logger.warning("spread anómalo en %s (bid=%.3f ask=%.3f); ignorando",
+            logger.warning("spread anÃ³malo en %s (bid=%.3f ask=%.3f); ignorando",
                            token_id[:12], best_bid, best_ask)
             return None
         return {
@@ -215,11 +217,11 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                 update_record("CopyTradeProposal", linked[0].get("id"), {"pnl": pnl})
         except Exception:
             pass
-        emoji = "✅" if pnl > 0 else "🔴"
+        emoji = "â" if pnl > 0 else "ð´"
         send_telegram(
-            "%s <b>%s</b> · $%+.2f\n"
+            "%s <b>%s</b> Â· $%+.2f\n"
             "%s\n"
-            "%s %.3f → %.3f (%+.1f%%)\n"
+            "%s %.3f â %.3f (%+.1f%%)\n"
             "Filled %.1f sh" % (
                 emoji, reason.upper(), pnl, market_label,
                 side_str, entry, exit_price, pnl_pct * 100, filled_shares,
@@ -247,12 +249,12 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                  " | dust_exit: " + last_err + " (intended " + reason + ")",
     })
     send_telegram(
-        "⚠️ <b>DUST_EXIT</b> · no se pudo vender\n"
+        "â ï¸ <b>DUST_EXIT</b> Â· no se pudo vender\n"
         "%s\n"
-        "%s entry %.3f → mercado %.3f (%+.1f%%)\n"
+        "%s entry %.3f â mercado %.3f (%+.1f%%)\n"
         "Motivo intentado: <code>%s</code>\n"
-        "Último error CLOB: <code>%s</code>\n"
-        "Posición marcada cerrada con PnL=$0. Saldo on-chain queda hasta resolución." % (
+        "Ãltimo error CLOB: <code>%s</code>\n"
+        "PosiciÃ³n marcada cerrada con PnL=$0. Saldo on-chain queda hasta resoluciÃ³n." % (
             market_label, side_str, entry, current_price, pnl_pct * 100,
             reason, last_err,
         )
@@ -269,7 +271,7 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
 
 def manage_open_positions(client) -> Dict[str, int]:
     """
-    Loop principal. Lee Positions abiertas whale_consensus, evalúa TP/SL,
+    Loop principal. Lee Positions abiertas whale_consensus, evalÃºa TP/SL,
     cierra las que toquen aplicando fallback.
     Devuelve {checked, closed_tp, closed_sl, dust_exits}.
     """
