@@ -208,7 +208,8 @@ def manage_open_positions(client) -> Dict[str, int]:
     if client is None:
         return {"checked": 0, "closed_tp": 0, "closed_sl": 0, "dust_exits": 0}
 
-    positions = list_records("Position", limit=50, query={"status": "open", "strategy": "whale_consensus"}, sort="-opened_at")
+    # FIX 2026-04-26 JP: antes filtraba strategy=whale_consensus, dejando zombies en imports manuales y otras strategies. Ahora monitorea TODAS las posiciones abiertas.
+    positions = list_records("Position", limit=50, query={"status": "open"}, sort="-opened_at")
     if not positions:
         return {"checked": 0, "closed_tp": 0, "closed_sl": 0, "dust_exits": 0}
 
