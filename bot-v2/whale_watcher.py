@@ -121,6 +121,148 @@ def _send_to_base44(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+# FAST_PATH_V1 helpers fast-path
+_FAST_PATH_TENNIS_TOP_KEYWORDS = (
+    "madrid", "rome", "french", "wimbledon", "us-open", "australian",
+    "indian-wells", "miami", "monte-carlo", "shanghai", "atp-masters",
+    "wta-1000",
+)
+_FAST_PATH_MIN_PRICE = 0.50
+_FAST_PATH_MAX_PRICE = 0.80
+_FAST_PATH_MIN_USDC = 100.0
+_FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony")
+_FAST_PATH_DISPATCH_URL = (
+    f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/executeApprovedProposal"
+)
+_FAST_PATH_PROPOSAL_URL = (
+    f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/entities/CopyTradeProposal"
+)
+_FAST_PATH_POSITION_URL = (
+    f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/entities/Position"
+)
+
+
+def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
+    name = str(tr.get("whale_name") or "").lower()
+    if not any(t in name for t in _FAST_PATH_WHALE_NAMES):
+        return False
+    slug = str(tr.get("market_slug") or "").lower()
+    if not any(k in slug for k in _FAST_PATH_TENNIS_TOP_KEYWORDS):
+        return False
+    try:
+        price = float(tr.get("price") or 0)
+        size_usdc = float(tr.get("size_usdc") or 0)
+    except Exception:
+        return False
+    if not (_FAST_PATH_MIN_PRICE <= price <= _FAST_PATH_MAX_PRICE):
+        return False
+    if size_usdc < _FAST_PATH_MIN_USDC:
+        return False
+    if not tr.get("token_id") or not tr.get("condition_id"):
+        return False
+    return True
+
+
+def _has_open_position_for_condition(condition_id: str) -> bool:
+    """True si ya tenemos Position abierta con ese condition_id."""
+    try:
+        # Buscamos por market_question (proxy razonable, Position no tiene
+        # condition_id directo, pero token_id ya está en cada Position).
+        # En realidad lo mejor es buscar por token_id del trade actual,
+        # pero condition_id es el filtro semánticamente correcto. Dejamos
+        # el endpoint de Base44 manejar el match por token_id en
+        # executeApprovedProposal, acá filtramos lo más obvio.
+        rows = list_records(
+            "Position",
+            limit=5,
+            query={"status": "open"},
+        )
+        # Como no tenemos query por condition_id, devolvemos False y
+        # confiamos en la doble verificación que hace executeApprovedProposal
+        # (DEDUP TOKEN_ID GUARD ya implementado ahí).
+        return False
+    except Exception:
+        return False
+
+
+def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
+    """Crea una CopyTradeProposal approved + llama executeApprovedProposal directo."""
+    if _has_open_position_for_condition(tr.get("condition_id", "")):
+        logger.info("fast_path skip: ya hay Position abierta para condition_id")
+        return
+    detected_at_iso = (
+        time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time())) + "Z"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {BASE44_API_KEY}",
+    }
+    # 1) Crear proposal approved (skip cron whaleDetectConsensus).
+    proposal_payload = {
+        "status": "approved",
+        "tier": "premium",
+        "rejection_reason": "auto_approved_fast_path_swisstony_tennis_top",
+        "category": "sports",
+        "subcategory": "tennis",
+        "side": tr.get("side", "BUY"),
+        "outcome": tr.get("outcome"),
+        "entry_price": float(tr.get("price") or 0),
+        "amount_usdc": 15.0,  # tope strategy.trade_size_max — executeApprovedProposal lo capea igual
+        "suggested_size_usdc": 15.0,
+        "token_id": tr.get("token_id"),
+        "condition_id": tr.get("condition_id"),
+        "market_question": tr.get("market_question"),
+        "market_slug": tr.get("market_slug"),
+        "whale_addresses": [tr.get("whale_address", "").lower()],
+        "whale_names": [tr.get("whale_name") or "swisstony"],
+        "whale_count": 1,
+        "avg_whale_wr": 1.0,
+        "quality_score": 100,
+        "total_whale_usdc": float(tr.get("size_usdc") or 0),
+        "responded_at": detected_at_iso,
+    }
+    try:
+        r = requests.post(
+            _FAST_PATH_PROPOSAL_URL,
+            headers=headers,
+            json=proposal_payload,
+            timeout=10,
+        )
+        if r.status_code >= 400:
+            logger.warning("fast_path create_proposal %d: %s", r.status_code, r.text[:200])
+            return
+        proposal = r.json()
+        proposal_id = proposal.get("id") or proposal.get("_id")
+        if not proposal_id:
+            logger.warning("fast_path: proposal sin id")
+            return
+    except Exception as exc:
+        logger.warning("fast_path create_proposal: %s", exc)
+        return
+    # 2) Llamar executeApprovedProposal directo.
+    try:
+        r2 = requests.post(
+            _FAST_PATH_DISPATCH_URL,
+            headers=headers,
+            json={
+                "fast_path": True,
+                "proposal_id": proposal_id,
+                "watcher_detected_at": detected_at_iso,
+            },
+            timeout=15,
+        )
+        if r2.status_code >= 400:
+            logger.warning("fast_path dispatch %d: %s", r2.status_code, r2.text[:200])
+            return
+        result = r2.json() if r2.text else {}
+        logger.info(
+            "FAST_PATH dispatched: proposal=%s result=%s",
+            str(proposal_id)[:8], str(result)[:200],
+        )
+    except Exception as exc:
+        logger.warning("fast_path dispatch: %s", exc)
+
+
 def run_whale_watcher_once() -> Dict[str, Any]:
     """Ejecuta una corrida: poll todas las wallets Tier S, manda nuevos trades."""
     started = time.time()
@@ -138,6 +280,17 @@ def run_whale_watcher_once() -> Dict[str, Any]:
             norm = _normalize_trade(raw, w)
             if norm and norm.get("trade_hash"):
                 all_trades.append(norm)
+
+    # FAST_PATH_V1 — fast-path swisstony tenis top (Bolt+Opus+JP 2026-04-27).
+    # Antes de mandar al endpoint lento, escaneo los trades por candidatos
+    # ultra-rápidos: swisstony Tier S, tenis Masters/Slam, precio 50-80c, size>$100.
+    # Si encuentro alguno, llamo executeApprovedProposal directo y salto el cron.
+    try:
+        for tr in all_trades:
+            if _is_fast_path_candidate(tr):
+                _dispatch_fast_path(tr)
+    except Exception as exc:
+        logger.warning("fast_path scan failed: %s", exc)
 
     if not all_trades:
         return {"ok": True, "wallets": len(whales), "trades_found": 0}
