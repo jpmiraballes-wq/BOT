@@ -9,11 +9,18 @@ Novedades:
 
 import logging
 import logging.handlers
+import os
 import signal
 import sys
 import time
 import traceback
 from typing import Any, Dict, List
+
+# SHADOW_MODE_V1 — VPS Ashburn shadow mode (Bolt+Opus+JP 2026-04-27).
+# Si SHADOW_MODE=true en el .env, el bot solo polea whale_watcher para medir
+# lag de detección. NO toca wallet, NO crea proposals, NO ejecuta scans.
+SHADOW_MODE = os.getenv("SHADOW_MODE", "false").strip().lower() == "true"
+SHADOW_BOT_ID = os.getenv("SHADOW_BOT_ID", "vps-shadow")
 
 from circuit_breakers import CircuitBreakers
 from config import (
@@ -146,13 +153,19 @@ def main() -> int:
     sizer = KellySizer()
     cb = CircuitBreakers()
 
-    try:
-        om.connect()
-    except Exception as exc:
-        logger.critical("No se pudo inicializar OrderManager: %s", exc)
-        logger.debug(traceback.format_exc())
-        reporter.report(build_snapshot("error", rm, om, notes=str(exc)), force=True)
-        return 3
+    if SHADOW_MODE:
+        logger.warning("=" * 60)
+        logger.warning("SHADOW_MODE=true (id=%s) — solo whale_watcher activo", SHADOW_BOT_ID)
+        logger.warning("Skipping: om.connect, scan_markets, drain_fills, tp_sl, radar, twitter")
+        logger.warning("=" * 60)
+    else:
+        try:
+            om.connect()
+        except Exception as exc:
+            logger.critical("No se pudo inicializar OrderManager: %s", exc)
+            logger.debug(traceback.format_exc())
+            reporter.report(build_snapshot("error", rm, om, notes=str(exc)), force=True)
+            return 3
 
     reporter.report(build_snapshot("running", rm, om), force=True)
 
@@ -183,6 +196,24 @@ def main() -> int:
                 ))
                 elapsed = time.time() - loop_started
                 time.sleep(max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed))
+                continue
+
+            if SHADOW_MODE:
+                # SHADOW: solo whale_watcher. Nada de wallet ni proposals.
+                if maybe_run_whale_watcher is not None:
+                    try:
+                        maybe_run_whale_watcher()
+                    except Exception as exc:
+                        logger.error("whale_watcher fallo: %s", exc)
+                # heartbeat liviano para ver el bot vivo en SystemState
+                reporter.report(build_snapshot("running", rm, om, notes="shadow:%s" % SHADOW_BOT_ID))
+                elapsed = time.time() - loop_started
+                sleep_for = max(1.0, MAIN_LOOP_INTERVAL_SECONDS - elapsed)
+                slept = 0.0
+                while slept < sleep_for and not _stop_requested:
+                    chunk = min(1.0, sleep_for - slept)
+                    time.sleep(chunk)
+                    slept += chunk
                 continue
 
             # Copy-trade drain: ejecuta Positions pending_fill aprobadas por JP.
