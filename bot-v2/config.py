@@ -95,7 +95,7 @@ POLYGON_CHAIN_ID = 137
 # ---------------------------------------------------------------------------
 # Loop y sistema
 # ---------------------------------------------------------------------------
-MAIN_LOOP_INTERVAL_SECONDS = 60
+MAIN_LOOP_INTERVAL_SECONDS = 5  # OVERTAKE_V1_LOOP — Bolt+Opus 2026-04-27 (era 60s)
 SHUTDOWN_FLAG_PATH = BASE_DIR / "shutdown.flag"
 STATE_FILE_PATH = BASE_DIR / "state.json"
 LOG_PATH = str(BASE_DIR / "bot.log")
