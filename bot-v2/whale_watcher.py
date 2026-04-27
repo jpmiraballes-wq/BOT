@@ -30,7 +30,8 @@ logger = logging.getLogger("whale_watcher")
 WHALE_INTERVAL_SECONDS = int(os.environ.get("WHALE_INTERVAL_SECONDS", "30"))
 WHALES_CACHE_TTL_SECONDS = 10 * 60
 DATA_API_BASE = "https://data-api.polymarket.com"
-RECEIVE_ENDPOINT = f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/receiveWhaleSignal"
+# ENDPOINT_INDEX_V1 — path real incluye /index (function en subcarpeta).
+RECEIVE_ENDPOINT = f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/receiveWhaleSignal/index"
 
 _last_run_at: float = 0.0
 _whales_cache: List[Dict[str, Any]] = []
