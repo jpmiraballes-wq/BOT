@@ -153,21 +153,27 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
 
     rm = RiskManager()
-    # CAPITAL_BOOTSTRAP_V1 — sincronizar equity con BotConfig.capital_usdc al arrancar.
-    # Sin esto, current_equity queda en CAPITAL_USDC=60 hardcoded de config.py
-    # y el dashboard miente hasta que update_capital() corra mas tarde.
-    if fetch_bot_config is not None:
-        try:
-            cfg = fetch_bot_config(force=True) or {}
-            live_capital = cfg.get("capital_usdc")
-            if live_capital is not None and float(live_capital) > 0:
-                rm.update_capital(float(live_capital))
-                logger.info(
-                    "Capital sincronizado desde BotConfig: $%.2f",
-                    float(live_capital),
-                )
-        except Exception as exc:
-            logger.warning("BotConfig bootstrap fallo: %s", exc)
+    # NO_FAKE_CAPITAL_V1 — capital REAL desde BotConfig o el bot NO arranca.
+    # Antes habia un fallback a CAPITAL_USDC=60 hardcoded que mentia al
+    # dashboard y desbalanceaba el sizing. Ahora: si no hay BotConfig valido,
+    # abortamos arrancada con error claro. JP no quiere capital fantasma.
+    if fetch_bot_config is None:
+        logger.error("ABORT: bot_config_reader no disponible. No puedo leer capital real.")
+        sys.exit(1)
+    try:
+        cfg = fetch_bot_config(force=True) or {}
+    except Exception as exc:
+        logger.error("ABORT: BotConfig fetch fallo: %s. Sin capital real no arranco.", exc)
+        sys.exit(1)
+    live_capital = cfg.get("capital_usdc")
+    if live_capital is None or float(live_capital) <= 0:
+        logger.error(
+            "ABORT: BotConfig.capital_usdc invalido (%s). Setealo en el dashboard.",
+            live_capital,
+        )
+        sys.exit(1)
+    rm.update_capital(float(live_capital))
+    logger.info("Capital REAL desde BotConfig: $%.2f", float(live_capital))
     reporter = Reporter()
     om = OrderManager()
     sizer = KellySizer()
