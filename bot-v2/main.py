@@ -48,6 +48,11 @@ from order_manager import OrderManager
 from position_tp_sl import manage_open_positions
 from reporter import Reporter
 from risk_manager import RiskManager
+# CAPITAL_BOOTSTRAP_V1 — lector BotConfig para sincronizar capital al arrancar.
+try:
+    from bot_config_reader import fetch_bot_config
+except ImportError:
+    fetch_bot_config = None
 
 
 def setup_logging() -> None:
@@ -148,6 +153,21 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
 
     rm = RiskManager()
+    # CAPITAL_BOOTSTRAP_V1 — sincronizar equity con BotConfig.capital_usdc al arrancar.
+    # Sin esto, current_equity queda en CAPITAL_USDC=60 hardcoded de config.py
+    # y el dashboard miente hasta que update_capital() corra mas tarde.
+    if fetch_bot_config is not None:
+        try:
+            cfg = fetch_bot_config(force=True) or {}
+            live_capital = cfg.get("capital_usdc")
+            if live_capital is not None and float(live_capital) > 0:
+                rm.update_capital(float(live_capital))
+                logger.info(
+                    "Capital sincronizado desde BotConfig: $%.2f",
+                    float(live_capital),
+                )
+        except Exception as exc:
+            logger.warning("BotConfig bootstrap fallo: %s", exc)
     reporter = Reporter()
     om = OrderManager()
     sizer = KellySizer()
