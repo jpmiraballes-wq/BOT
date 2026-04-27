@@ -104,7 +104,9 @@ def build_snapshot(mode, rm, om, notes=""):
     deployed = compute_capital_deployed(open_orders)
     return {
         "mode": mode,
-        "capital_total": rm.current_equity or CAPITAL_USDC,
+        # RM_NO_FAKE_CAPITAL_V1 — sin fallback fantasma. Si current_equity es 0 algo esta mal,
+        # mejor reportar 0 al dashboard que mentir con CAPITAL_USDC.
+        "capital_total": float(rm.current_equity or 0.0),
         "capital_deployed": deployed,
         "daily_pnl": rm.daily_pnl,
         "drawdown_pct": rm.drawdown_pct,
@@ -152,11 +154,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    rm = RiskManager()
-    # NO_FAKE_CAPITAL_V1 — capital REAL desde BotConfig o el bot NO arranca.
-    # Antes habia un fallback a CAPITAL_USDC=60 hardcoded que mentia al
-    # dashboard y desbalanceaba el sizing. Ahora: si no hay BotConfig valido,
-    # abortamos arrancada con error claro. JP no quiere capital fantasma.
+    # RM_NO_FAKE_CAPITAL_V1 — leer BotConfig PRIMERO, instanciar RiskManager con capital real.
+    # No mas fallback fantasma. Si BotConfig falla, el bot aborta arrancada.
     if fetch_bot_config is None:
         logger.error("ABORT: bot_config_reader no disponible. No puedo leer capital real.")
         sys.exit(1)
@@ -172,7 +171,11 @@ def main() -> int:
             live_capital,
         )
         sys.exit(1)
-    rm.update_capital(float(live_capital))
+    try:
+        rm = RiskManager(initial_capital=float(live_capital))
+    except ValueError as exc:
+        logger.error("ABORT: RiskManager rechazo capital: %s", exc)
+        sys.exit(1)
     logger.info("Capital REAL desde BotConfig: $%.2f", float(live_capital))
     reporter = Reporter()
     om = OrderManager()
