@@ -68,17 +68,55 @@ class Reporter:
             "notes": str(snapshot.get("notes") or ""),
         }
 
+        # REPORTER_UPSERT_V1 — upsert: PUT si existe, POST sólo la primera vez.
+        # Se buscaba un singleton por bot_version + notes-marker para distinguir
+        # Mac (notes vacío o no shadow) de VPS Shadow (notes startswith 'shadow:').
+        # En 24h se acumulaban ~280 records con el create_record viejo.
         try:
-            resp = requests.post(self._endpoint, json=payload,
-                                 headers=self._headers, timeout=REQUEST_TIMEOUT)
+            existing_id = self._find_singleton_id(payload)
+            if existing_id:
+                put_url = "%s/%s" % (self._endpoint, existing_id)
+                resp = requests.put(put_url, json=payload,
+                                    headers=self._headers, timeout=REQUEST_TIMEOUT)
+            else:
+                resp = requests.post(self._endpoint, json=payload,
+                                     headers=self._headers, timeout=REQUEST_TIMEOUT)
             if resp.status_code >= 400:
                 logger.error("Error reportando a Base44: %d %s",
                              resp.status_code, resp.text[:200])
                 return
             self._last_report_ts = time.time()
-            logger.info("Heartbeat OK - capital: %s", payload["capital_total"])
+            logger.info("Heartbeat OK - capital: %s (singleton=%s)",
+                        payload["capital_total"], existing_id or "new")
         except requests.RequestException as exc:
             logger.error("Error reportando a Base44: %s", exc)
+
+    def _find_singleton_id(self, payload):
+        """REPORTER_UPSERT_V1 — busca el record propio (mismo bot_id) más reciente.
+
+        El bot_id se infiere del campo notes:
+          - notes startswith 'shadow:' → VPS Shadow
+          - cualquier otro caso → Mac (main)
+        Devuelve el id o None si todavía no existe (primer heartbeat).
+        """
+        try:
+            is_shadow = str(payload.get("notes") or "").startswith("shadow:")
+            list_url = self._endpoint + "?sort=-created_date&limit=20"
+            resp = requests.get(list_url, headers=self._headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code >= 400:
+                return None
+            records = resp.json() or []
+            if isinstance(records, dict):
+                records = records.get("data") or records.get("records") or []
+            for rec in records:
+                rec_notes = str(rec.get("notes") or "")
+                rec_is_shadow = rec_notes.startswith("shadow:")
+                if rec_is_shadow == is_shadow:
+                    return rec.get("id")
+            return None
+        except Exception as exc:
+            logger.warning("_find_singleton_id failed: %s (will fallback to POST)", exc)
+            return None
 
     def send_minimal_heartbeat(self, mode="running", notes=""):
         """REPORTER_ZOMBIE_GUARD_V1
