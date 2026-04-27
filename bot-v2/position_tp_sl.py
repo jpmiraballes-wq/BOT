@@ -54,20 +54,20 @@ def _round_price(p: float) -> float:
 
 
 def _fetch_book(client, token_id: str) -> Optional[Dict[str, float]]:
-    """TP_SL_FORCED_EXIT_V1
+    """TP_SL_FORCED_EXIT_V2
     Devuelve {"bid": x, "ask": y, "mid": z} o None si NO hay precio utilizable.
 
-    Fix Bencic 2026-04-27: antes rechazábamos libros con spread>0.50 o bid<0.02,
-    eso bloqueaba SL en mercados ilíquidos donde la posición ya estaba sangrando.
-    Ahora SOLO rechazamos si bid Y ask son 0 (book vacío total).
+    Fix Bencic 2026-04-27: antes rechazabamos libros con spread>0.50 o bid<0.02,
+    eso bloqueaba SL en mercados iliquidos donde la posicion ya estaba sangrando.
+    Ahora SOLO rechazamos si bid Y ask son 0 (book vacio total).
     """
     try:
         book = client.get_order_book(token_id)
         best_bid = float(book.bids[0].price) if book and book.bids else 0.0
         best_ask = float(book.asks[0].price) if book and book.asks else 0.0
-        # Solo rechazamos si AMBOS lados están vacíos (book muerto total)
+        # Solo rechazamos si AMBOS lados estan vacios (book muerto total)
         if best_bid <= 0 and best_ask <= 0:
-            logger.warning("book vacío en %s; no se puede operar", token_id[:12])
+            logger.warning("book vacio en %s; no se puede operar", token_id[:12])
             return None
         # Si solo un lado tiene precio, derivamos el otro como fallback
         if best_bid <= 0 and best_ask > 0:
@@ -81,7 +81,7 @@ def _fetch_book(client, token_id: str) -> Optional[Dict[str, float]]:
         # Loggeo informativo si el spread es raro pero seguimos
         spread = best_ask - best_bid
         if spread > 0.30:
-            logger.warning("spread amplio en %s (bid=%.3f ask=%.3f spread=%.3f) — SL puede igual disparar",
+            logger.warning("spread amplio en %s (bid=%.3f ask=%.3f spread=%.3f) - SL puede igual disparar",
                            token_id[:12], best_bid, best_ask, spread)
         return {
             "bid": best_bid,
