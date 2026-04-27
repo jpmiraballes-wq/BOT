@@ -45,7 +45,10 @@ REPORT_INTERVAL_SECONDS = 5 * 60
 # ---------------------------------------------------------------------------
 # Capital y riesgo
 # ---------------------------------------------------------------------------
-CAPITAL_USDC = 60.0
+# NO_FAKE_CAPITAL_V1 — NO hardcodear capital. El valor real viene de BotConfig.capital_usdc
+# leido en main.py al arrancar. Si falla esa lectura, el bot ABORTA arrancada.
+# Este 0.0 es solo un sentinel "no configurado", no un fallback operativo.
+CAPITAL_USDC = 0.0
 MAX_POSITION_PCT = 0.02
 MIN_SPREAD_PCT = 0.04
 MAX_DRAWDOWN_PCT = 0.15
