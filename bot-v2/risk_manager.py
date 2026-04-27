@@ -100,18 +100,41 @@ class RiskManager:
 
     # --------------------------------------------------------- persistencia
     def _load(self) -> None:
-        # RM_NO_FAKE_CAPITAL_V1: si state.json no existe o un campo falta, fallback a los
-        # valores ya seteados en __init__ (capital real desde BotConfig).
-        # NUNCA fallback a CAPITAL_USDC del config (que ahora es 0.0 sentinel).
-        if self.state_path.exists():
-            try:
-                data = json.loads(self.state_path.read_text())
-                self.high_watermark = float(data.get("high_watermark", self.high_watermark))
-                self.current_equity = float(data.get("current_equity", self.current_equity))
-                self.daily_pnl = float(data.get("daily_pnl", 0.0))
-                self.daily_anchor_equity = float(
-                    data.get("daily_anchor_equity", self.daily_anchor_equity)
-                )
+        # RM_TRUST_CONSTRUCTOR_V1: si state.json esta cacheado con un capital DESFASADO
+        # (>5%) del que vino por el constructor (BotConfig real), lo ignoramos
+        # y reescribimos. Caso real 2026-04-27: state.json tenia 482.46 viejo
+        # y BotConfig pasaba 429.77 nuevo. _load pisaba el real con el viejo.
+        # Trust the constructor: si BotConfig dice X, X es la verdad.
+        if not self.state_path.exists():
+            return
+        try:
+            data = json.loads(self.state_path.read_text())
+            cached_equity = float(data.get("current_equity", 0.0))
+            ctor_equity = float(self.current_equity)
+            # Threshold 5%: tolerancia para drift normal de PnL en el dia.
+            if ctor_equity > 0 and cached_equity > 0:
+                drift_pct = abs(cached_equity - ctor_equity) / ctor_equity
+                if drift_pct > 0.05:
+                    # Constructor manda. Reescribimos state.json con valores frescos.
+                    logger_msg = (
+                        "RiskManager: state.json desfasado (cached=%.2f vs ctor=%.2f, "
+                        "drift=%.1f%%). Ignorando cache, reescribiendo con capital real."
+                    ) % (cached_equity, ctor_equity, drift_pct * 100)
+                    try:
+                        import logging as _lg
+                        _lg.getLogger(__name__).warning(logger_msg)
+                    except Exception:
+                        pass
+                    # NO cargamos nada del state.json viejo. Forzamos save con valores ctor.
+                    self._save()
+                    return
+            # Drift razonable: cargamos el state.json normal.
+            self.high_watermark = float(data.get("high_watermark", self.high_watermark))
+            self.current_equity = float(data.get("current_equity", self.current_equity))
+            self.daily_pnl = float(data.get("daily_pnl", 0.0))
+            self.daily_anchor_equity = float(
+                data.get("daily_anchor_equity", self.daily_anchor_equity)
+            )
                 self.daily_anchor_ts = float(data.get("daily_anchor_ts", time.time()))
                 self.halted = bool(data.get("halted", False))
                 self.halt_reason = str(data.get("halt_reason", ""))
