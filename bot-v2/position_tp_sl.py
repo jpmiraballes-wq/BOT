@@ -61,6 +61,14 @@ _sl_pending: Dict[str, float] = {}
 # No dispara SL hasta que el book se estabilice.
 TRADE_MIN_AGE_SECONDS = 90.0
 
+# PANIC_EXIT_V1 — Bolt+JP+Opus 2026-04-27 noche
+# Panic exit para favoritos desplomados (caso Bencic 71→21¢).
+# Si pnl_pct <= -30% y trade tiene >5min de vida → vender al market sin
+# doble confirmación. Mejor -35% realizado que -80% mirando.
+# Bypassea _is_too_young y _should_block_sl (esos guards solo aplican a stop_loss).
+PANIC_DRAWDOWN_THRESHOLD = -0.30
+PANIC_MIN_AGE_SECONDS = 300.0
+
 
 def _is_too_young(pos: Dict[str, Any]) -> bool:
     """True = el trade es muy joven, NO disparar SL."""
@@ -448,7 +456,22 @@ def manage_open_positions(client) -> Dict[str, int]:
         except Exception:
             pass
 
-        if pnl_pct >= tp_pct:
+        # PANIC_EXIT_V1 — panic exit toma precedencia sobre TP/SL normal.
+        # Si pnl <= -30% y age >= 5min, vender al market sin más checks.
+        opened_ts_panic = pos.get("opened_at_ts")
+        age_seconds_panic = (time.time() - float(opened_ts_panic)) if opened_ts_panic else 0.0
+        if pnl_pct <= PANIC_DRAWDOWN_THRESHOLD and age_seconds_panic >= PANIC_MIN_AGE_SECONDS:
+            logger.warning(
+                "PANIC_EXIT triggered: pos=%s pnl=%.1f%% age=%.0fs (threshold %.0f%% / %.0fs)",
+                str(pos.get("id", ""))[:8], pnl_pct * 100, age_seconds_panic,
+                PANIC_DRAWDOWN_THRESHOLD * 100, PANIC_MIN_AGE_SECONDS,
+            )
+            ok = _close_position(client, pos, book, "panic_exit", pnl_pct)
+            if ok:
+                closed_sl += 1
+            else:
+                dust_exits += 1
+        elif pnl_pct >= tp_pct:
             ok = _close_position(client, pos, book, "take_profit", pnl_pct)
             if ok:
                 closed_tp += 1
