@@ -47,6 +47,41 @@ DEFAULT_SL_PCT = -0.08
 POLYMARKET_MIN_SHARES = 5.0
 AGGRESSIVE_DISCOUNT_USD = 0.02
 
+# TP_SL_MID_DOUBLE_CONFIRM_V1 — Bolt audit 2026-04-27
+# Doble confirmación para SL catastrófico (<-40%).
+SL_CATASTROPHIC_THRESHOLD = -0.40
+SL_CONFIRM_SECONDS = 30.0
+_sl_pending: Dict[str, float] = {}
+
+
+def _should_block_sl(pos_id: str, pnl_pct: float) -> bool:
+    """True = bloquear SL (esperar segunda confirmación). False = dejar pasar."""
+    if pnl_pct >= SL_CATASTROPHIC_THRESHOLD:
+        _sl_pending.pop(pos_id, None)
+        return False
+    now_ts = time.time()
+    first_ts = _sl_pending.get(pos_id)
+    if first_ts is None:
+        _sl_pending[pos_id] = now_ts
+        logger.warning(
+            "SL_DOUBLE_CONFIRM: primera lectura pnl=%.1f%% en %s, esperando %.0fs",
+            pnl_pct * 100, pos_id[:8], SL_CONFIRM_SECONDS,
+        )
+        return True
+    elapsed = now_ts - first_ts
+    if elapsed < SL_CONFIRM_SECONDS:
+        logger.warning(
+            "SL_DOUBLE_CONFIRM: aún esperando, %.0fs/%.0fs en %s",
+            elapsed, SL_CONFIRM_SECONDS, pos_id[:8],
+        )
+        return True
+    _sl_pending.pop(pos_id, None)
+    logger.warning(
+        "SL_DOUBLE_CONFIRM: confirmado pnl=%.1f%% en %s tras %.0fs, disparando SL",
+        pnl_pct * 100, pos_id[:8], elapsed,
+    )
+    return False
+
 
 def _round_price(p: float) -> float:
     p = max(0.01, min(0.99, p))
@@ -150,13 +185,19 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                     reason: str, pnl_pct: float) -> bool:
     """Cascada: GTC limit -> balance reduce -> FAK cross -> aggressive FAK -> dust_exit."""
     pos_id = pos.get("id")
+    # TP_SL_MID_DOUBLE_CONFIRM_V1: bloquear SL catastrófico (<-40%) sin doble confirmación.
+    if reason == "stop_loss" and pos_id and _should_block_sl(pos_id, pnl_pct):
+        return False
     token_id = pos.get("token_id")
     side_str = (pos.get("side") or "BUY").upper()
     entry = float(pos.get("entry_price") or 0.0)
     size_usdc = float(pos.get("size_usdc") or 0.0)
     market_label = (pos.get("question") or pos.get("market") or "?")[:60]
 
-    current_price = book["bid"] if side_str == "BUY" else book["ask"]
+    # TP_SL_MID_DOUBLE_CONFIRM_V1 — Bolt audit 2026-04-27
+    # Antes: book["bid"] BUY / book["ask"] SELL → bid hundido a 1¢ con ask 50¢
+    # daba pnl=-98% y liquidaba. Fix: usar mid (precio real del mercado).
+    current_price = book["mid"]
 
     size_tokens_persisted = float(pos.get("size_tokens") or 0.0)
     if size_tokens_persisted > 0:
@@ -185,8 +226,11 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                          "shares": shares})
 
     if not res["ok"] and "size_below_min" not in (res.get("error") or ""):
-        agg_price = (current_price - AGGRESSIVE_DISCOUNT_USD if side_str == "BUY"
-                     else current_price + AGGRESSIVE_DISCOUNT_USD)
+        # TP_SL_MID_DOUBLE_CONFIRM_V1: floor 5¢ BUY / 95¢ SELL (Bolt audit 2026-04-27).
+        # Antes podía caer a 1¢ si current_price era basura. No regalamos shares.
+        agg_price = (max(0.05, current_price - AGGRESSIVE_DISCOUNT_USD)
+                     if side_str == "BUY"
+                     else min(0.95, current_price + AGGRESSIVE_DISCOUNT_USD))
         res = _try_close(client, token_id, side_str, shares, agg_price,
                          order_type=OrderType.FAK)
         attempts.append({"strategy": "aggressive_fak", "price": agg_price,
@@ -251,46 +295,26 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         )
         return True
 
-    # Todos los intentos fallaron â dust_exit con PnL REAL.
+    # TP_SL_MID_DOUBLE_CONFIRM_V1: dust_unsellable SIN PnL fantasma (Bolt audit 2026-04-27).
+    # Si NO pudimos vender, NO sabemos el precio real de salida.
+    # NO inventamos PnL con current_price (puede ser bid roto).
+    # Marcamos dust_unsellable con pnl=0 y dejamos shares on-chain.
+    # NO creamos Trade record: el resolver lo hara al cerrar el mercado.
     last_err = (res.get("error") or "unknown")[:80]
-    estimated_shares = size_tokens_persisted if size_tokens_persisted > 0 else (
-        size_usdc / max(0.01, entry)
-    )
-    notional_in = estimated_shares * entry
-    notional_out = estimated_shares * current_price
-    estimated_pnl = round(
-        (notional_out - notional_in) if side_str == "BUY"
-        else (notional_in - notional_out),
-        4,
-    )
     update_record("Position", pos_id, {
         "status": "closed",
-        "close_reason": "dust_exit",
+        "close_reason": "dust_unsellable",
         "close_time": now_ts_iso,
-        "current_price": current_price,
-        "exit_price": current_price,
-        "pnl_realized": estimated_pnl,
+        "pnl_realized": 0.0,
         "pnl_unrealized": 0.0,
         "notes": (pos.get("notes") or "") +
-                 f" | dust_exit: {last_err} (intended {reason}, est_pnl={estimated_pnl:+.2f})",
+                 f" | dust_unsellable: {last_err} (intended {reason}, "
+                 f"shares on-chain hasta resolucion)",
     })
     try:
-        create_record("Trade", {
-            "market": pos.get("market") or market_label,
-            "side": side_str,
-            "entry_price": entry,
-            "exit_price": current_price,
-            "size_usdc": round(estimated_shares * entry, 2),
-            "pnl": estimated_pnl,
-            "pnl_pct": pnl_pct * 100,
-            "strategy": pos.get("strategy") or "whale_consensus",
-            "status": "closed",
-            "entry_time": pos.get("opened_at") or now_iso(),
-            "exit_time": now_iso(),
-            "notes": f"tp_sl_dust_exit:{reason}:err={last_err}",
-        })
+        logger.warning("dust_unsellable: %s reason=%s err=%s", pos_id[:8], reason, last_err)
     except Exception as exc:
-        logger.error("dust_exit Trade create failed: %s", exc)
+        logger.error("dust_unsellable log failed: %s", exc)
     try:
         linked = list_records(
             "CopyTradeProposal",
