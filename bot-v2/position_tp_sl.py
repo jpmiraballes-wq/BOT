@@ -268,7 +268,23 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
     now_ts_iso = now_iso()
 
     if res["ok"]:
-        exit_price = res["filled_price"]
+        # TP_SL_FILLED_PRICE_SANITY_V1 — JP+Opus 2026-04-27.
+        # CAUSA RAIZ Trade fantasma Tsitsipas/Andreeva/Cerundolo:
+        # El CLOB a veces devuelve filled_price corrupto (ej 0.50 cuando vendiste
+        # a 0.79). Si confiamos ciego, escribimos PnL fantasma -98% al Trade.
+        # FIX: validar filled_price contra current_price (mid del book).
+        # Si drift > 30 centavos, es sospechoso. Usamos current_price.
+        raw_filled_price = float(res["filled_price"] or 0.0)
+        sanity_drift = abs(raw_filled_price - current_price)
+        if raw_filled_price <= 0.0 or sanity_drift > 0.30:
+            logger.warning(
+                "FILLED_PRICE_SANITY: pos %s reportó filled_price=%.4f vs mid=%.4f "
+                "(drift %.4f). Usando mid para evitar Trade fantasma.",
+                str(pos.get("id", ""))[:8], raw_filled_price, current_price, sanity_drift,
+            )
+            exit_price = current_price
+        else:
+            exit_price = raw_filled_price
         filled_shares = res["filled_shares"]
         notional_in = filled_shares * entry
         notional_out = filled_shares * exit_price
