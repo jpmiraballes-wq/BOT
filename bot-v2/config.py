@@ -38,7 +38,7 @@ PAPER_DURATION_DAYS = float(os.getenv("PAPER_DURATION_DAYS", "7"))
 # APP_ID hardcodeado para evitar desincronizacion entre VPS.
 # ---------------------------------------------------------------------------
 BASE44_APP_ID = "69e1e225a40599eb44ced81e"
-BASE44_BASE_URL = "https://app.base44.com"
+BASE44_BASE_URL = "https://trading-bot-app-44ced81e.base44.app"
 BASE44_ENTITY = "SystemState"
 REPORT_INTERVAL_SECONDS = 5 * 60
 
@@ -95,7 +95,7 @@ POLYGON_CHAIN_ID = 137
 # ---------------------------------------------------------------------------
 # Loop y sistema
 # ---------------------------------------------------------------------------
-MAIN_LOOP_INTERVAL_SECONDS = 5  # OVERTAKE_V1_LOOP — Bolt+Opus 2026-04-27 (era 60s)
+MAIN_LOOP_INTERVAL_SECONDS = 5  # OVERTAKE_V1_LOOP â Bolt+Opus 2026-04-27 (era 60s)
 SHUTDOWN_FLAG_PATH = BASE_DIR / "shutdown.flag"
 STATE_FILE_PATH = BASE_DIR / "state.json"
 LOG_PATH = str(BASE_DIR / "bot.log")
