@@ -113,7 +113,8 @@ def _send_to_base44(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     try:
         r = requests.post(
             RECEIVE_ENDPOINT,
-            json={"trades": trades},
+            # SOURCE_BOT_V1 — etiqueta cada batch con el bot origen para The Race dashboard.
+            json={"trades": trades, "source_bot": os.environ.get("SHADOW_BOT_ID", "mac")},
             headers={
                 "api_key": BASE44_API_KEY,
                 "Content-Type": "application/json",
