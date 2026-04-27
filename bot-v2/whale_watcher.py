@@ -38,16 +38,20 @@ _whales_cache_at: float = 0.0
 
 
 def _load_tier_s_whales() -> List[Dict[str, Any]]:
+    """MULTI_WHALE_SHADOW_V1 — carga Tier S + SHADOW (Multi-Whale Fase 1)."""
     global _whales_cache, _whales_cache_at
     now = time.time()
     if _whales_cache and (now - _whales_cache_at) < WHALES_CACHE_TTL_SECONDS:
         return _whales_cache
-    # Carga whales tier=S enabled=true
-    rows = list_records("WhaleTrader", limit=50, query={"tier": "S", "enabled": True})
-    _whales_cache = rows or []
+    # Multi-Whale Fase 1: Tier S (operacionales) + SHADOW (observacion pura).
+    # SHADOW signals quedan marcados execution_blocked=true en receiveWhaleSignal.
+    rows_s = list_records("WhaleTrader", limit=50, query={"tier": "S", "enabled": True}) or []
+    rows_shadow = list_records("WhaleTrader", limit=50, query={"tier": "SHADOW", "enabled": True}) or []
+    rows = rows_s + rows_shadow
+    _whales_cache = rows
     _whales_cache_at = now
     if rows:
-        logger.info("whale_watcher: %d Tier S wallets cargadas", len(rows))
+        logger.info("whale_watcher: %d wallets cargadas (S=%d SHADOW=%d)", len(rows), len(rows_s), len(rows_shadow))
     return _whales_cache
 
 
@@ -80,6 +84,7 @@ def _normalize_trade(raw: Dict[str, Any], whale: Dict[str, Any]) -> Optional[Dic
         size = float(raw.get("size") or 0)
         if price <= 0 or size <= 0:
             return None
+        is_shadow = str(whale.get("tier") or "").upper() == "SHADOW" or whale.get("shadow_mode") is True
         return {
             "whale_address": whale.get("wallet_address", "").lower(),
             "whale_name": whale.get("display_name") or whale.get("wallet_address", "")[:8],
@@ -94,6 +99,8 @@ def _normalize_trade(raw: Dict[str, Any], whale: Dict[str, Any]) -> Optional[Dic
             "size_tokens": size,
             "size_usdc": price * size,
             "whale_trade_ts": int(raw.get("timestamp") or 0),
+            "tier": whale.get("tier"),
+            "shadow": is_shadow,
         }
     except Exception:
         return None
@@ -143,6 +150,9 @@ _FAST_PATH_POSITION_URL = (
 
 
 def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
+    # Multi-Whale Fase 1: SHADOW whales NUNCA disparan fast-path.
+    if tr.get("shadow") is True or str(tr.get("tier") or "").upper() == "SHADOW":
+        return False
     name = str(tr.get("whale_name") or "").lower()
     if not any(t in name for t in _FAST_PATH_WHALE_NAMES):
         return False
