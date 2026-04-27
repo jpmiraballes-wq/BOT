@@ -24,6 +24,19 @@ from decision_logger import log_decision, log_warning
 from kelly import KellySizer
 from logical_arb import scan_logical_arb
 from market_scanner import scan_markets
+# OVERTAKE_V1_INTEGRATION — radar Pinnacle, whale watcher, twitter (Bolt+Opus 2026-04-27)
+try:
+    from arbitrage_radar import maybe_run_radar
+except ImportError:
+    maybe_run_radar = None
+try:
+    from whale_watcher import maybe_run_whale_watcher
+except ImportError:
+    maybe_run_whale_watcher = None
+try:
+    from apify_twitter_loop import maybe_run_twitter_loop
+except ImportError:
+    maybe_run_twitter_loop = None
 from order_manager import OrderManager
 from position_tp_sl import manage_open_positions
 from reporter import Reporter
@@ -179,6 +192,27 @@ def main() -> int:
                     logger.info("Copy-trade: %d fills procesados", drained)
             except Exception as exc:
                 logger.error("drain_pending_fills fallo: %s", exc)
+
+            # OVERTAKE_V1 — radar Pinnacle (cada ~60s interno)
+            if maybe_run_radar is not None:
+                try:
+                    maybe_run_radar()
+                except Exception as exc:
+                    logger.error("arbitrage_radar fallo: %s", exc)
+
+            # OVERTAKE_V1 — whale watcher Tier S (cada ~30s interno)
+            if maybe_run_whale_watcher is not None:
+                try:
+                    maybe_run_whale_watcher()
+                except Exception as exc:
+                    logger.error("whale_watcher fallo: %s", exc)
+
+            # OVERTAKE_V1 — twitter loop (cada ~60s interno)
+            if maybe_run_twitter_loop is not None:
+                try:
+                    maybe_run_twitter_loop()
+                except Exception as exc:
+                    logger.error("twitter_loop fallo: %s", exc)
 
             # TP/SL loop con fallback. Cierra Positions whale_consensus que
             # llegaron a TP/SL. Si CLOB rechaza por size <5sh, intenta precio
