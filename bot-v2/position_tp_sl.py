@@ -1,14 +1,14 @@
 """
-position_tp_sl.py — TP/SL loop con fallback para Positions whale_consensus.
+position_tp_sl.py â TP/SL loop con fallback para Positions whale_consensus.
 
-Por qué existe:
-  Los cierres `dust_unsellable` que vimos en Merida y Moutet ocurrían porque
-  Polymarket exige mínimo 5 shares por orden. Cuando el bot intentaba cerrar
-  una posición de $9-$30 a precios de salida bajos, las shares restantes
-  caían bajo 5 → CLOB rechaza → el bot dejaba la pérdida correr hasta que
-  el mercado resolvía solo.
+Por quÃ© existe:
+  Los cierres `dust_unsellable` que vimos en Merida y Moutet ocurrÃ­an porque
+  Polymarket exige mÃ­nimo 5 shares por orden. Cuando el bot intentaba cerrar
+  una posiciÃ³n de $9-$30 a precios de salida bajos, las shares restantes
+  caÃ­an bajo 5 â CLOB rechaza â el bot dejaba la pÃ©rdida correr hasta que
+  el mercado resolvÃ­a solo.
 
-Lógica:
+LÃ³gica:
   1) Cada ciclo lee Positions abiertas (TODAS las strategies).
   2) Para cada una, fetcha precio del CLOB (best_bid/ask).
   3) Calcula PnL%. Dispara cierre si:
@@ -16,12 +16,12 @@ Lógica:
        - PnL% <= stop_loss_pct (proposal o default -0.08)
   4) Cierre intenta cascada:
        a) GTC limit al best_bid/ask.
-       b) Si "balance" → reduce -2% shares y reintenta.
+       b) Si "balance" â reduce -2% shares y reintenta.
        c) FAK cross-spread (cruza el ask/bid contrario, fill inmediato).
        d) Precio agresivo (-2c BUY / +2c SELL) con FAK.
-       e) Si todo falla → dust_exit con PnL REAL contable (no $0).
+       e) Si todo falla â dust_exit con PnL REAL contable (no $0).
           Crea Trade record para track record + recent_loss_block guard.
-          Las shares quedan on-chain hasta resolución.
+          Las shares quedan on-chain hasta resoluciÃ³n.
 """
 
 import logging
@@ -54,30 +54,43 @@ def _round_price(p: float) -> float:
 
 
 def _fetch_book(client, token_id: str) -> Optional[Dict[str, float]]:
-    """Devuelve {"bid": x, "ask": y, "mid": z} o None si falla."""
+    """TP_SL_FORCED_EXIT_V1
+    Devuelve {"bid": x, "ask": y, "mid": z} o None si NO hay precio utilizable.
+
+    Fix Bencic 2026-04-27: antes rechazábamos libros con spread>0.50 o bid<0.02,
+    eso bloqueaba SL en mercados ilíquidos donde la posición ya estaba sangrando.
+    Ahora SOLO rechazamos si bid Y ask son 0 (book vacío total).
+    """
     try:
         book = client.get_order_book(token_id)
         best_bid = float(book.bids[0].price) if book and book.bids else 0.0
         best_ask = float(book.asks[0].price) if book and book.asks else 0.0
-        if best_bid <= 0 or best_ask <= 0:
+        # Solo rechazamos si AMBOS lados están vacíos (book muerto total)
+        if best_bid <= 0 and best_ask <= 0:
+            logger.warning("book vacío en %s; no se puede operar", token_id[:12])
             return None
-        if best_bid < 0.02 and best_ask < 0.02:
-            logger.warning("book sospechoso en %s (bid=%.4f ask=%.4f); ignorando",
+        # Si solo un lado tiene precio, derivamos el otro como fallback
+        if best_bid <= 0 and best_ask > 0:
+            best_bid = max(0.01, best_ask - 0.10)
+            logger.warning("book sin bid en %s (ask=%.3f); estimando bid=%.3f para SL",
+                           token_id[:12], best_ask, best_bid)
+        if best_ask <= 0 and best_bid > 0:
+            best_ask = min(0.99, best_bid + 0.10)
+            logger.warning("book sin ask en %s (bid=%.3f); estimando ask=%.3f para SL",
                            token_id[:12], best_bid, best_ask)
-            return None
-        if (best_ask - best_bid) > 0.50:
-            logger.warning("spread anómalo en %s (bid=%.3f ask=%.3f); ignorando",
-                           token_id[:12], best_bid, best_ask)
-            return None
+        # Loggeo informativo si el spread es raro pero seguimos
+        spread = best_ask - best_bid
+        if spread > 0.30:
+            logger.warning("spread amplio en %s (bid=%.3f ask=%.3f spread=%.3f) — SL puede igual disparar",
+                           token_id[:12], best_bid, best_ask, spread)
         return {
             "bid": best_bid,
             "ask": best_ask,
             "mid": (best_bid + best_ask) / 2.0,
         }
     except Exception as exc:
-        logger.debug("get_order_book fallo en %s: %s", token_id[:12], exc)
+        logger.warning("get_order_book fallo en %s: %s", token_id[:12], exc)
         return None
-
 
 def _compute_pnl_pct(entry: float, current: float, side: str) -> float:
     if entry <= 0:
@@ -222,11 +235,11 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                 update_record("CopyTradeProposal", linked[0].get("id"), {"pnl": pnl})
         except Exception:
             pass
-        emoji = "✅" if pnl > 0 else "🔴"
+        emoji = "â" if pnl > 0 else "ð´"
         send_telegram(
-            f"{emoji} <b>{reason.upper()}</b> · pnl=" + f"{pnl:+.4f}" + "\n"
+            f"{emoji} <b>{reason.upper()}</b> Â· pnl=" + f"{pnl:+.4f}" + "\n"
             f"{market_label}\n"
-            f"{side_str} {entry:.3f} → {exit_price:.3f} ({pnl_pct*100:+.1f}%)\n"
+            f"{side_str} {entry:.3f} â {exit_price:.3f} ({pnl_pct*100:+.1f}%)\n"
             f"Filled {filled_shares:.1f} sh"
         )
         log_decision(
@@ -238,7 +251,7 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         )
         return True
 
-    # Todos los intentos fallaron → dust_exit con PnL REAL.
+    # Todos los intentos fallaron â dust_exit con PnL REAL.
     last_err = (res.get("error") or "unknown")[:80]
     estimated_shares = size_tokens_persisted if size_tokens_persisted > 0 else (
         size_usdc / max(0.01, entry)
@@ -291,14 +304,14 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
     except Exception:
         pass
     send_telegram(
-        f"⚠️ <b>DUST_EXIT</b> · no se pudo vender\n"
+        f"â ï¸ <b>DUST_EXIT</b> Â· no se pudo vender\n"
         f"{market_label}\n"
-        f"{side_str} entry {entry:.3f} → mercado {current_price:.3f} "
+        f"{side_str} entry {entry:.3f} â mercado {current_price:.3f} "
         f"({pnl_pct*100:+.1f}%)\n"
         f"PnL contable: <b>{estimated_pnl:+.2f} USDC</b>\n"
         f"Motivo intentado: <code>{reason}</code>\n"
-        f"Último error CLOB: <code>{last_err}</code>\n"
-        f"Saldo on-chain queda hasta resolución."
+        f"Ãltimo error CLOB: <code>{last_err}</code>\n"
+        f"Saldo on-chain queda hasta resoluciÃ³n."
     )
     log_warning(
         "tp_sl_dust_exit",
