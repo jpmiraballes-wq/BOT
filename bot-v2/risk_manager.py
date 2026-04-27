@@ -29,14 +29,29 @@ logger = logging.getLogger(__name__)
 
 
 class RiskManager:
-    """Guardia de riesgo. Persistente via state.json."""
+    """Guardia de riesgo. Persistente via state.json.
 
-    def __init__(self) -> None:
+    RM_NO_FAKE_CAPITAL_V1: __init__ AHORA requiere initial_capital real desde BotConfig.
+    Si initial_capital <= 0 levanta ValueError. No mas fallback fantasma a 0.
+    """
+
+    def __init__(self, initial_capital: float) -> None:
+        try:
+            cap = float(initial_capital)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "RiskManager: initial_capital debe ser numerico, recibido %r" % (initial_capital,)
+            ) from exc
+        if cap <= 0:
+            raise ValueError(
+                "RiskManager: initial_capital debe ser > 0, recibido %.4f. "
+                "Setea BotConfig.capital_usdc en el dashboard." % cap
+            )
         self.state_path: Path = STATE_FILE_PATH
-        self.high_watermark: float = CAPITAL_USDC
-        self.current_equity: float = CAPITAL_USDC
+        self.high_watermark: float = cap
+        self.current_equity: float = cap
         self.daily_pnl: float = 0.0
-        self.daily_anchor_equity: float = CAPITAL_USDC
+        self.daily_anchor_equity: float = cap
         self.daily_anchor_ts: float = time.time()
         self.halted: bool = False
         self.halt_reason: str = ""
@@ -85,14 +100,17 @@ class RiskManager:
 
     # --------------------------------------------------------- persistencia
     def _load(self) -> None:
+        # RM_NO_FAKE_CAPITAL_V1: si state.json no existe o un campo falta, fallback a los
+        # valores ya seteados en __init__ (capital real desde BotConfig).
+        # NUNCA fallback a CAPITAL_USDC del config (que ahora es 0.0 sentinel).
         if self.state_path.exists():
             try:
                 data = json.loads(self.state_path.read_text())
-                self.high_watermark = float(data.get("high_watermark", CAPITAL_USDC))
-                self.current_equity = float(data.get("current_equity", CAPITAL_USDC))
+                self.high_watermark = float(data.get("high_watermark", self.high_watermark))
+                self.current_equity = float(data.get("current_equity", self.current_equity))
                 self.daily_pnl = float(data.get("daily_pnl", 0.0))
                 self.daily_anchor_equity = float(
-                    data.get("daily_anchor_equity", CAPITAL_USDC)
+                    data.get("daily_anchor_equity", self.daily_anchor_equity)
                 )
                 self.daily_anchor_ts = float(data.get("daily_anchor_ts", time.time()))
                 self.halted = bool(data.get("halted", False))
