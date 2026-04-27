@@ -222,18 +222,129 @@ def _fetch_market_end_date(condition_id: str) -> Optional[str]:
         return None
 
 
-def _create_proposal(opp: Dict[str, Any]) -> Optional[str]:
-    """Crea un CopyTradeProposal en Base44 con status='approved'.
+# RADAR_EXECUTION_MODE_V1 — Bolt+Opus+JP 2026-04-27 17:30 Madrid.
+# Importamos update_record acá para no tocar el header del archivo.
+try:
+    from base44_client import update_record as _radar_update_record
+except ImportError:
+    _radar_update_record = None
 
-    El copy_executor lo drena en el siguiente loop (5s).
+
+def _read_radar_breaker() -> Dict[str, Any]:
+    """Lee el record único de RadarCircuitBreaker. Devuelve {} si falla."""
+    try:
+        rows = list_records("RadarCircuitBreaker", limit=1)
+        if isinstance(rows, list) and rows:
+            return rows[0] or {}
+        if isinstance(rows, dict):
+            data = rows.get("data") or rows.get("records") or []
+            return data[0] if data else {}
+    except Exception as exc:
+        logger.warning("radar_breaker read failed: %s", exc)
+    return {}
+
+
+def _bump_breaker_counters(breaker_id: str, paper_id: str) -> None:
+    """Incrementa shadow_trades_count en el record breaker. Best-effort."""
+    if not breaker_id or not _radar_update_record:
+        return
+    try:
+        rows = list_records("RadarCircuitBreaker", limit=1)
+        cur = rows[0] if isinstance(rows, list) and rows else {}
+        new_count = int(cur.get("shadow_trades_count") or 0) + 1
+        _radar_update_record("RadarCircuitBreaker", breaker_id, {
+            "shadow_trades_count": new_count,
+            "last_check_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
+    except Exception as exc:
+        logger.warning("radar_breaker update failed: %s", exc)
+
+
+def _create_proposal(opp: Dict[str, Any]) -> Optional[str]:
+    """Crea PaperTrade (shadow) o CopyTradeProposal (live) según RadarCircuitBreaker.
+
+    - dry_run  → solo log, devuelve None.
+    - shadow   → PaperTrade con strategy='radar_pinnacle' + bump contador.
+    - live     → CopyTradeProposal approved (flujo original) si auto_execute_enabled
+                 y no tripped.
     """
+    breaker = _read_radar_breaker()
+    mode = (breaker.get("radar_execution_mode") or "shadow").lower()
+    breaker_id = breaker.get("id") or ""
+    tripped = bool(breaker.get("tripped"))
+    auto_execute = bool(breaker.get("auto_execute_enabled"))
+
     poly_price = opp["poly_price"]
+    pin_price = opp.get("pinnacle_price") or opp.get("pin_price") or 0.0
+    edge_pct = float(opp.get("edge_pct") or 0.0)
+    market = opp.get("market", "")
+    outcome = opp.get("outcome", "")
+    minutes_to_end = int(opp.get("minutes_to_end", 0))
+
     sl_pct = SL_MULT - 1
     tp_pct = (TP_TARGET / poly_price) - 1 if 0 < poly_price < TP_TARGET else 0.05
 
+    if mode == "dry_run":
+        logger.info(
+            "RADAR_DRY_RUN: %s · %s · poly=%.3f pin=%.3f edge=%.1f%% (no se crea nada)",
+            market[:60], outcome, poly_price, pin_price, edge_pct,
+        )
+        return None
+
+    if mode == "shadow":
+        paper_payload = {
+            "strategy": "radar_pinnacle",
+            "market": market,
+            "token_id": opp.get("condition_id", ""),
+            "condition_id": opp.get("condition_id", ""),
+            "outcome": outcome,
+            "side": "BUY",
+            "entry_price": poly_price,
+            "simulated_entry_price": poly_price,
+            "current_price": poly_price,
+            "size_usdc": TRADE_SIZE_USDC,
+            "status": "open",
+            "entry_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "take_profit_pct": tp_pct,
+            "stop_loss_pct": sl_pct,
+            "max_hold_hours": max(1, int(minutes_to_end / 60) + 24),
+            "signal_metadata": {
+                "source": "radar_pinnacle_mac",
+                "pinnacle_price": pin_price,
+                "edge_pct": edge_pct,
+                "minutes_to_end": minutes_to_end,
+                "sport": opp.get("sport", ""),
+            },
+            "notes": (
+                f"SHADOW | edge {edge_pct:.1f}% | Poly {poly_price:.3f} vs "
+                f"Pin {pin_price:.3f} | {minutes_to_end}min to game"
+            ),
+        }
+        try:
+            res = create_record("PaperTrade", paper_payload)
+            paper_id = res.get("id") if isinstance(res, dict) else None
+            if paper_id:
+                _bump_breaker_counters(breaker_id, paper_id)
+                logger.info(
+                    "RADAR_SHADOW: PaperTrade %s · %s · edge %.1f%% · size $%.0f",
+                    str(paper_id)[:8], market[:50], edge_pct, TRADE_SIZE_USDC,
+                )
+            return paper_id
+        except Exception as exc:
+            logger.warning("radar shadow PaperTrade failed: %s", exc)
+            return None
+
+    # mode == "live"
+    if tripped:
+        logger.info("RADAR_LIVE_BLOCKED: circuit breaker tripped, no se crea proposal")
+        return None
+    if not auto_execute:
+        logger.info("RADAR_LIVE_BLOCKED: auto_execute_enabled=false, no se crea proposal")
+        return None
+
     payload = {
         "status": "approved",
-        "quality_score": min(100, round(opp["edge_pct"] * 4)),
+        "quality_score": min(100, round(edge_pct * 4)),
         "whale_count": 0,
         "whale_names": ["radar_pinnacle_mac"],
         "whale_addresses": [],
@@ -241,11 +352,11 @@ def _create_proposal(opp: Dict[str, Any]) -> Optional[str]:
         "market_end_date": opp.get("commence_time"),
         "avg_whale_wr": 0,
         "total_whale_usdc": 0,
-        "market_question": opp.get("market", ""),
+        "market_question": market,
         "market_slug": opp.get("slug", ""),
         "condition_id": opp.get("condition_id", ""),
         "token_id": opp.get("condition_id", ""),
-        "outcome": opp.get("outcome", ""),
+        "outcome": outcome,
         "side": "BUY",
         "entry_price": poly_price,
         "suggested_size_usdc": TRADE_SIZE_USDC,
@@ -255,11 +366,17 @@ def _create_proposal(opp: Dict[str, Any]) -> Optional[str]:
         "category": "sports",
         "tier": "radar_pinnacle",
         "rejection_reason": (
-            f"mac_radar_edge_{opp['edge_pct']:.1f}pct_{int(opp.get('minutes_to_end', 0))}min"
+            f"mac_radar_edge_{edge_pct:.1f}pct_{minutes_to_end}min"
         ),
     }
     res = create_record("CopyTradeProposal", payload)
-    return res.get("id") if isinstance(res, dict) else None
+    proposal_id = res.get("id") if isinstance(res, dict) else None
+    if proposal_id:
+        logger.info(
+            "RADAR_LIVE: Proposal %s · %s · edge %.1f%%",
+            str(proposal_id)[:8], market[:50], edge_pct,
+        )
+    return proposal_id
 
 
 def run_radar_once() -> Dict[str, Any]:
