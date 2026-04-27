@@ -49,9 +49,35 @@ AGGRESSIVE_DISCOUNT_USD = 0.02
 
 # TP_SL_MID_DOUBLE_CONFIRM_V1 — Bolt audit 2026-04-27
 # Doble confirmación para SL catastrófico (<-40%).
-SL_CATASTROPHIC_THRESHOLD = -0.40
+# TP_SL_THRESHOLD_AGE_V1 FIX A — JP 2026-04-27: bajado de -0.40 a -0.20.
+# Caso Tsitsipas: SL disparó a -29.6% en 41s post-fill, threshold -40% NO lo
+# atrapó. -20% sí captura el caso y obliga a esperar 30s + 2da lectura.
+SL_CATASTROPHIC_THRESHOLD = -0.20
 SL_CONFIRM_SECONDS = 30.0
 _sl_pending: Dict[str, float] = {}
+
+# TP_SL_THRESHOLD_AGE_V1 FIX B — JP 2026-04-27: trade_min_age 90s.
+# Los libros CLOB post-fill son ruidosos los primeros ~90s.
+# No dispara SL hasta que el book se estabilice.
+TRADE_MIN_AGE_SECONDS = 90.0
+
+
+def _is_too_young(pos: Dict[str, Any]) -> bool:
+    """True = el trade es muy joven, NO disparar SL."""
+    opened_ts = pos.get("opened_at_ts")
+    if not opened_ts:
+        return False
+    try:
+        age = time.time() - float(opened_ts)
+        if age < TRADE_MIN_AGE_SECONDS:
+            logger.info(
+                "TRADE_MIN_AGE: pos %s age=%.1fs < %.0fs, SL bloqueado",
+                str(pos.get("id", ""))[:8], age, TRADE_MIN_AGE_SECONDS,
+            )
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def _should_block_sl(pos_id: str, pnl_pct: float) -> bool:
@@ -185,7 +211,10 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                     reason: str, pnl_pct: float) -> bool:
     """Cascada: GTC limit -> balance reduce -> FAK cross -> aggressive FAK -> dust_exit."""
     pos_id = pos.get("id")
-    # TP_SL_MID_DOUBLE_CONFIRM_V1: bloquear SL catastrófico (<-40%) sin doble confirmación.
+    # TP_SL_THRESHOLD_AGE_V1 FIX B: bloquear SL si el trade tiene <90s de vida (book ruidoso).
+    if reason == "stop_loss" and _is_too_young(pos):
+        return False
+    # TP_SL_MID_DOUBLE_CONFIRM_V1 + TP_SL_THRESHOLD_AGE_V1 FIX A: bloquear SL <-20% sin doble confirmación.
     if reason == "stop_loss" and pos_id and _should_block_sl(pos_id, pnl_pct):
         return False
     token_id = pos.get("token_id")
