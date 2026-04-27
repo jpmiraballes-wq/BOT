@@ -81,11 +81,30 @@ class Reporter:
             logger.error("Error reportando a Base44: %s", exc)
 
     def send_minimal_heartbeat(self, mode="running", notes=""):
-        """Heartbeat de fallback: no depende de rm/om ni del CLOB.
+        """REPORTER_ZOMBIE_GUARD_V1
+        Heartbeat de fallback: ANTES posteaba SystemState con todos los campos
+        en 0 cuando build_snapshot() fallaba. Eso causaba el "reporter zombie":
+        cada ~5min el dashboard veia datos vacios que pisaban el snapshot bueno.
 
-        Uso: cuando build_snapshot() falla (ej: CLOB caido), llamar a esto
-        para que el dashboard siga viendo al bot como vivo.
+        FIX 2026-04-27 JP+Opus: este metodo ya NO escribe ceros. Solo loggea
+        que el snapshot fallo. El dashboard mantiene el ultimo registro bueno
+        (con last_heartbeat un poco viejo) hasta que el proximo build_snapshot
+        funcione y mande datos reales.
+
+        Si necesitas avisar al dashboard que el bot esta vivo pero sin datos,
+        agregar un campo SystemState.is_partial=True y hacer PATCH al ultimo
+        registro en vez de POST nuevo. Por ahora, lo mas seguro es no hacer nada.
         """
+        if not BASE44_API_KEY:
+            return
+        logger.warning(
+            "REPORTER_ZOMBIE_GUARD: build_snapshot fallo, NO escribo ceros. notes=%s",
+            str(notes)[:100],
+        )
+        return  # No mas zombies pisando el dashboard.
+
+    def _OLD_send_minimal_heartbeat_DEPRECATED(self, mode="running", notes=""):
+        """Codigo viejo preservado por si JP quiere revertir. NO se usa."""
         if not BASE44_API_KEY:
             return
         payload = {
