@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions  # ORDER_ARGS_PARTIAL_OPTIONS_V1
 from py_clob_client.order_builder.constants import BUY, SELL
 
 import os
@@ -494,14 +494,20 @@ class CopyExecutor:
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                # ORDER_ARGS_REMOVE_NEG_RISK_KWARG_V1: neg_risk fuera del OrderArgs (SDK py_clob_client
-                # no lo acepta como kwarg del constructor). Si en el futuro
-                # actualizamos la lib y soporta options, se vuelve a meter.
+                # ORDER_ARGS_PARTIAL_OPTIONS_V1: el SDK py-clob-client recibe neg_risk via
+                # PartialCreateOrderOptions como 2do arg de create_order.
+                # Sin options, hace auto-resolve con get_neg_risk() que miente
+                # a veces y firma contra el contrato equivocado → 400
+                # order_version_mismatch. is_neg_risk viene del cache de
+                # NEG_RISK_AWARE_V1 (con flip en retry de V1/V2).
                 args = OrderArgs(
                     token_id=token_id, price=limit_price,
                     size=size_shares, side=side_const,
                 )
-                signed = self.client.create_order(args)
+                signed = self.client.create_order(
+                    args,
+                    PartialCreateOrderOptions(neg_risk=is_neg_risk),
+                )
                 resp = self.client.post_order(signed, OrderType.FAK) or {}  # ORDER_TYPE_FAK_RESTORE_V1: FAK = fill-and-kill (era GTC y expiraba a 5min sin llenar)
                 order_id = resp.get("orderID") or resp.get("orderId")
                 status = resp.get("status")
