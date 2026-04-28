@@ -29,7 +29,9 @@ from base44_client import create_record, list_records
 logger = logging.getLogger("arbitrage_radar")
 
 # Config
-RADAR_INTERVAL_SECONDS = int(os.environ.get("RADAR_INTERVAL_SECONDS", "60"))
+# ODDS_API_OPT_V1 — JP+Opus 2026-04-28: subido de 60s a 900s (15min). Pre-game arb no
+# necesita resolución de 1min. Bajamos consumo Odds API ~66%.
+RADAR_INTERVAL_SECONDS = int(os.environ.get("RADAR_INTERVAL_SECONDS", "900"))
 MIN_EDGE_PCT = float(os.environ.get("RADAR_MIN_EDGE_PCT", "5.0"))
 MAX_EDGE_PCT = float(os.environ.get("RADAR_MAX_EDGE_PCT", "25.0"))
 MIN_VOLUME_USDC = float(os.environ.get("RADAR_MIN_VOLUME_USDC", "5000"))
@@ -160,7 +162,7 @@ def _fetch_odds_api_events(sport_key: str) -> List[Dict[str, Any]]:
             f"{ODDS_API_BASE}/{sport_key}/odds/",
             params={
                 "apiKey": ODDS_API_KEY,
-                "regions": "eu,us,uk",
+                "regions": "eu",  # ODDS_API_OPT_V1 JP+Opus 2026-04-28: solo eu (Pinnacle vive ahí). -50% créditos.
                 "markets": "h2h",
                 "oddsFormat": "decimal",
                 "bookmakers": "pinnacle,betfair_ex_uk,williamhill,bet365,unibet_eu,marathonbet",
