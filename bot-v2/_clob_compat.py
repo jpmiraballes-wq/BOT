@@ -120,6 +120,28 @@ class ClobClient(_V2ClobClient):
         )
 
 
+# ── V1 → V2 method aliases ─────────────────────────────────────
+    def get_orders(self, *args, **kwargs):
+        """V1 alias: client.get_orders() → V2 client.get_open_orders()."""
+        return self.get_open_orders(*args, **kwargs)
+
+    def cancel(self, order_id: str = None, **kwargs):
+        """V1 alias: client.cancel(order_id=X) → V2 client.cancel_order(OrderPayload(orderID=X))."""
+        oid = order_id or kwargs.get("orderID") or kwargs.get("order_id")
+        if not oid:
+            raise ValueError("cancel() requires order_id")
+        try:
+            from py_clob_client_v2 import OrderPayload  # type: ignore
+            return self.cancel_order(OrderPayload(orderID=oid))
+        except ImportError:
+            # Fallback: si OrderPayload no se exporta, pasamos un objeto duck-typed.
+            class _P:
+                pass
+            p = _P()
+            p.orderID = oid
+            return self.cancel_order(p)
+
+
 __all__ = [
     "ClobClient",
     "OrderArgs",
