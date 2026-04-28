@@ -83,41 +83,34 @@ def _normalize_order_args(args: Any) -> OrderArgs:
     return args
 
 
-class _PendingOrder:
-    """Buffer que devuelve create_order(); post_order() lo despacha."""
-    __slots__ = ("args", "options")
-
-    def __init__(self, args: OrderArgs, options: Optional[PartialCreateOrderOptions] = None):
-        self.args = args
-        self.options = options
-
-
 class ClobClient(_V2ClobClient):
     """Sub-clase V2 con la API legacy de V1.
 
-    create_order(args, options=None) → _PendingOrder (no firma todavía)
-    post_order(_PendingOrder, order_type=OrderType.GTC) → dict respuesta CLOB
+    create_order(args, options=None) → SignedOrder (firma inmediata, igual que V1)
+    post_order(signed, order_type=GTC, **kw) → dict respuesta CLOB (passthrough V2)
 
-    Esto es semánticamente equivalente al flujo V1
-    (V1 firmaba en create_order y enviaba en post_order; V2 hace ambas en
-    create_and_post_order). El shim difiere la firma hasta post_order para
-    mantener la firma de los call-sites existentes intactos.
+    Diseño:
+    - V1 firmaba en create_order y enviaba en post_order. Replicamos eso
+      llamando al create_order REAL de V2 (que firma y retorna SignedOrder).
+      Si el call-site pasó OrderArgs con side="BUY" string, lo coercionamos
+      antes a Side.BUY.
+    - post_order es un passthrough directo al post_order de V2, que ya acepta
+      la firma (signed, order_type=GTC, post_only=False, defer_exec=False).
+      Si por error nos pasan un OrderArgs sin firmar, lo firmamos al vuelo.
     """
 
     def create_order(self, order_args: OrderArgs,
-                     options: Optional[PartialCreateOrderOptions] = None) -> _PendingOrder:
-        return _PendingOrder(_normalize_order_args(order_args), options)
+                     options: Optional[PartialCreateOrderOptions] = None):
+        # super().create_order firma y devuelve un SignedOrder V2.
+        return super().create_order(_normalize_order_args(order_args), options)
 
-    def post_order(self, pending: _PendingOrder,
-                   order_type: OrderType = OrderType.GTC):
-        if not isinstance(pending, _PendingOrder):
-            # Por si algún call-site pasa directamente OrderArgs (defensive).
-            pending = _PendingOrder(_normalize_order_args(pending), None)
-        return self.create_and_post_order(
-            order_args=pending.args,
-            options=pending.options,
-            order_type=order_type,
-        )
+    def post_order(self, order, order_type: OrderType = OrderType.GTC,
+                   *args, **kwargs):
+        # Defensive: si nos pasan OrderArgs sin firmar (bug de un call-site),
+        # firmamos antes de despachar.
+        if isinstance(order, OrderArgs):
+            order = super().create_order(_normalize_order_args(order), None)
+        return super().post_order(order, order_type, *args, **kwargs)
 
 
 # ── V1 → V2 method aliases ─────────────────────────────────────
