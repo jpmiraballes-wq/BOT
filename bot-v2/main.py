@@ -298,24 +298,41 @@ def main() -> int:
             except Exception as exc:
                 logger.error("logical_arb fallo: %s", exc)
 
-            opportunities = scan_markets()
-            opportunities = [o for o in opportunities if cb.filter_opportunity(o)]
-            logger.info("Oportunidades MM tras filtros: %d", len(opportunities))
-
-            deployed = _current_deployed()
-            ok, msg = rm.enforce_exposure_cap(deployed)
-            if not ok:
-                logger.warning("Cap de exposicion superado.")
-                om.cancel_all()
-                reporter.report(build_snapshot("paused", rm, om, notes=msg), force=True)
-                time.sleep(MAIN_LOOP_INTERVAL_SECONDS)
-                continue
-
-            if rm.can_open_new_position(deployed):
-                om.refresh(opportunities, size_fn)
+            # MM_FLAG_GUARD_V1 — chequea flag market_maker en BotConfig antes de scan/refresh.
+            # Si está apagado, saltamos scan_markets() y om.refresh() para evitar
+            # ruido order_version_mismatch. Solo dejamos cancel_stale_orders.
+            mm_enabled = True
+            if fetch_bot_config is not None:
+                try:
+                    _cfg = fetch_bot_config() or {}
+                    mm_enabled = bool(_cfg.get("strategy_market_maker", False))
+                except Exception as _exc:
+                    logger.debug("fetch_bot_config fallo (%s); asumo MM apagado", _exc)
+                    mm_enabled = False
             else:
-                logger.info("Sin capital desplegable; solo mantenimiento.")
+                mm_enabled = False
+
+            if not mm_enabled:
                 om.cancel_stale_orders()
+            else:
+                opportunities = scan_markets()
+                opportunities = [o for o in opportunities if cb.filter_opportunity(o)]
+                logger.info("Oportunidades MM tras filtros: %d", len(opportunities))
+
+                deployed = _current_deployed()
+                ok, msg = rm.enforce_exposure_cap(deployed)
+                if not ok:
+                    logger.warning("Cap de exposicion superado.")
+                    om.cancel_all()
+                    reporter.report(build_snapshot("paused", rm, om, notes=msg), force=True)
+                    time.sleep(MAIN_LOOP_INTERVAL_SECONDS)
+                    continue
+
+                if rm.can_open_new_position(deployed):
+                    om.refresh(opportunities, size_fn)
+                else:
+                    logger.info("Sin capital desplegable; solo mantenimiento.")
+                    om.cancel_stale_orders()
 
             reporter.report(build_snapshot("running", rm, om))
 
