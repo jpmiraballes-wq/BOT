@@ -553,8 +553,14 @@ class CopyExecutor:
                 # (libro se movió entre firma y envío). Retry inmediato re-firmando.
                 exc_str = str(exc).lower()
                 if "order_version_mismatch" in exc_str:
+                    # ORDER_VERSION_FLIP_NEG_RISK_V2_EXCEPT_PATH: el mismatch viene de neg_risk equivocado
+                    # (get_neg_risk a veces miente). Flippeamos el flag y
+                    # actualizamos cache antes del retry, igual que V1 pero
+                    # en este path de excepción real del SDK.
+                    is_neg_risk = not is_neg_risk
+                    self._neg_risk_cache[token_id] = is_neg_risk
                     log_warning(
-                        "order_version_mismatch_retry",
+                        "order_version_mismatch_retry_flip_neg_risk_except",
                         module="copy_executor",
                         extra={
                             "attempt": attempt,
@@ -563,12 +569,13 @@ class CopyExecutor:
                             "side": side_str,
                             "price": limit_price,
                             "shares": size_shares,
+                            "neg_risk_now": is_neg_risk,
                             "err": str(exc)[:160],
                             "path": "exception",
                         },
                     )
                     if attempt < MAX_RETRIES:
-                        continue  # re-loop: re-firma OrderArgs con tick fresh
+                        continue  # re-loop: re-firma OrderArgs con neg_risk flipped
                     return (None, 0.0, exc)
                 kind = pmapi.classify_error(exc)
                 if kind == "rejected" or kind == "auth":
