@@ -516,6 +516,28 @@ class CopyExecutor:
 
             except Exception as exc:
                 last_error = exc
+                # ORDER_VERSION_RETRY_V2: order_version_mismatch viene como PolyApiException
+                # del SDK. classify_error() lo marca rejected pero ES transient
+                # (libro se movió entre firma y envío). Retry inmediato re-firmando.
+                exc_str = str(exc).lower()
+                if "order_version_mismatch" in exc_str:
+                    log_warning(
+                        "order_version_mismatch_retry",
+                        module="copy_executor",
+                        extra={
+                            "attempt": attempt,
+                            "max_retries": MAX_RETRIES,
+                            "token_id": (token_id or "")[-12:],
+                            "side": side_str,
+                            "price": limit_price,
+                            "shares": size_shares,
+                            "err": str(exc)[:160],
+                            "path": "exception",
+                        },
+                    )
+                    if attempt < MAX_RETRIES:
+                        continue  # re-loop: re-firma OrderArgs con tick fresh
+                    return (None, 0.0, exc)
                 kind = pmapi.classify_error(exc)
                 if kind == "rejected" or kind == "auth":
                     # Definitivo, no retry
