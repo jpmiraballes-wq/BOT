@@ -135,14 +135,15 @@ class RiskManager:
             self.daily_anchor_equity = float(
                 data.get("daily_anchor_equity", self.daily_anchor_equity)
             )
-                self.daily_anchor_ts = float(data.get("daily_anchor_ts", time.time()))
-                self.halted = bool(data.get("halted", False))
-                self.halt_reason = str(data.get("halt_reason", ""))
-                logger.info("Estado cargado: HWM=%.2f equity=%.2f halted=%s",
-                            self.high_watermark, self.current_equity, self.halted)
-            except Exception as exc:
-                logger.error("No se pudo leer %s: %s. Usando defaults.",
-                             self.state_path, exc)
+            # RM_INDENT_FIX_V1 — reindentado: estas 5 lineas estaban con 16 espacios.
+            self.daily_anchor_ts = float(data.get("daily_anchor_ts", time.time()))
+            self.halted = bool(data.get("halted", False))
+            self.halt_reason = str(data.get("halt_reason", ""))
+            logger.info("Estado cargado: HWM=%.2f equity=%.2f halted=%s",
+                        self.high_watermark, self.current_equity, self.halted)
+        except Exception as exc:
+            logger.error("No se pudo leer %s: %s. Usando defaults.",
+                         self.state_path, exc)
 
     def _save(self) -> None:
         try:
