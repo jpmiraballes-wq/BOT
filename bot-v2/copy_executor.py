@@ -440,7 +440,7 @@ class CopyExecutor:
         # Error definitivo tras retries
         kind = pmapi.classify_error(error) if error else "unknown"
         if kind == "rejected" or kind == "auth":
-            self._mark_closed(pos_id, f"rejected:{str(error)[:80]}", market_label)
+            self._mark_closed(pos_id, f"rejected:{str(error)[:400]}", market_label)
             _alert_once(
                 f"rej:{pos_id}",
                 f"ÃÂ¢ÃÂÃÂ <b>Copy-trade rechazado</b>\n{market_label}\n"
@@ -467,11 +467,37 @@ class CopyExecutor:
         side_const = BUY if side_str == "BUY" else SELL
         last_error: Optional[Exception] = None
 
+        # NEG_RISK_AWARE_V1: detectar neg_risk del token (multi-outcome events
+        # como Slams/Masters viven en el Neg Risk CTF Exchange y firmar
+        # contra el contrato equivocado da order_version_mismatch).
+        # Cacheamos en self._neg_risk_cache por token_id.
+        if not hasattr(self, "_neg_risk_cache"):
+            self._neg_risk_cache = {}
+        is_neg_risk = self._neg_risk_cache.get(token_id)
+        if is_neg_risk is None:
+            try:
+                is_neg_risk = bool(self.client.get_neg_risk(token_id))
+            except Exception as _nr_exc:
+                logger.warning(
+                    "get_neg_risk fallo token=%s err=%s; asumo False",
+                    (token_id or "")[-12:], str(_nr_exc)[:120],
+                )
+                is_neg_risk = False
+            self._neg_risk_cache[token_id] = is_neg_risk
+            log_decision(
+                reason="neg_risk_detected",
+                market=market_label,
+                strategy="whale_consensus",
+                extra={"token_id": (token_id or "")[-12:],
+                       "neg_risk": is_neg_risk},
+            )
+
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 args = OrderArgs(
                     token_id=token_id, price=limit_price,
                     size=size_shares, side=side_const,
+                    neg_risk=is_neg_risk,
                 )
                 signed = self.client.create_order(args)
                 resp = self.client.post_order(signed, OrderType.GTC) or {}  # GTC_5MIN_V1
