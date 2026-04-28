@@ -467,7 +467,7 @@ class CopyExecutor:
         side_const = BUY if side_str == "BUY" else SELL
         last_error: Optional[Exception] = None
 
-        # NEG_RISK_AWARE_V1: detectar neg_risk del token (multi-outcome events
+        # NEG_RISK_AWARE_V1 + ORDER_VERSION_FLIP_NEG_RISK_V1: detectar neg_risk del token (multi-outcome events
         # como Slams/Masters viven en el Neg Risk CTF Exchange y firmar
         # contra el contrato equivocado da order_version_mismatch).
         # Cacheamos en self._neg_risk_cache por token_id.
@@ -510,8 +510,13 @@ class CopyExecutor:
                     # ORDER_VERSION_RETRY_V1: order_version_mismatch es transient (libro se
                     # movio entre firma y envio). Retry inmediato re-firmando.
                     if "order_version_mismatch" in err_msg.lower():
+                        # ORDER_VERSION_FLIP_NEG_RISK_V1: el mismatch suele venir
+                        # de neg_risk equivocado (get_neg_risk a veces miente).
+                        # Flippeamos el flag y actualizamos cache antes del retry.
+                        is_neg_risk = not is_neg_risk
+                        self._neg_risk_cache[token_id] = is_neg_risk
                         log_warning(
-                            "order_version_mismatch_retry",
+                            "order_version_mismatch_retry_flip_neg_risk",
                             module="copy_executor",
                             extra={
                                 "attempt": attempt,
@@ -520,6 +525,7 @@ class CopyExecutor:
                                 "side": side_str,
                                 "price": limit_price,
                                 "shares": size_shares,
+                                "neg_risk_now": is_neg_risk,
                                 "err": err_msg[:160],
                             },
                         )
