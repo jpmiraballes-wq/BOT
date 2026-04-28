@@ -70,6 +70,34 @@ PANIC_DRAWDOWN_THRESHOLD = -0.30
 PANIC_MIN_AGE_SECONDS = 300.0
 
 
+
+def _best_level_price(book, side: str) -> float:
+    """Lee el mejor precio de un order book devuelto por py_clob_client_v2.
+
+    V2 devuelve dict ({"bids": [{"price": "0.49", "size": "100"}, ...], "asks": [...]}).
+    Esto es robusto tambien al formato V1 (objeto con .bids/.asks y cada level con .price).
+    """
+    if not book:
+        return 0.0
+    try:
+        levels = book[side] if isinstance(book, dict) else getattr(book, side, None)
+    except Exception:
+        levels = None
+    if not levels:
+        return 0.0
+    top = levels[0]
+    try:
+        raw = top["price"] if isinstance(top, dict) else getattr(top, "price", None)
+    except Exception:
+        raw = None
+    if raw is None:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _is_too_young(pos: Dict[str, Any]) -> bool:
     """True = el trade es muy joven, NO disparar SL."""
     opened_ts = pos.get("opened_at_ts")
@@ -132,8 +160,8 @@ def _fetch_book(client, token_id: str) -> Optional[Dict[str, float]]:
     """
     try:
         book = client.get_order_book(token_id)
-        best_bid = float(book.bids[0].price) if book and book.bids else 0.0
-        best_ask = float(book.asks[0].price) if book and book.asks else 0.0
+        best_bid = _best_level_price(book, "bids")
+        best_ask = _best_level_price(book, "asks")
         # Solo rechazamos si AMBOS lados estan vacios (book muerto total)
         if best_bid <= 0 and best_ask <= 0:
             logger.warning("book vacio en %s; no se puede operar", token_id[:12])
