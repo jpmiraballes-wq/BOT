@@ -563,7 +563,7 @@ class OrderManager:
         try:
             # Best bid via orderbook publico (no requiere auth)
             import requests as _rq
-            resp = _rq.get("https://clob-v2.polymarket.com/book",
+            resp = _rq.get("https://clob.polymarket.com/book",
                           params={"token_id": token_id}, timeout=10)
             if resp.status_code != 200:
                 logger.warning("close: book HTTP %d", resp.status_code)

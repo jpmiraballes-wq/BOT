@@ -18,7 +18,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-CLOB_BASE = "https://clob-v2.polymarket.com"
+CLOB_BASE = "https://clob.polymarket.com"
 DEFAULT_TIMEOUT = 8.0
 
 # Cache de tick size por token_id (TTL 1h). Raramente cambia.

@@ -27,7 +27,7 @@ from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL, GAMMA_API_URL
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 15
-CLOB_BASE_URL = "https://clob-v2.polymarket.com"
+CLOB_BASE_URL = "https://clob.polymarket.com"
 
 # Umbrales Binary Under
 BINARY_PREFILTER_THRESHOLD = 0.98     # Gamma: aceptamos hasta 0.98 para no perder candidatos

@@ -18,7 +18,7 @@ from config import DRY_RUN
 
 logger = logging.getLogger(__name__)
 
-CLOB_PRICE_URL = "https://clob-v2.polymarket.com/price"
+CLOB_PRICE_URL = "https://clob.polymarket.com/price"
 REQUEST_TIMEOUT = 8
 MAX_FAIL_ATTEMPTS = 3
 _FAIL_COUNTS = {}
@@ -194,7 +194,7 @@ def _close_position(om, pos, pnl_pct, reason, current_price):
             return False
     if token_id:
         try:
-            bal_url = "https://clob-v2.polymarket.com/balance-allowance"
+            bal_url = "https://clob.polymarket.com/balance-allowance"
             bal_params = {
                 "asset_type": "CONDITIONAL",
                 "token_id": str(token_id),

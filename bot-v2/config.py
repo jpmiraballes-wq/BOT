@@ -92,7 +92,7 @@ STOP_LOSS_PCT = -0.30
 # Polymarket
 # ---------------------------------------------------------------------------
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
-CLOB_API_URL = "https://clob-v2.polymarket.com"
+CLOB_API_URL = "https://clob.polymarket.com"
 POLYGON_CHAIN_ID = 137
 
 # ---------------------------------------------------------------------------
