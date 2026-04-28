@@ -72,10 +72,12 @@ PANIC_MIN_AGE_SECONDS = 300.0
 
 
 def _best_level_price(book, side: str) -> float:
-    """Lee el mejor precio de un order book devuelto por py_clob_client_v2.
+    """Lee el mejor precio del order book devuelto por py_clob_client_v2.
 
-    V2 devuelve dict ({"bids": [{"price": "0.49", "size": "100"}, ...], "asks": [...]}).
-    Esto es robusto tambien al formato V1 (objeto con .bids/.asks y cada level con .price).
+    V2 devuelve dict ({"bids": [{"price": "0.49", "size": "..."}, ...], "asks": [...]}).
+    El order book V2 viene ordenado peor->mejor (bids ascendente, asks descendente),
+    asi que tomamos max() para bids y min() para asks. Robusto tambien a obj-attr (V1)
+    y al orden inverso.
     """
     if not book:
         return 0.0
@@ -85,17 +87,22 @@ def _best_level_price(book, side: str) -> float:
         levels = None
     if not levels:
         return 0.0
-    top = levels[0]
-    try:
-        raw = top["price"] if isinstance(top, dict) else getattr(top, "price", None)
-    except Exception:
-        raw = None
-    if raw is None:
+    prices = []
+    for lvl in levels:
+        try:
+            raw = lvl["price"] if isinstance(lvl, dict) else getattr(lvl, "price", None)
+        except Exception:
+            raw = None
+        if raw is None:
+            continue
+        try:
+            prices.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    if not prices:
         return 0.0
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
+    # bids -> el mas alto es el mejor; asks -> el mas bajo es el mejor.
+    return max(prices) if side == "bids" else min(prices)
 
 
 def _is_too_young(pos: Dict[str, Any]) -> bool:
