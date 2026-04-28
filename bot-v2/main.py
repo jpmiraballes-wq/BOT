@@ -203,11 +203,69 @@ def main() -> int:
 
     size_fn = build_size_fn(sizer, rm, cb, _current_deployed)
 
+    # AUTO_PULL_ON_LOOP_V1 — auto-update silencioso. Cada ~60 iter (~5min con loop=5s)
+    # comparamos HEAD local vs origin/main. Si hay commit nuevo, pull + exit 0.
+    # run_bot.sh detecta exit 0 y relanza con código nuevo en 2s.
+    import subprocess
+    _AUTO_PULL_EVERY = 60  # cada 60 iteraciones del loop principal
+    def _check_and_pull():
+        try:
+            bot_dir = os.path.dirname(os.path.abspath(__file__))
+            # 1) git fetch silencioso (3s timeout)
+            subprocess.run(
+                ["git", "fetch", "origin", "main"],
+                cwd=bot_dir, timeout=10, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            # 2) Comparar HEADs
+            local = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=bot_dir, timeout=3
+            ).decode().strip()
+            remote = subprocess.check_output(
+                ["git", "rev-parse", "origin/main"], cwd=bot_dir, timeout=3
+            ).decode().strip()
+            if local == remote:
+                return False  # no hay update
+            # 3) Hay commit nuevo: pull + log + exit clean
+            logger.warning("AUTO_PULL: nuevo commit %s -> %s. Pulling y reiniciando.",
+                           local[:8], remote[:8])
+            log_warning(
+                "auto_pull_triggered",
+                module="main",
+                extra={"local_sha": local[:12], "remote_sha": remote[:12]},
+            )
+            subprocess.run(
+                ["git", "pull", "--ff-only", "origin", "main"],
+                cwd=bot_dir, timeout=15, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return True  # caller debe sys.exit(0)
+        except Exception as _exc:
+            logger.debug("auto_pull check fallo (%s); ignorando", _exc)
+            return False
+
     iteration = 0
     while not _stop_requested:
         iteration += 1
         loop_started = time.time()
         try:
+            # AUTO_PULL_ON_LOOP_V1 — check periódico de update.
+            if iteration > 1 and iteration % _AUTO_PULL_EVERY == 0:
+                if _check_and_pull():
+                    # Apagado limpio antes de salir con 0
+                    try:
+                        om.cancel_stale_orders()
+                    except Exception:
+                        pass
+                    try:
+                        reporter.report(
+                            build_snapshot("running", rm, om, notes="auto_pull_restart"),
+                            force=True,
+                        )
+                    except Exception:
+                        pass
+                    logger.info("Saliendo limpio (exit=0) para que run_bot.sh relance.")
+                    sys.exit(0)
             if rm.is_halted() or SHUTDOWN_FLAG_PATH.exists():
                 logger.critical("Halt activo (%s).", rm.halt_reason or "shutdown.flag")
                 om.cancel_all()
