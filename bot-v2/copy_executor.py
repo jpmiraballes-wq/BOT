@@ -479,9 +479,29 @@ class CopyExecutor:
                 status = resp.get("status")
 
                 if status == "rejected" or (resp.get("error") and not order_id):
-                    err_msg = resp.get("error") or status or "rejected_unknown"
+                    err_msg = str(resp.get("error") or status or "rejected_unknown")
                     last_error = RuntimeError(f"rejected:{err_msg}")
-                    # Rechazo explicito: no tiene sentido retry
+                    # ORDER_VERSION_RETRY_V1: order_version_mismatch es transient (libro se
+                    # movio entre firma y envio). Retry inmediato re-firmando.
+                    if "order_version_mismatch" in err_msg.lower():
+                        log_warning(
+                            "order_version_mismatch_retry",
+                            module="copy_executor",
+                            extra={
+                                "attempt": attempt,
+                                "max_retries": MAX_RETRIES,
+                                "token_id": (token_id or "")[-12:],
+                                "side": side_str,
+                                "price": limit_price,
+                                "shares": size_shares,
+                                "err": err_msg[:160],
+                            },
+                        )
+                        if attempt < MAX_RETRIES:
+                            continue  # re-loop: re-firma OrderArgs con tick fresh
+                        # Agotamos retries
+                        return (None, 0.0, last_error)
+                    # Rechazo explicito (no version mismatch): no tiene sentido retry
                     return (None, 0.0, last_error)
 
                 if not order_id:
