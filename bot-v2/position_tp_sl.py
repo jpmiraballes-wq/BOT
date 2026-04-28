@@ -495,15 +495,17 @@ def manage_open_positions(client) -> Dict[str, int]:
         # Si pnl <= -30% y age >= 5min, vender al market sin más checks.
         opened_ts_panic = pos.get("opened_at_ts")
         age_seconds_panic = (time.time() - float(opened_ts_panic)) if opened_ts_panic else 0.0
-        if pnl_pct <= PANIC_DRAWDOWN_THRESHOLD and age_seconds_panic >= PANIC_MIN_AGE_SECONDS:
+        # PANIC_EXIT_AGE_GUARD_V2 — descartar age fantasma (opened_at_ts roto/ausente)
+        # Caso Mumbai vs Sunrisers 2026-04-28: age=15727089s (182 dias) por opened_at_ts
+        # roto/ausente disparaba PANIC_EXIT a los 7s de abrir. Bloquear si age es no-confiable.
+        _age_invalid = (age_seconds_panic < 0) or (age_seconds_panic > 86400)
+        if _age_invalid and pnl_pct <= PANIC_DRAWDOWN_THRESHOLD:
             logger.warning(
-            # PANIC_EXIT_AGE_GUARD_V1 — descartar age fantasma (opened_at_ts roto/ausente)
-            if age_sec < 0 or age_sec > 86400:
-                logger.warning(
-                    "PANIC_EXIT_AGE_GUARD: pos %s age=%.0fs invalido (timestamp roto), panic_exit BLOQUEADO",
-                    str(pos.get('id', ''))[:8], age_sec,
-                )
-                continue
+                "PANIC_EXIT_AGE_GUARD: pos %s age=%.0fs invalido (timestamp roto), panic_exit BLOQUEADO",
+                str(pos.get("id", ""))[:8], age_seconds_panic,
+            )
+        if (not _age_invalid) and pnl_pct <= PANIC_DRAWDOWN_THRESHOLD and age_seconds_panic >= PANIC_MIN_AGE_SECONDS:
+            logger.warning(
                 "PANIC_EXIT triggered: pos=%s pnl=%.1f%% age=%.0fs (threshold %.0f%% / %.0fs)",
                 str(pos.get("id", ""))[:8], pnl_pct * 100, age_seconds_panic,
                 PANIC_DRAWDOWN_THRESHOLD * 100, PANIC_MIN_AGE_SECONDS,
