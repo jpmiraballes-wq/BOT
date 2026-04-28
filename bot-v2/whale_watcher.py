@@ -140,7 +140,9 @@ _FAST_PATH_TENNIS_TOP_KEYWORDS = (
 # no $200. Y favoritos >70c perdieron 5/5 ayer. Underdog 11c (Pridankina) ganaba.
 _FAST_PATH_MIN_PRICE = 0.35
 _FAST_PATH_MAX_PRICE = 0.72
-_FAST_PATH_MIN_USDC = 30.0
+# FAST_PATH_MIN_USDC_200 — Opus+Bolt+JP 2026-04-28: revertimos size a $200. Tickets <$200
+# son tanteos de swisstony, no señal real. Solo copiamos martillazos.
+_FAST_PATH_MIN_USDC = 200.0
 _FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony")
 _FAST_PATH_DISPATCH_URL = (
     f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/executeApprovedProposal"
