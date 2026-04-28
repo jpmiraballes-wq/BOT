@@ -548,6 +548,21 @@ class CopyExecutor:
 
             except Exception as exc:
                 last_error = exc
+                # EXCEPT_DEBUG_LOG_V1: log crudo de cualquier excepción para ver qué falla realmente
+                log_warning(
+                    "place_attempt_exception_raw",
+                    module="copy_executor",
+                    extra={
+                        "attempt": attempt,
+                        "max_retries": MAX_RETRIES,
+                        "token_id": (token_id or "")[-12:],
+                        "side": side_str,
+                        "price": limit_price,
+                        "shares": size_shares,
+                        "exc_type": type(exc).__name__,
+                        "exc_str": str(exc)[:400],
+                    },
+                )
                 # ORDER_VERSION_RETRY_V2: order_version_mismatch viene como PolyApiException
                 # del SDK. classify_error() lo marca rejected pero ES transient
                 # (libro se movió entre firma y envío). Retry inmediato re-firmando.
