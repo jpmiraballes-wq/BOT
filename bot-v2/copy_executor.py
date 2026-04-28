@@ -494,10 +494,12 @@ class CopyExecutor:
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
+                # ORDER_ARGS_REMOVE_NEG_RISK_KWARG_V1: neg_risk fuera del OrderArgs (SDK py_clob_client
+                # no lo acepta como kwarg del constructor). Si en el futuro
+                # actualizamos la lib y soporta options, se vuelve a meter.
                 args = OrderArgs(
                     token_id=token_id, price=limit_price,
                     size=size_shares, side=side_const,
-                    neg_risk=is_neg_risk,
                 )
                 signed = self.client.create_order(args)
                 resp = self.client.post_order(signed, OrderType.FAK) or {}  # ORDER_TYPE_FAK_RESTORE_V1: FAK = fill-and-kill (era GTC y expiraba a 5min sin llenar)
