@@ -25,8 +25,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions  # ORDER_ARGS_PARTIAL_OPTIONS_V1
-from py_clob_client.order_builder.constants import BUY, SELL
+from _clob_compat import OrderArgs, OrderType, PartialCreateOrderOptions  # ORDER_ARGS_PARTIAL_OPTIONS_V1
+from _clob_compat import BUY, SELL
 
 import os
 import polymarket_api as pmapi

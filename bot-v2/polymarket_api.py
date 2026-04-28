@@ -18,7 +18,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-CLOB_BASE = "https://clob.polymarket.com"
+CLOB_BASE = "https://clob-v2.polymarket.com"
 DEFAULT_TIMEOUT = 8.0
 
 # Cache de tick size por token_id (TTL 1h). Raramente cambia.
@@ -187,7 +187,7 @@ def check_usdc_balance(client, funder: str) -> Optional[float]:
     Devuelve USDC available o None si no podemos leer.
     """
     try:
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        from _clob_compat import BalanceAllowanceParams, AssetType
         params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         resp = client.get_balance_allowance(params) or {}
         # Polymarket devuelve balance en raw units (6 decimales para USDC)

@@ -1,7 +1,7 @@
-# Polymarket bot-v2 runtime dependencies
+# Polymarket bot-v2 runtime dependencies (post V2 cutover 2026-04-28)
 python-dotenv>=1.0.0
 requests>=2.31.0
-py-clob-client>=0.17.0
+py-clob-client-v2>=1.0.0
 web3>=6.11.0
 eth-account>=0.10.0
 eth-utils>=2.3.0

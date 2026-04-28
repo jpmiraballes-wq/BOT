@@ -28,8 +28,8 @@ import logging
 import time
 from typing import Dict, Any, Optional
 
-from py_clob_client.clob_types import OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
+from _clob_compat import OrderArgs, OrderType
+from _clob_compat import BUY, SELL
 
 from base44_client import (
     list_records,

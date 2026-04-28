@@ -25,7 +25,7 @@ from decision_logger import now_iso
 
 logger = logging.getLogger(__name__)
 
-CLOB_PRICE_URL = "https://clob.polymarket.com/price"
+CLOB_PRICE_URL = "https://clob-v2.polymarket.com/price"
 REQUEST_TIMEOUT = 8
 
 

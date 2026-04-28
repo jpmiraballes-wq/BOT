@@ -29,8 +29,8 @@ try:
 except ImportError:
     STOP_LOSS_PCT = -0.30
 
-from py_clob_client.clob_types import OrderArgs, OrderType
-from py_clob_client.order_builder.constants import SELL
+from _clob_compat import OrderArgs, OrderType
+from _clob_compat import SELL
 
 from decision_logger import log_decision, log_close
 

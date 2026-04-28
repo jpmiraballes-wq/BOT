@@ -13,12 +13,12 @@ import time
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import (
+from _clob_compat import ClobClient
+from _clob_compat import (
     ApiCreds, OrderArgs, OrderType,
     BalanceAllowanceParams, AssetType,
 )
-from py_clob_client.order_builder.constants import BUY, SELL
+from _clob_compat import BUY, SELL
 
 from config import (
     CLOB_API_URL, POLYGON_CHAIN_ID, PRIVATE_KEY, WALLET_ADDRESS,
@@ -563,7 +563,7 @@ class OrderManager:
         try:
             # Best bid via orderbook publico (no requiere auth)
             import requests as _rq
-            resp = _rq.get("https://clob.polymarket.com/book",
+            resp = _rq.get("https://clob-v2.polymarket.com/book",
                           params={"token_id": token_id}, timeout=10)
             if resp.status_code != 200:
                 logger.warning("close: book HTTP %d", resp.status_code)
