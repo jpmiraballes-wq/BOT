@@ -500,7 +500,7 @@ class CopyExecutor:
                     neg_risk=is_neg_risk,
                 )
                 signed = self.client.create_order(args)
-                resp = self.client.post_order(signed, OrderType.GTC) or {}  # GTC_5MIN_V1
+                resp = self.client.post_order(signed, OrderType.FAK) or {}  # ORDER_TYPE_FAK_RESTORE_V1: FAK = fill-and-kill (era GTC y expiraba a 5min sin llenar)
                 order_id = resp.get("orderID") or resp.get("orderId")
                 status = resp.get("status")
 
