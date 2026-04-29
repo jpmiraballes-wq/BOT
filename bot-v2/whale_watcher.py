@@ -176,6 +176,13 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         return False
     if not tr.get("token_id") or not tr.get("condition_id"):
         return False
+    # FAST_PATH_BLACKLIST_NOISE_V1: blacklist de mercados ruido. Spread/O/U/BTTS son hedges micro
+    # de swisstony con R/R catastrófico cuando están cerca de resolución.
+    q = str(tr.get("market_question") or "").lower()
+    if any(k in q for k in ("spread:", "o/u", "both teams to score", "moneyline")):
+        return False
+    if "(-" in q or "(+" in q:  # spreads tipo "Team (-1.5)"
+        return False
     return True
 
 
