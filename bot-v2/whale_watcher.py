@@ -421,7 +421,14 @@ def run_whale_watcher_once() -> Dict[str, Any]:
         addr = (w.get("wallet_address") or "").lower()
         if not addr:
             continue
-        raw_trades = _fetch_wallet_trades(addr, limit=30)
+        # FETCH_WALLET_TRADES_LIMIT_500_V1: bump 30→500 en call site (el default=100 no se usaba) +
+        # filtro client-side 700s. surfandturf con limit=100 seguía trayendo
+        # trades viejos (UFC 25-abr) porque hace 100+ trades/día. 500 captura
+        # ~24h de actividad incluso para wallets más activas. El filtro 700s
+        # descarta ruido viejo antes del fast-path (que tiene age_guard 600s).
+        raw_trades = _fetch_wallet_trades(addr, limit=500)
+        _ts_cutoff = time.time() - 700
+        raw_trades = [t for t in raw_trades if float(t.get("timestamp") or 0) > _ts_cutoff]
         for raw in raw_trades:
             norm = _normalize_trade(raw, w)
             if norm and norm.get("trade_hash"):
