@@ -248,11 +248,9 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
         if r.status_code >= 400:
             logger.warning("fast_path dispatch %d: %s", r.status_code, r.text[:200])
             return
+        # FAST_PATH_LOG_FIX_V1: la function backend crea la proposal con asServiceRole.
         result = r.json() if r.text else {}
-        logger.info(
-            "FAST_PATH dispatched: proposal=%s result=%s",
-            str(proposal_id)[:8], str(result)[:200],
-        )
+        logger.info("FAST_PATH dispatched: %s", str(result)[:300])
     except Exception as exc:
         logger.warning("fast_path dispatch: %s", exc)
 
