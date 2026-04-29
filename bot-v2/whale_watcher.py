@@ -200,29 +200,22 @@ def _has_open_position_for_condition(condition_id: str) -> bool:
 
 
 def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
-    """Crea una CopyTradeProposal approved + llama executeApprovedProposal directo."""
+    """FAST_PATH_INLINE_V1: una sola POST a executeApprovedProposal con api_key header.
+    La function crea la CopyTradeProposal con asServiceRole y ejecuta inline."""
     if _has_open_position_for_condition(tr.get("condition_id", "")):
         logger.info("fast_path skip: ya hay Position abierta para condition_id")
         return
     detected_at_iso = (
         time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time())) + "Z"
     )
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {BASE44_API_KEY}",
-    }
-    # 1) Crear proposal approved (skip cron whaleDetectConsensus).
     proposal_payload = {
         "status": "approved",
         "tier": "premium",
-        "rejection_reason": "auto_approved_fast_path_swisstony_FAST_PATH_ALL_SPORTS_V1",
+        "rejection_reason": "auto_approved_fast_path_swisstony_FAST_PATH_INLINE_V1",
         "category": "sports",
         "side": tr.get("side", "BUY"),
         "outcome": tr.get("outcome"),
         "entry_price": float(tr.get("price") or 0),
-        # FAST_PATH_ALL_SPORTS_V1: respetar StrategyCapital.trade_size_max — executeApprovedProposal
-        # capea contra wcStrategy?.trade_size_max (default $15) y ABSOLUTE_HARD_CAP_USDC ($10).
-        # Mandamos el size del whale como referencia; Base44 hace el min(whale, cap, hard_cap).
         "amount_usdc": float(tr.get("size_usdc") or 10.0),
         "suggested_size_usdc": float(tr.get("size_usdc") or 10.0),
         "token_id": tr.get("token_id"),
@@ -239,38 +232,22 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
     }
     try:
         r = requests.post(
-            _FAST_PATH_PROPOSAL_URL,
-            headers=headers,
-            json=proposal_payload,
-            timeout=10,
-        )
-        if r.status_code >= 400:
-            logger.warning("fast_path create_proposal %d: %s", r.status_code, r.text[:200])
-            return
-        proposal = r.json()
-        proposal_id = proposal.get("id") or proposal.get("_id")
-        if not proposal_id:
-            logger.warning("fast_path: proposal sin id")
-            return
-    except Exception as exc:
-        logger.warning("fast_path create_proposal: %s", exc)
-        return
-    # 2) Llamar executeApprovedProposal directo.
-    try:
-        r2 = requests.post(
             _FAST_PATH_DISPATCH_URL,
-            headers=headers,
+            headers={
+                "Content-Type": "application/json",
+                "api_key": BASE44_API_KEY,
+            },
             json={
                 "fast_path": True,
-                "proposal_id": proposal_id,
+                "proposal_payload": proposal_payload,
                 "watcher_detected_at": detected_at_iso,
             },
             timeout=15,
         )
-        if r2.status_code >= 400:
-            logger.warning("fast_path dispatch %d: %s", r2.status_code, r2.text[:200])
+        if r.status_code >= 400:
+            logger.warning("fast_path dispatch %d: %s", r.status_code, r.text[:200])
             return
-        result = r2.json() if r2.text else {}
+        result = r.json() if r.text else {}
         logger.info(
             "FAST_PATH dispatched: proposal=%s result=%s",
             str(proposal_id)[:8], str(result)[:200],
