@@ -56,7 +56,8 @@ def _load_tier_s_whales() -> List[Dict[str, Any]]:
     return _whales_cache
 
 
-def _fetch_wallet_trades(address: str, limit: int = 30) -> List[Dict[str, Any]]:
+# FETCH_WALLET_TRADES_LIMIT_100: bump 30→100. Wallets activas (surfandturf 100+ trades/día) perdían trades frescos.
+def _fetch_wallet_trades(address: str, limit: int = 100) -> List[Dict[str, Any]]:
     try:
         r = requests.get(
             f"{DATA_API_BASE}/trades",
