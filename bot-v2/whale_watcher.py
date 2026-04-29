@@ -176,13 +176,33 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         return False
     if not tr.get("token_id") or not tr.get("condition_id"):
         return False
-    # FAST_PATH_BLACKLIST_NOISE_V1: blacklist de mercados ruido. Spread/O/U/BTTS son hedges micro
-    # de swisstony con R/R catastrófico cuando están cerca de resolución.
+    # FAST_PATH_HARD_FILTER_V1: 4 reglas duras (mismo que cron whaleDetectConsensus).
+    # Sangrado prod 03:30: Yokohama x4 en 90s, Recoleta, Cruzeiro draw, Cuenca 82c, Auxerre.
     q = str(tr.get("market_question") or "").lower()
-    if any(k in q for k in ("spread:", "o/u", "both teams to score", "moneyline")):
+    slug = str(tr.get("market_slug") or "").lower()
+    text = q + " " + slug
+    # Regla 1: precio max 75c (R/R catastrófico cerca de resolución)
+    if price > 0.75:
         return False
-    if "(-" in q or "(+" in q:  # spreads tipo "Team (-1.5)"
+    # Regla 2: blacklist Spread/O/U/BTTS/draw/moneyline
+    if any(k in q for k in ("spread:", "o/u", "over/under", "both teams to score", "btts", "end in a draw", "moneyline")):
         return False
+    if "(-" in q or "(+" in q:
+        return False
+    # Regla 3: tenis sin Challenger/ITF/Futures/qualifying
+    tennis_kw = ("atp", "wta", "tennis", "grand-slam", "wimbledon", "us-open", "roland", "madrid open", "miami open")
+    if any(k in text for k in tennis_kw):
+        if any(k in text for k in ("challenger", "itf", "futures", "qualifying", "qualifier")):
+            return False
+    # Regla 4: soccer/football solo top-5 EU + size>=$300 (bloquea J-League, sudam, MLS, Saudi)
+    soccer_kw = (" fc", "fc ", "soccer", "football", "win on 20", "marinos", "recoleta", "cruzeiro", "boca juniors", "auxerre", "cuenca", "barracas", "millonarios", "sao paulo", "tolima", "coquimbo", "audax")
+    is_soccer = any(k in text for k in soccer_kw) and not any(k in text for k in ("nfl", "afc ", "nba", "mlb", "nhl"))
+    if is_soccer:
+        top5_eu = ("epl", "premier league", "la liga", "laliga", "bundesliga", "serie a", "ligue 1", "uefa champions", "champions league", "europa league")
+        if not any(k in text for k in top5_eu):
+            return False
+        if size_usdc < 300:
+            return False
     return True
 
 
