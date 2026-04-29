@@ -144,8 +144,9 @@ _FAST_PATH_MIN_PRICE = 0.05
 _FAST_PATH_MAX_PRICE = 0.95
 _FAST_PATH_MIN_USDC = 1.0
 _FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony")
+# FAST_PATH_URL_SUFFIX_V1: Base44 expone esta function como executeApprovedProposal/index.
 _FAST_PATH_DISPATCH_URL = (
-    f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/executeApprovedProposal"
+    f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/executeApprovedProposal/index"
 )
 _FAST_PATH_PROPOSAL_URL = (
     f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/entities/CopyTradeProposal"
