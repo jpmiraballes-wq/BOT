@@ -136,13 +136,13 @@ _FAST_PATH_TENNIS_TOP_KEYWORDS = (
     "indian-wells", "miami", "monte-carlo", "shanghai", "atp-masters",
     "wta-1000",
 )
-# FAST_PATH_THRESHOLDS_V2 — Opus 2026-04-28: data real swisstony muestra tickets $5-$50,
-# no $200. Y favoritos >70c perdieron 5/5 ayer. Underdog 11c (Pridankina) ganaba.
-_FAST_PATH_MIN_PRICE = 0.35
-_FAST_PATH_MAX_PRICE = 0.72
-# FAST_PATH_MIN_USDC_200 — Opus+Bolt+JP 2026-04-28: revertimos size a $200. Tickets <$200
-# son tanteos de swisstony, no señal real. Solo copiamos martillazos.
-_FAST_PATH_MIN_USDC = 200.0
+# FAST_PATH_ALL_SPORTS_V1 — Bolt+Opus+JP 2026-04-29: filtros abiertos. Causa: trade Mensik tardó 213s
+# por filtros viejos demasiado estrictos. Ahora swisstony en CUALQUIER deporte, cualquier
+# price (5-95c), cualquier size (>$1) dispara fast-path. Filtro real es whale_name=swisstony.
+# Resto de whales sigue por flujo lento hasta tener data propia en Shadow Book.
+_FAST_PATH_MIN_PRICE = 0.05
+_FAST_PATH_MAX_PRICE = 0.95
+_FAST_PATH_MIN_USDC = 1.0
 _FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony")
 _FAST_PATH_DISPATCH_URL = (
     f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/executeApprovedProposal"
@@ -162,9 +162,7 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     name = str(tr.get("whale_name") or "").lower()
     if not any(t in name for t in _FAST_PATH_WHALE_NAMES):
         return False
-    slug = str(tr.get("market_slug") or "").lower()
-    if not any(k in slug for k in _FAST_PATH_TENNIS_TOP_KEYWORDS):
-        return False
+    # FAST_PATH_ALL_SPORTS_V1: filtro de slug eliminado. swisstony en cualquier deporte → fast-path.
     try:
         price = float(tr.get("price") or 0)
         size_usdc = float(tr.get("size_usdc") or 0)
@@ -217,14 +215,16 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
     proposal_payload = {
         "status": "approved",
         "tier": "premium",
-        "rejection_reason": "auto_approved_fast_path_swisstony_tennis_top",
+        "rejection_reason": "auto_approved_fast_path_swisstony_FAST_PATH_ALL_SPORTS_V1",
         "category": "sports",
-        "subcategory": "tennis",
         "side": tr.get("side", "BUY"),
         "outcome": tr.get("outcome"),
         "entry_price": float(tr.get("price") or 0),
-        "amount_usdc": 15.0,  # tope strategy.trade_size_max — executeApprovedProposal lo capea igual
-        "suggested_size_usdc": 15.0,
+        # FAST_PATH_ALL_SPORTS_V1: respetar StrategyCapital.trade_size_max — executeApprovedProposal
+        # capea contra wcStrategy?.trade_size_max (default $15) y ABSOLUTE_HARD_CAP_USDC ($10).
+        # Mandamos el size del whale como referencia; Base44 hace el min(whale, cap, hard_cap).
+        "amount_usdc": float(tr.get("size_usdc") or 10.0),
+        "suggested_size_usdc": float(tr.get("size_usdc") or 10.0),
         "token_id": tr.get("token_id"),
         "condition_id": tr.get("condition_id"),
         "market_question": tr.get("market_question"),
