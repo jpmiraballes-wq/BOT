@@ -411,8 +411,10 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
             sort="-created_date",
         )
         if linked:
+            # TP_SL_ESTIMATED_PNL_FIX_V1: estimated_pnl no se declara en este branch.
+            # Coherente con "NO inventamos PnL" — usamos 0.0 literal.
             update_record("CopyTradeProposal", linked[0].get("id"),
-                          {"pnl": estimated_pnl})
+                          {"pnl": 0.0})
     except Exception:
         pass
     send_telegram(
@@ -420,7 +422,7 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         f"{market_label}\n"
         f"{side_str} entry {entry:.3f} â mercado {current_price:.3f} "
         f"({pnl_pct*100:+.1f}%)\n"
-        f"PnL contable: <b>{estimated_pnl:+.2f} USDC</b>\n"
+        f"PnL contable: <b>0.00 USDC</b> (sin venta efectiva)\n"
         f"Motivo intentado: <code>{reason}</code>\n"
         f"Ãltimo error CLOB: <code>{last_err}</code>\n"
         f"Saldo on-chain queda hasta resoluciÃ³n."
@@ -430,7 +432,7 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         module="position_tp_sl",
         extra={"pos_id": pos_id, "intended_reason": reason,
                "last_error": last_err, "pnl_pct": pnl_pct,
-               "estimated_pnl": estimated_pnl,
+               "estimated_pnl": 0.0,
                "attempts": [a["strategy"] for a in attempts]},
     )
     return False
