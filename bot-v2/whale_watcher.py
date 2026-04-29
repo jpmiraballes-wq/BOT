@@ -144,7 +144,52 @@ _FAST_PATH_TENNIS_TOP_KEYWORDS = (
 _FAST_PATH_MIN_PRICE = 0.05
 _FAST_PATH_MAX_PRICE = 0.80
 _FAST_PATH_MIN_USDC = 1.0
-_FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony", "surfandturf")  # FAST_PATH_REVERT_RN1_ADD_SURFANDTURF_V1
+# DYNAMIC_TRUSTED_WHALES_V1: lista hardcoded como fallback. La fuente real es la cloud
+# (endpoint getTrustedWhalesList) que se consulta cada 60s. Cuando una shadow
+# promueve a Tier S vía whaleAutoPromoteShadow, el bot la pica solo en el
+# próximo ciclo sin push.
+_FAST_PATH_WHALE_NAMES_FALLBACK = ("swisstony", "swiss_tony", "surfandturf")
+_TRUSTED_CACHE: tuple = _FAST_PATH_WHALE_NAMES_FALLBACK
+_TRUSTED_CACHE_AT: float = 0.0
+_TRUSTED_TTL_SECONDS = 60
+_TRUSTED_ENDPOINT = f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/getTrustedWhalesList/index"
+
+
+def _load_trusted_whales() -> tuple:
+    """Lee Tier S whales desde la cloud cada 60s. Fallback a hardcoded."""
+    global _TRUSTED_CACHE, _TRUSTED_CACHE_AT
+    now = time.time()
+    if _TRUSTED_CACHE and (now - _TRUSTED_CACHE_AT) < _TRUSTED_TTL_SECONDS:
+        return _TRUSTED_CACHE
+    try:
+        resp = requests.get(
+            _TRUSTED_ENDPOINT,
+            headers={"api_key": BASE44_API_KEY},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            whales = data.get("whales") if isinstance(data, dict) else None
+            if isinstance(whales, list) and len(whales) > 0:
+                tokens = tuple(str(w).lower().replace("_", "").replace(" ", "").strip() for w in whales if w)
+                if tokens:
+                    _TRUSTED_CACHE = tokens
+                    _TRUSTED_CACHE_AT = now
+                    return tokens
+        logger.warning("trusted_whales fetch failed status=%s, using cache/fallback", resp.status_code)
+    except Exception as e:
+        logger.warning("trusted_whales fetch error: %s, using cache/fallback", e)
+    # Si nunca cargó nada → fallback hardcoded
+    if not _TRUSTED_CACHE:
+        _TRUSTED_CACHE = _FAST_PATH_WHALE_NAMES_FALLBACK
+    _TRUSTED_CACHE_AT = now
+    return _TRUSTED_CACHE
+
+
+# Compat: el resto del archivo usa _FAST_PATH_WHALE_NAMES como tuple. Lo
+# convertimos en property-like via __getattr__ del módulo seria overkill;
+# preferimos resolver dentro de la función que usa el chequeo.
+_FAST_PATH_WHALE_NAMES = _FAST_PATH_WHALE_NAMES_FALLBACK  # legacy ref, no se usa más
 # FAST_PATH_URL_SUFFIX_V1: Base44 expone esta function como executeApprovedProposal/index.
 _FAST_PATH_DISPATCH_URL = (
     f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/executeApprovedProposal/index"
@@ -166,7 +211,7 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     if tr.get("shadow") is True or str(tr.get("tier") or "").upper() == "SHADOW":
         return False
     name = str(tr.get("whale_name") or "").lower()
-    if not any(t in name for t in _FAST_PATH_WHALE_NAMES):
+    if not any(t in name for t in _load_trusted_whales()):  # DYNAMIC_TRUSTED_WHALES_V1
         return False
     # FAST_PATH_ALL_SPORTS_V1: filtro de slug eliminado. swisstony en cualquier deporte → fast-path.
     try:
