@@ -250,6 +250,26 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     except Exception as exc:
         logger.warning("fast_path_age_guard error: %s", exc)
         return False
+    # FAST_PATH_ITF_BLACKLIST_V1 (JP+Opus 2026-04-29 17:55): bloquea ITF / Challenger / Futures /
+    # qualifying / torneos basura ANTES del POST. Mismo regex que el quality_gate
+    # de la cloud (executeApprovedProposal). Causa: Saint-Malo Costoulas vs
+    # Jeanjean entró 4 veces en 2 min porque el Mac crea Position inline antes
+    # del gate cloud. Sangrado real ~$15+. Estricto: NO se bypassea swisstony
+    # acá (la Opción B vive en cloud, donde se ve size acumulado).
+    _ITF_NOISE_TOKENS = (
+        "challenger", "itf", "futures", "qualifying", "qualifier",
+        "jiujiang", "saint-malo", "saint malo", "mauthausen", "la bisbal",
+        "aix en provence", "aix-en-provence", "cagliari", "ostrava",
+        "francavilla", "antalya", "tallahassee", "meerbusch", "shymkent",
+        "savannah", "oeiras", "bonita springs",
+    )
+    _itf_text = f"{(tr.get('market_question') or '').lower()} {(tr.get('market_slug') or '').lower()}"
+    if any(token in _itf_text for token in _ITF_NOISE_TOKENS):
+        logger.info(
+            "fast_path_itf_block: whale=%s slug=%s — ITF/Challenger blacklist (cloud-equivalent)",
+            tr.get("whale_name"), tr.get("market_slug"),
+        )
+        return False
     # FAST_PATH_HARD_FILTER_V1: 4 reglas duras (mismo que cron whaleDetectConsensus).
     # Sangrado prod 03:30: Yokohama x4 en 90s, Recoleta, Cruzeiro draw, Cuenca 82c, Auxerre.
     q = str(tr.get("market_question") or "").lower()
