@@ -155,6 +155,10 @@ _FAST_PATH_PROPOSAL_URL = (
 _FAST_PATH_POSITION_URL = (
     f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/entities/Position"
 )
+# FAST_PATH_CONDITION_LOCKOUT_V1: lockout 60s por condition_id. Evita que el bot abra 4 posiciones
+# del mismo partido en 5 min cuando swisstony va flippeando precios.
+_FAST_PATH_LOCKOUT_SECONDS = 60
+_fast_path_recent: Dict[str, float] = {}
 
 
 def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
@@ -231,7 +235,17 @@ def _has_open_position_for_condition(condition_id: str) -> bool:
 def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
     """FAST_PATH_INLINE_V1: una sola POST a executeApprovedProposal con api_key header.
     La function crea la CopyTradeProposal con asServiceRole y ejecuta inline."""
-    if _has_open_position_for_condition(tr.get("condition_id", "")):
+    cid = tr.get("condition_id", "")
+    # FAST_PATH_CONDITION_LOCKOUT_V1: lockout 60s por condition_id.
+    now_ts = time.time()
+    last_dispatch = _fast_path_recent.get(cid, 0.0)
+    if cid and (now_ts - last_dispatch) < _FAST_PATH_LOCKOUT_SECONDS:
+        logger.info(
+            "fast_path_lockout_60s skip: condition_id=%s last=%.1fs ago",
+            cid[:12], now_ts - last_dispatch,
+        )
+        return
+    if _has_open_position_for_condition(cid):
         logger.info("fast_path skip: ya hay Position abierta para condition_id")
         return
     detected_at_iso = (
@@ -278,6 +292,15 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
             return
         # FAST_PATH_LOG_FIX_V1: la function backend crea la proposal con asServiceRole.
         result = r.json() if r.text else {}
+        # FAST_PATH_CONDITION_LOCKOUT_V1: marcar cache solo si el dispatch tuvo respuesta exitosa.
+        if cid and r.status_code < 400:
+            _fast_path_recent[cid] = now_ts
+            # Garbage collect: borra entradas viejas (>5min) para no crecer infinito.
+            if len(_fast_path_recent) > 500:
+                cutoff = now_ts - 300
+                for k in list(_fast_path_recent.keys()):
+                    if _fast_path_recent[k] < cutoff:
+                        del _fast_path_recent[k]
         logger.info("FAST_PATH dispatched: %s", str(result)[:300])
     except Exception as exc:
         logger.warning("fast_path dispatch: %s", exc)
