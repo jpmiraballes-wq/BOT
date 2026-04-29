@@ -198,6 +198,11 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     if any(k in text for k in tennis_kw):
         if any(k in text for k in ("challenger", "itf", "futures", "qualifying", "qualifier")):
             return False
+    # FAST_PATH_NBA_BLACKLIST_V1: NBA al blacklist por backtest Bolt (WR 25% / ROI -11.7% / N=12).
+    # Solo NBA — NFL/MLB/NHL/tenis siguen pasando.
+    nba_kw = ("nba", "lakers", "celtics", "warriors", "bucks", "76ers", "heat", "knicks", "nets", "raptors", "bulls", "cavaliers", "pistons", "pacers", "hawks", "hornets", "magic", "wizards", "thunder", "rockets", "spurs", "mavericks", "grizzlies", "pelicans", "nuggets", "jazz", "timberwolves", "trail blazers", "kings", "suns", "clippers")
+    if any(k in text for k in nba_kw):
+        return False
     # Regla 4: soccer/football solo top-5 EU + size>=$300 (bloquea J-League, sudam, MLS, Saudi)
     soccer_kw = (" fc", "fc ", "soccer", "football", "win on 20", "marinos", "recoleta", "cruzeiro", "boca juniors", "auxerre", "cuenca", "barracas", "millonarios", "sao paulo", "tolima", "coquimbo", "audax")
     is_soccer = any(k in text for k in soccer_kw) and not any(k in text for k in ("nfl", "afc ", "nba", "mlb", "nhl"))
