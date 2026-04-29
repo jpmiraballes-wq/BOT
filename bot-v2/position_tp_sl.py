@@ -230,7 +230,16 @@ def _try_close(client, token_id: str, side_str: str, shares: float,
         if not order_id or not success:
             return {"ok": False, "filled_shares": 0.0, "filled_price": 0.0,
                     "error": resp.get("error") or resp.get("status") or "rejected"}
+        # TP_SL_FILL_VERIFY_V1: si get_order falla, NO asumimos fill completo. Antes
+        # del fix: except Exception: filled = shares → escribió Trade fantasma
+        # cuando post_order acepta pero el SELL no llega a fillarse on-chain
+        # (timeouts CLOB, rate limit, 500 momentáneo). Caso Saint-Malo +
+        # Krueger 2026-04-29: shares siguieron en wallet, DB marcó Position
+        # closed con pnl negativo falso. Ahora: si verify falla → ok=False,
+        # cae a la siguiente capa de cascada o a dust_unsellable (que ya no
+        # crea Trade fantasma desde fix Bolt 2026-04-27).
         filled = 0.0
+        verify_failed = False
         try:
             status_resp = client.get_order(order_id) or {}
             filled = float(
@@ -238,8 +247,15 @@ def _try_close(client, token_id: str, side_str: str, shares: float,
                 or status_resp.get("filled_size")
                 or 0.0
             )
-        except Exception:
-            filled = shares
+        except Exception as exc:
+            verify_failed = True
+            logger.warning(
+                "TP_SL_FILL_VERIFY: get_order(%s) failed: %s. NOT assuming fill.",
+                order_id, str(exc)[:80],
+            )
+        if verify_failed:
+            return {"ok": False, "filled_shares": 0.0, "filled_price": 0.0,
+                    "error": f"verify_failed:get_order_exception", "order_id": order_id}
         if filled <= 0:
             return {"ok": False, "filled_shares": 0.0, "filled_price": 0.0,
                     "error": "no_fill"}
