@@ -241,7 +241,8 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
             except Exception:
                 continue
         age_s = (time.time() - trade_ts) if trade_ts > 0 else -1
-        if trade_ts <= 0 or age_s > 300:
+        # FAST_PATH_AGE_GUARD_600: bump 300s→600s. Atletico-Arsenal BTTS blocked at age_s=313.
+        if trade_ts <= 0 or age_s > 600:
             logger.info(
                 "fast_path_age_guard skip: whale=%s slug=%s ts=%s age_s=%s",
                 tr.get("whale_name"), tr.get("market_slug"), trade_ts, int(age_s),
