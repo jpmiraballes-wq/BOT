@@ -144,7 +144,7 @@ _FAST_PATH_TENNIS_TOP_KEYWORDS = (
 _FAST_PATH_MIN_PRICE = 0.05
 _FAST_PATH_MAX_PRICE = 0.80
 _FAST_PATH_MIN_USDC = 1.0
-_FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony", "rn1")  # FAST_PATH_RN1_GO_LIVE_V1
+_FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony", "surfandturf")  # FAST_PATH_REVERT_RN1_ADD_SURFANDTURF_V1
 # FAST_PATH_URL_SUFFIX_V1: Base44 expone esta function como executeApprovedProposal/index.
 _FAST_PATH_DISPATCH_URL = (
     f"{BASE44_BASE_URL}/api/apps/{BASE44_APP_ID}/functions/executeApprovedProposal/index"
