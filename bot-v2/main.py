@@ -16,6 +16,23 @@ import time
 import traceback
 from typing import Any, Dict, List
 
+# BOT_PID_LOCK_V1 — JP+Opus 2026-04-29: previene 2+ instancias en paralelo.
+# Caso 29-04 ~17:30 Madrid: 4 procesos main.py corriendo simultáneo (3 huérfanos +
+# 1 launchd) → 21x dupe Angels en 4min. fcntl.LOCK_EX|LOCK_NB falla inmediato si
+# otro proceso ya tiene el lock → segundo intento muere con sys.exit(1).
+# _lock_fh se mantiene global durante toda la vida del proceso (no GC).
+import fcntl as _fcntl
+
+_LOCK_FILE = os.path.expanduser('~/BOT/bot-v2/.bot.lock')
+_lock_fh = open(_LOCK_FILE, 'w')
+try:
+    _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    _lock_fh.write(str(os.getpid()))
+    _lock_fh.flush()
+except IOError:
+    print("❌ Bot ya está corriendo (PID lock activo en .bot.lock). Saliendo.")
+    sys.exit(1)
+
 # SHADOW_MODE_V1 — VPS Ashburn shadow mode (Bolt+Opus+JP 2026-04-27).
 # Si SHADOW_MODE=true en el .env, el bot solo polea whale_watcher para medir
 # lag de detección. NO toca wallet, NO crea proposals, NO ejecuta scans.
