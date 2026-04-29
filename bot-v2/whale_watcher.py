@@ -140,8 +140,9 @@ _FAST_PATH_TENNIS_TOP_KEYWORDS = (
 # por filtros viejos demasiado estrictos. Ahora swisstony en CUALQUIER deporte, cualquier
 # price (5-95c), cualquier size (>$1) dispara fast-path. Filtro real es whale_name=swisstony.
 # Resto de whales sigue por flujo lento hasta tener data propia en Shadow Book.
+# FAST_PATH_MAX_PRICE_80_V1 — bajado max 0.95→0.80. Spread Celtics 97¢ rompió R/R.
 _FAST_PATH_MIN_PRICE = 0.05
-_FAST_PATH_MAX_PRICE = 0.95
+_FAST_PATH_MAX_PRICE = 0.80
 _FAST_PATH_MIN_USDC = 1.0
 _FAST_PATH_WHALE_NAMES = ("swisstony", "swiss_tony")
 # FAST_PATH_URL_SUFFIX_V1: Base44 expone esta function como executeApprovedProposal/index.
