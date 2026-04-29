@@ -225,6 +225,31 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         return False
     if not tr.get("token_id") or not tr.get("condition_id"):
         return False
+    # FAST_PATH_AGE_GUARD_V2 (JP+Opus 2026-04-29 18:15): bloquea trades viejos (>5min) o sin ts.
+    # Causa: data-api devuelve ultimos 30 trades sin filtro de fecha. Si la wallet
+    # no opero hoy, devuelve trades viejos sobre mercados resueltos -> CLOB no_price
+    # -> proposals fallan en loop. NBA-MIN-DEN de hace 37h pasaba.
+    try:
+        ts_candidates = [tr.get("whale_trade_ts"), tr.get("trade_ts"), tr.get("timestamp")]
+        trade_ts = 0
+        for c in ts_candidates:
+            try:
+                v = int(c or 0)
+                if v > 0:
+                    trade_ts = v
+                    break
+            except Exception:
+                continue
+        age_s = (time.time() - trade_ts) if trade_ts > 0 else -1
+        if trade_ts <= 0 or age_s > 300:
+            logger.info(
+                "fast_path_age_guard skip: whale=%s slug=%s ts=%s age_s=%s",
+                tr.get("whale_name"), tr.get("market_slug"), trade_ts, int(age_s),
+            )
+            return False
+    except Exception as exc:
+        logger.warning("fast_path_age_guard error: %s", exc)
+        return False
     # FAST_PATH_HARD_FILTER_V1: 4 reglas duras (mismo que cron whaleDetectConsensus).
     # Sangrado prod 03:30: Yokohama x4 en 90s, Recoleta, Cruzeiro draw, Cuenca 82c, Auxerre.
     q = str(tr.get("market_question") or "").lower()
