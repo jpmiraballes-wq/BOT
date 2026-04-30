@@ -495,16 +495,16 @@ def manage_open_positions(client) -> Dict[str, int]:
         side_str = (pos.get("side") or "BUY").upper()
         exit_price_now = book["bid"] if side_str == "BUY" else book["ask"]
         pnl_pct = _compute_pnl_pct(entry, exit_price_now, side_str)
-        # TRAILING_STOP_V1: actualizar high-water mark y calcular SL efectivo.
-        prev_max = p.get("max_pnl_pct")
+        # TRAILING_STOP_V1 + TRAILING_STOP_VAR_FIX_V1: actualizar high-water mark y calcular SL efectivo.
+        prev_max = pos.get("max_pnl_pct")
         prev_max_f = float(prev_max) if prev_max is not None else None
         new_max = pnl_pct if (prev_max_f is None or pnl_pct > prev_max_f) else prev_max_f
         if prev_max_f is None or pnl_pct > prev_max_f:
             try:
-                update_record("Position", p.get("id"), {"max_pnl_pct": new_max})
+                update_record("Position", pos.get("id"), {"max_pnl_pct": new_max})
             except Exception as _e:
                 logger.debug("trailing: update max_pnl_pct failed pos=%s err=%s",
-                             str(p.get("id", ""))[:8], _e)
+                             str(pos.get("id", ""))[:8], _e)
         if new_max is not None and new_max >= TRAILING_ACTIVATION_PCT:
             effective_sl_pct = new_max - TRAILING_DISTANCE_PCT
             sl_mode = "trailing"
