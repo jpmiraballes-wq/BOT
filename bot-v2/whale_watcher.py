@@ -257,6 +257,12 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         size_usdc = float(tr.get("size_usdc") or 0)
     except Exception:
         return False
+    # SWISSTONY_CONVICTION_BYPASS_MAC_V1 (JP+Opus 2026-04-30): si swisstony mete $200+ en este ticket
+    # individual, bypassea ITF blacklist + price>=75c + tenis-Challenger.
+    # Coherente con executeApprovedProposal/polymarketFetchWhaleActivity/whaleDetectConsensus.
+    # NO bypassea NBA/MLB/KBL/Chinese/handicap/Spread/O/U/age_guard/dedup (innegociables).
+    _is_swisstony = ("swisstony" in name) or ("swiss_tony" in name)
+    _big_conviction = _is_swisstony and size_usdc >= 200
     if not (_FAST_PATH_MIN_PRICE <= price <= _FAST_PATH_MAX_PRICE):
         return False
     if size_usdc < _FAST_PATH_MIN_USDC:
@@ -303,7 +309,7 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         "savannah", "oeiras", "bonita springs",
     )
     _itf_text = f"{(tr.get('market_question') or '').lower()} {(tr.get('market_slug') or '').lower()}"
-    if any(token in _itf_text for token in _ITF_NOISE_TOKENS):
+    if any(token in _itf_text for token in _ITF_NOISE_TOKENS) and not _big_conviction:
         logger.info(
             "fast_path_itf_block: whale=%s slug=%s — ITF/Challenger blacklist (cloud-equivalent)",
             tr.get("whale_name"), tr.get("market_slug"),
@@ -316,7 +322,8 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     text = q + " " + slug
     # Regla 1: precio max 75c (R/R catastrófico cerca de resolución).
     # FAST_PATH_MAX_PRICE_STRICT_V1: estricto. Antes era > 0.75 y dejaba pasar Napoli a 75¢ exacto.
-    if price >= 0.75:
+    # SWISSTONY_CONVICTION_BYPASS_MAC_V1: bypass si swisstony con $200+ (favoritos claros tipo 80-97¢ son su edge).
+    if price >= 0.75 and not _big_conviction:
         return False
     # Regla 2: blacklist Spread/O/U/BTTS/draw/moneyline
     if any(k in q for k in ("spread:", "o/u", "over/under", "both teams to score", "btts", "end in a draw", "moneyline")):
@@ -326,7 +333,7 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     # Regla 3: tenis sin Challenger/ITF/Futures/qualifying
     tennis_kw = ("atp", "wta", "tennis", "grand-slam", "wimbledon", "us-open", "roland", "madrid open", "miami open")
     if any(k in text for k in tennis_kw):
-        if any(k in text for k in ("challenger", "itf", "futures", "qualifying", "qualifier")):
+        if any(k in text for k in ("challenger", "itf", "futures", "qualifying", "qualifier")) and not _big_conviction:
             return False
     # FAST_PATH_NBA_ABSOLUTE_BLACKLIST_V1: NBA blacklist ABSOLUTO. Alineado con cloud EXEC_NBA_RX (sin excepciones).
     # JP+Opus 2026-04-30 noche: Mac disparó Raptors x3 con whitelist surfandturf →
