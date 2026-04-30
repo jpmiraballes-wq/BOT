@@ -20,10 +20,40 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
+import json
 import requests
 
 from config import BASE44_API_KEY, BASE44_APP_ID, BASE44_BASE_URL
 from base44_client import list_records
+
+# WHALE_WATCHER_TRI_PATCH_20260430 P2 DEDUP_CACHE_PERSIST_V1: cache en disco para sobrevivir restarts.
+_DEDUP_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dedup_cache.json")
+
+
+def _load_dedup_cache() -> Dict[str, float]:
+    """Carga _condition_last_exec desde disco. Si no existe o falla, dict vacío."""
+    try:
+        with open(_DEDUP_CACHE_PATH, "r") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): float(v) for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+def _save_dedup_cache() -> None:
+    """Persiste _condition_last_exec en disco. Limpia entradas vencidas (>60min)."""
+    try:
+        now = time.time()
+        clean = {
+            k: v for k, v in _condition_last_exec.items()
+            if now - v < _FAST_PATH_DEDUP_60MIN_SECONDS
+        }
+        with open(_DEDUP_CACHE_PATH, "w") as f:
+            json.dump(clean, f)
+    except Exception:
+        pass
 
 logger = logging.getLogger("whale_watcher")
 
@@ -210,7 +240,8 @@ _fast_path_recent: Dict[str, float] = {}
 # Si el bot reinicia, la cloud (executeApprovedProposal DEDUP_CONDITION_24H)
 # sigue cubriendo. Acá agregamos un layer extra in-process.
 _FAST_PATH_DEDUP_60MIN_SECONDS = 3600
-_condition_last_exec: Dict[str, float] = {}
+# WHALE_WATCHER_TRI_PATCH_20260430 P2 DEDUP_CACHE_PERSIST_V1: dict cargado desde disco al arrancar.
+_condition_last_exec: Dict[str, float] = _load_dedup_cache()
 
 
 def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
@@ -310,28 +341,27 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         top5_eu = ("epl", "premier league", "la liga", "laliga", "bundesliga", "serie a", "ligue 1", "uefa champions", "champions league", "europa league")
         if not any(k in text for k in top5_eu):
             return False
-        if size_usdc < 300:
+        # WHALE_WATCHER_TRI_PATCH_20260430 P1 SOCCER_THRESHOLD_50_V1: $300 → $50 (top-5 EU ya filtrado arriba).
+        if size_usdc < 50:
             return False
     return True
 
 
 def _has_open_position_for_condition(condition_id: str) -> bool:
-    """True si ya tenemos Position abierta con ese condition_id."""
+    """WHALE_WATCHER_TRI_PATCH_20260430 P3 HAS_OPEN_POSITION_REAL_V1: chequea condition_id/token_id real.
+
+    Antes devolvía siempre False y dejaba el guard a la cloud. Ahora bloquea
+    in-process antes de dispatchar el fast-path, ahorrando un round-trip.
+    """
+    if not condition_id:
+        return False
     try:
-        # Buscamos por market_question (proxy razonable, Position no tiene
-        # condition_id directo, pero token_id ya está en cada Position).
-        # En realidad lo mejor es buscar por token_id del trade actual,
-        # pero condition_id es el filtro semánticamente correcto. Dejamos
-        # el endpoint de Base44 manejar el match por token_id en
-        # executeApprovedProposal, acá filtramos lo más obvio.
-        rows = list_records(
-            "Position",
-            limit=5,
-            query={"status": "open"},
-        )
-        # Como no tenemos query por condition_id, devolvemos False y
-        # confiamos en la doble verificación que hace executeApprovedProposal
-        # (DEDUP TOKEN_ID GUARD ya implementado ahí).
+        rows = list_records("Position", limit=50, query={"status": "open"})
+        for row in (rows or []):
+            if row.get("condition_id") == condition_id:
+                return True
+            if row.get("token_id") == condition_id:
+                return True
         return False
     except Exception:
         return False
@@ -410,6 +440,8 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
             _fast_path_recent[cid] = now_ts
             # DEDUP_CONDITION_60MIN_V2: marcar también el guard 60min al confirmar dispatch.
             _condition_last_exec[cid] = now_ts
+            # WHALE_WATCHER_TRI_PATCH_20260430 P2: persistir cache en disco después de cada dispatch exitoso.
+            _save_dedup_cache()
             # Cleanup paralelo del dict 60min (más laxo, cutoff 2x ventana).
             if len(_condition_last_exec) > 500:
                 cutoff_60min = now_ts - (_FAST_PATH_DEDUP_60MIN_SECONDS * 2)
