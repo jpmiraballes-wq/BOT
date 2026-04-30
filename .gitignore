@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 bot.log
 *.log
+.dedup_cache.json
