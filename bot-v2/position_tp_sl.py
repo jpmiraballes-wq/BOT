@@ -388,13 +388,15 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                 update_record("CopyTradeProposal", linked[0].get("id"), {"pnl": pnl})
         except Exception:
             pass
-        emoji = "â" if pnl > 0 else "ð´"
-        send_telegram(
-            f"{emoji} <b>{reason.upper()}</b> Â· pnl=" + f"{pnl:+.4f}" + "\n"
-            f"{market_label}\n"
-            f"{side_str} {entry:.3f} â {exit_price:.3f} ({pnl_pct*100:+.1f}%)\n"
-            f"Filled {filled_shares:.1f} sh"
-        )
+        # TELEGRAM_ONLY_WINS_V1: solo Telegram cuando es ganancia. Losses, breakeven y
+        # cierres negativos van solo al Trade record y log_decision (silencioso).
+        if pnl > 0:
+            send_telegram(
+                f"â <b>{reason.upper()}</b> Â· pnl=" + f"{pnl:+.4f}" + "\n"
+                f"{market_label}\n"
+                f"{side_str} {entry:.3f} â {exit_price:.3f} ({pnl_pct*100:+.1f}%)\n"
+                f"Filled {filled_shares:.1f} sh"
+            )
         log_decision(
             reason=f"tp_sl_close_{reason}",
             market=market_label,
@@ -438,16 +440,8 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                           {"pnl": 0.0})
     except Exception:
         pass
-    send_telegram(
-        f"â ï¸ <b>DUST_EXIT</b> Â· no se pudo vender\n"
-        f"{market_label}\n"
-        f"{side_str} entry {entry:.3f} â mercado {current_price:.3f} "
-        f"({pnl_pct*100:+.1f}%)\n"
-        f"PnL contable: <b>0.00 USDC</b> (sin venta efectiva)\n"
-        f"Motivo intentado: <code>{reason}</code>\n"
-        f"Ãltimo error CLOB: <code>{last_err}</code>\n"
-        f"Saldo on-chain queda hasta resoluciÃ³n."
-    )
+    # TELEGRAM_ONLY_WINS_V1: DUST_EXIT silenciado. pnl=0 por diseÃ±o (no hubo venta), no es
+    # ganancia. log_warning de abajo queda para auditorÃ­a interna.
     log_warning(
         "tp_sl_dust_exit",
         module="position_tp_sl",
