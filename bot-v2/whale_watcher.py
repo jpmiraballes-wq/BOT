@@ -205,6 +205,12 @@ _FAST_PATH_POSITION_URL = (
 # del mismo partido en 5 min cuando swisstony va flippeando precios.
 _FAST_PATH_LOCKOUT_SECONDS = 60
 _fast_path_recent: Dict[str, float] = {}
+# DEDUP_CONDITION_60MIN_V2: ventana 60min por condition_id, dict independiente del lockout 60s.
+# Suma defensa contra dupes cuando swisstony flippea el mismo mercado en minutos.
+# Si el bot reinicia, la cloud (executeApprovedProposal DEDUP_CONDITION_24H)
+# sigue cubriendo. Acá agregamos un layer extra in-process.
+_FAST_PATH_DEDUP_60MIN_SECONDS = 3600
+_condition_last_exec: Dict[str, float] = {}
 
 
 def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
@@ -344,6 +350,14 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
             cid[:12], now_ts - last_dispatch,
         )
         return
+    # DEDUP_CONDITION_60MIN_V2: segundo guard, ventana 60min por condition_id.
+    last_exec_60min = _condition_last_exec.get(cid, 0.0)
+    if cid and (now_ts - last_exec_60min) < _FAST_PATH_DEDUP_60MIN_SECONDS:
+        logger.info(
+            "DEDUP_60MIN blocked: condition_id=%s last=%ds ago",
+            cid[:12], int(now_ts - last_exec_60min),
+        )
+        return
     if _has_open_position_for_condition(cid):
         logger.info("fast_path skip: ya hay Position abierta para condition_id")
         return
@@ -394,6 +408,14 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
         # FAST_PATH_CONDITION_LOCKOUT_V1: marcar cache solo si el dispatch tuvo respuesta exitosa.
         if cid and r.status_code < 400:
             _fast_path_recent[cid] = now_ts
+            # DEDUP_CONDITION_60MIN_V2: marcar también el guard 60min al confirmar dispatch.
+            _condition_last_exec[cid] = now_ts
+            # Cleanup paralelo del dict 60min (más laxo, cutoff 2x ventana).
+            if len(_condition_last_exec) > 500:
+                cutoff_60min = now_ts - (_FAST_PATH_DEDUP_60MIN_SECONDS * 2)
+                for k in list(_condition_last_exec.keys()):
+                    if _condition_last_exec[k] < cutoff_60min:
+                        del _condition_last_exec[k]
             # Garbage collect: borra entradas viejas (>5min) para no crecer infinito.
             if len(_fast_path_recent) > 500:
                 cutoff = now_ts - 300
