@@ -461,6 +461,14 @@ def manage_open_positions(client) -> Dict[str, int]:
 
     # FIX 2026-04-26 JP: monitorea TODAS las strategies (antes solo whale_consensus).
     positions = list_records("Position", limit=50, query={"status": "open"}, sort="-opened_at")
+    # TP_SL_CONFIGURABLE_FROM_BOTCONFIG_V1: leer SL/TP desde BotConfig en cada ciclo. Null-check explícito
+    # — 0 no cae al fallback (decisión JP 2026-04-30 Madrid).
+    cfg_rows = list_records("BotConfig", limit=1)
+    cfg = cfg_rows[0] if cfg_rows else {}
+    cfg_sl = cfg.get("stop_loss")
+    cfg_tp = cfg.get("take_profit")
+    default_sl = float(cfg_sl) if cfg_sl is not None else DEFAULT_SL_PCT
+    default_tp = float(cfg_tp) if cfg_tp is not None else DEFAULT_TP_PCT
     if not positions:
         return {"checked": 0, "closed_tp": 0, "closed_sl": 0, "dust_exits": 0}
 
@@ -493,8 +501,8 @@ def manage_open_positions(client) -> Dict[str, int]:
         except Exception:
             pass
 
-        tp_pct = DEFAULT_TP_PCT
-        sl_pct = DEFAULT_SL_PCT
+        tp_pct = default_tp
+        sl_pct = default_sl
         try:
             linked = list_records(
                 "CopyTradeProposal",
@@ -504,8 +512,8 @@ def manage_open_positions(client) -> Dict[str, int]:
             )
             if linked:
                 p = linked[0]
-                tp_pct = float(p.get("take_profit_pct") or DEFAULT_TP_PCT)
-                sl_pct = float(p.get("stop_loss_pct") or DEFAULT_SL_PCT)
+                tp_pct = float(p.get("take_profit_pct") or default_tp)
+                sl_pct = float(p.get("stop_loss_pct") or default_sl)
         except Exception:
             pass
 
