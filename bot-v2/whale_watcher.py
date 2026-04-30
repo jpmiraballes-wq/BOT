@@ -269,6 +269,38 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         return False
     if not tr.get("token_id") or not tr.get("condition_id"):
         return False
+    # RESOLUTION_TOO_FAR_48H_MAC_V1 (JP+Opus 2026-04-30): bloquea mercados que resuelven a >48h.
+    # Razón: swisstony tiene edge en near-term. Mercados lejanos = round-trip drena.
+    # Bypass: swisstony con $200+ (favoritos lejanos de convicción son su edge).
+    # Coherente con RESOLUTION_TOO_FAR_48H_V1 en cloud (executeApprovedProposal).
+    if not _big_conviction:
+        try:
+            _cid = tr.get("condition_id")
+            _gamma_url = f"https://gamma-api.polymarket.com/markets?condition_ids={_cid}"
+            _gamma_resp = requests.get(_gamma_url, timeout=3)
+            _end_iso = None
+            if _gamma_resp.status_code == 200:
+                _gamma_data = _gamma_resp.json()
+                if isinstance(_gamma_data, list) and len(_gamma_data) > 0:
+                    _end_iso = (_gamma_data[0] or {}).get("endDate")
+            if not _end_iso:
+                logger.info(
+                    "fast_path_resolution_block: whale=%s slug=%s — no endDate from gamma-api",
+                    tr.get("whale_name"), tr.get("market_slug"),
+                )
+                return False
+            from datetime import datetime, timezone
+            _end_dt = datetime.fromisoformat(_end_iso.replace("Z", "+00:00"))
+            _hours_to_resolve = (_end_dt - datetime.now(timezone.utc)).total_seconds() / 3600.0
+            if _hours_to_resolve > 48:
+                logger.info(
+                    "fast_path_resolution_block: whale=%s slug=%s — resolves in %.1fh (>48h horizon)",
+                    tr.get("whale_name"), tr.get("market_slug"), _hours_to_resolve,
+                )
+                return False
+        except Exception as e:
+            # Si gamma-api falla (red/timeout), pasamos: cloud filter atrapa igual.
+            logger.warning("fast_path_resolution_check_error: %s", str(e)[:80])
     # FAST_PATH_AGE_GUARD_V2 (JP+Opus 2026-04-29 18:15): bloquea trades viejos (>5min) o sin ts.
     # Causa: data-api devuelve ultimos 30 trades sin filtro de fecha. Si la wallet
     # no opero hoy, devuelve trades viejos sobre mercados resueltos -> CLOB no_price
