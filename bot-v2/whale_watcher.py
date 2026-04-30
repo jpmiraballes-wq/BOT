@@ -314,8 +314,9 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     q = str(tr.get("market_question") or "").lower()
     slug = str(tr.get("market_slug") or "").lower()
     text = q + " " + slug
-    # Regla 1: precio max 75c (R/R catastrófico cerca de resolución)
-    if price > 0.75:
+    # Regla 1: precio max 75c (R/R catastrófico cerca de resolución).
+    # FAST_PATH_MAX_PRICE_STRICT_V1: estricto. Antes era > 0.75 y dejaba pasar Napoli a 75¢ exacto.
+    if price >= 0.75:
         return False
     # Regla 2: blacklist Spread/O/U/BTTS/draw/moneyline
     if any(k in q for k in ("spread:", "o/u", "over/under", "both teams to score", "btts", "end in a draw", "moneyline")):
