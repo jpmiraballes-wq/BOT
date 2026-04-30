@@ -518,7 +518,10 @@ def manage_open_positions(client) -> Dict[str, int]:
             if linked:
                 p = linked[0]
                 tp_pct = float(p.get("take_profit_pct") or default_tp)
-                sl_pct = float(p.get("stop_loss_pct") or default_sl)
+                # BOTCONFIG_OVERRIDES_PROPOSAL_SL_V1: BotConfig.stop_loss manda siempre. Las proposals viejas
+                # tienen stop_loss_pct=-0.08 hardcodeado del schema y pisaban el -0.35
+                # de BotConfig (caso Arsenal cerró a -8.5%). TP sigue respetando proposal.
+                sl_pct = default_sl
         except Exception:
             pass
 
