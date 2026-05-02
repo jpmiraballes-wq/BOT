@@ -395,15 +395,33 @@ def _has_open_position_for_condition(condition_id: str) -> bool:
     """
     if not condition_id:
         return False
+    # FAST_PATH_POSITION_QUERY_FIX_V1 — JP+Opus 2026-05-02
+    # Antes traía las 50 Positions abiertas globales y filtraba en Python. Si
+    # había >50 Positions abiertas (caso noche 2026-05-02: 30+ entries a
+    # PSG/Brentford/Villarreal por bug DEDUP_BYPASS_5X), la Position duplicada
+    # podía caer fuera del slice y la función devolvía False → loop infinito
+    # de entradas al mismo mercado.
+    # Fix: query server-side por condition_id. limit=1 alcanza.
     try:
-        rows = list_records("Position", limit=50, query={"status": "open"})
-        for row in (rows or []):
-            if row.get("condition_id") == condition_id:
-                return True
-            if row.get("token_id") == condition_id:
-                return True
-        return False
-    except Exception:
+        rows = list_records(
+            "Position",
+            limit=1,
+            query={"status": "open", "condition_id": condition_id},
+        )
+        if rows:
+            return True
+        # Fallback por token_id — Positions viejas pueden no tener condition_id
+        # poblado (ver schema Position.condition_id: backfill desde 2026-05-01).
+        rows_token = list_records(
+            "Position",
+            limit=1,
+            query={"status": "open", "token_id": condition_id},
+        )
+        return bool(rows_token)
+    except Exception as exc:
+        # Fail-OPEN solo si la API falla. Si responde y dice "no hay" → False
+        # legítimo. Cloud DEDUP_24H sigue siendo el último filtro.
+        logger.warning("has_open_position query error: %s — fail-open", exc)
         return False
 
 
