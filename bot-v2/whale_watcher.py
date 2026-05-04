@@ -52,8 +52,8 @@ def _save_dedup_cache() -> None:
         }
         with open(_DEDUP_CACHE_PATH, "w") as f:
             json.dump(clean, f)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("dedup_cache save failed (path=%s): %s", _DEDUP_CACHE_PATH, e)
 
 logger = logging.getLogger("whale_watcher")
 
@@ -474,6 +474,15 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
         "total_whale_usdc": float(tr.get("size_usdc") or 0),
         "responded_at": detected_at_iso,
     }
+    # DEDUP_PRE_POST_V1 (JP+Opus 2026-05-04): set del cache ANTES del POST para
+    # que ráfagas in-process del mismo cid no pasen aunque el POST tarde o falle
+    # silencioso al persistir. Si el POST falla con HTTP >=400, hacemos rollback
+    # explícito para no bloquear reintentos legítimos. Timeout/excepción NO
+    # rollbackean (mejor bloquear 60min que duplicar si el POST llegó al cloud).
+    if cid:
+        _fast_path_recent[cid] = now_ts
+        _condition_last_exec[cid] = now_ts
+        _save_dedup_cache()
     try:
         r = requests.post(
             _FAST_PATH_DISPATCH_URL,
@@ -489,18 +498,17 @@ def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
             timeout=15,
         )
         if r.status_code >= 400:
+            # DEDUP_PRE_POST_V1 rollback: el dispatch falló, liberamos el lock
+            # para que un retry legítimo pueda pasar.
+            if cid:
+                _fast_path_recent.pop(cid, None)
+                _condition_last_exec.pop(cid, None)
+                _save_dedup_cache()
             logger.warning("fast_path dispatch %d: %s", r.status_code, r.text[:200])
             return
-        # FAST_PATH_LOG_FIX_V1: la function backend crea la proposal con asServiceRole.
         result = r.json() if r.text else {}
-        # FAST_PATH_CONDITION_LOCKOUT_V1: marcar cache solo si el dispatch tuvo respuesta exitosa.
-        if cid and r.status_code < 400:
-            _fast_path_recent[cid] = now_ts
-            # DEDUP_CONDITION_60MIN_V2: marcar también el guard 60min al confirmar dispatch.
-            _condition_last_exec[cid] = now_ts
-            # WHALE_WATCHER_TRI_PATCH_20260430 P2: persistir cache en disco después de cada dispatch exitoso.
-            _save_dedup_cache()
-            # Cleanup paralelo del dict 60min (más laxo, cutoff 2x ventana).
+        # Cleanup paralelo del dict 60min (más laxo, cutoff 2x ventana).
+        if cid:
             if len(_condition_last_exec) > 500:
                 cutoff_60min = now_ts - (_FAST_PATH_DEDUP_60MIN_SECONDS * 2)
                 for k in list(_condition_last_exec.keys()):
