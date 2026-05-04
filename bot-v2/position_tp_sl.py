@@ -47,8 +47,8 @@ DEFAULT_SL_PCT = -0.08
 # TRAILING_STOP_V1: trailing stop dinámico. Cuando max_pnl_pct (HWM) supera
 # TRAILING_ACTIVATION_PCT, el SL efectivo pasa a max_pnl_pct - TRAILING_DISTANCE_PCT.
 # Mientras max_pnl_pct < TRAILING_ACTIVATION_PCT se usa el SL fijo (default_sl).
-TRAILING_ACTIVATION_PCT = 0.05  # +5% para activar
-TRAILING_DISTANCE_PCT = 0.02    # 2¢ debajo del HWM
+TRAILING_ACTIVATION_PCT = 0.50  # JP+Opus 2026-05-04: solo trailing en trades >=+50%  # +5% para activar
+TRAILING_DISTANCE_PCT = 0.10  # JP+Opus 2026-05-04: deja correr 10% desde el pico    # 2¢ debajo del HWM
 POLYMARKET_MIN_SHARES = 5.0
 AGGRESSIVE_DISCOUNT_USD = 0.02
 
