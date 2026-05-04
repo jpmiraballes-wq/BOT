@@ -26,6 +26,7 @@ LÃ³gica:
 
 import logging
 import time
+import requests
 from typing import Dict, Any, Optional
 
 from _clob_compat import OrderArgs, OrderType
@@ -41,6 +42,34 @@ from base44_client import (
 from decision_logger import log_decision, log_warning
 
 logger = logging.getLogger(__name__)
+
+# ON_CHAIN_BALANCE_GUARD_V1 (JP+Opus 2026-05-04):
+# Antes de intentar vender, leer el balance REAL on-chain para no errar con
+# "not enough balance". El BUY original cobra ~2% en shares, así que size_tokens
+# de la DB queda inflado. Caso Lazio 2026-05-04: DB decia 32 tokens, on-chain 24
+# -> 4 capas de cascada fallaron con balance error -> posicion quedo zombie.
+_TP_SL_WALLET = "0x7c6a42cb6ae0d63a7073eefc1a5e04f102facbfb"
+
+def _fetch_onchain_balance(token_id):
+    """Devuelve shares reales on-chain para este token. 0.0 si falla o no existe."""
+    if not token_id:
+        return 0.0
+    try:
+        r = requests.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": _TP_SL_WALLET, "limit": 500},
+            timeout=8,
+        )
+        if not r.ok:
+            return 0.0
+        for p in (r.json() or []):
+            asset = str(p.get("asset") or p.get("tokenId") or p.get("token_id") or "")
+            if asset == str(token_id):
+                return float(p.get("size") or 0.0)
+        return 0.0
+    except Exception as e:
+        logger.warning("onchain_balance fetch failed for %s: %s", str(token_id)[:12], e)
+        return 0.0
 
 DEFAULT_TP_PCT = 0.12
 DEFAULT_SL_PCT = -0.08
@@ -293,10 +322,21 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
     current_price = book["mid"]
 
     size_tokens_persisted = float(pos.get("size_tokens") or 0.0)
-    if size_tokens_persisted > 0:
-        shares = size_tokens_persisted
-    else:
-        shares = size_usdc / max(0.01, entry)
+    db_shares = size_tokens_persisted if size_tokens_persisted > 0 else (size_usdc / max(0.01, entry))
+
+    # ON_CHAIN_BALANCE_GUARD_V1: usar el menor entre DB y on-chain real.
+    # Si on-chain devuelve 0 -> token no existe (orden nunca filleo o ya se vendio),
+    # no intentamos vender, dejamos que el reconcile lo limpie.
+    on_chain_shares = _fetch_onchain_balance(token_id)
+    if on_chain_shares <= 0:
+        logger.warning("tp_sl skip: pos %s has no on-chain balance (db_shares=%.2f)",
+                       str(pos.get("id", ""))[:8], db_shares)
+        return False
+
+    shares = min(db_shares, on_chain_shares)
+    if shares < db_shares:
+        logger.info("tp_sl shares adjusted: db=%.2f -> on_chain=%.2f for %s",
+                    db_shares, on_chain_shares, market_label[:30])
 
     attempts = []
     res = _try_close(client, token_id, side_str, shares, current_price)
