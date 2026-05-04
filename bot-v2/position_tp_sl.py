@@ -71,13 +71,13 @@ def _fetch_onchain_balance(token_id):
         logger.warning("onchain_balance fetch failed for %s: %s", str(token_id)[:12], e)
         return 0.0
 
-DEFAULT_TP_PCT = 0.12
+DEFAULT_TP_PCT = 0.35  # JP+Opus 2026-05-04: TP_SL_V2 — sube de 12% a 35% para capturar resoluciones grandes (caso City vendido a +22%)
 DEFAULT_SL_PCT = -0.08
 # TRAILING_STOP_V1: trailing stop dinámico. Cuando max_pnl_pct (HWM) supera
 # TRAILING_ACTIVATION_PCT, el SL efectivo pasa a max_pnl_pct - TRAILING_DISTANCE_PCT.
 # Mientras max_pnl_pct < TRAILING_ACTIVATION_PCT se usa el SL fijo (default_sl).
-TRAILING_ACTIVATION_PCT = 0.50  # JP+Opus 2026-05-04: solo trailing en trades >=+50%  # +5% para activar
-TRAILING_DISTANCE_PCT = 0.10  # JP+Opus 2026-05-04: deja correr 10% desde el pico    # 2¢ debajo del HWM
+TRAILING_ACTIVATION_PCT = 0.25  # JP+Opus 2026-05-04 noche: TP_SL_V2 — activa trailing a partir de +25% (antes 50%)
+TRAILING_DISTANCE_PCT = 0.08  # JP+Opus 2026-05-04 noche: TP_SL_V2 — deja correr 8% desde el pico (antes 10%)
 POLYMARKET_MIN_SHARES = 5.0
 AGGRESSIVE_DISCOUNT_USD = 0.02
 
@@ -493,6 +493,45 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
     return False
 
 
+# GUARD_TIME_TO_RESOLVE_V1 (JP+Opus 2026-05-04 noche):
+# Antes de disparar TP fijo (35%) chequeamos cuánto falta para que el mercado
+# resuelva. Si faltan más de 90min → ignoramos TP fijo y dejamos correr el
+# trailing. Si faltan ≤90min o no hay end_date conocido → TP fijo activa normal.
+# Caso Manchester City 4-may: vendimos a +22% cuando el partido recién había
+# arrancado y faltaban 100min. Si City ganaba se nos iban $24 más en mesa.
+GUARD_TIME_TO_RESOLVE_MIN = 90
+
+def _minutes_to_resolve(pos):
+    """Devuelve minutos hasta la resolución, o None si no se puede determinar.
+
+    Lee CopyTradeProposal.market_end_date asociada a la Position vía
+    executed_position_id. El cron guarda end_date desde gamma-api de Polymarket.
+    Si no hay proposal vinculada o end_date inválido → None (TP fallback activo).
+    """
+    try:
+        linked = list_records(
+            "CopyTradeProposal",
+            limit=1,
+            query={"executed_position_id": pos.get("id")},
+            sort="-created_date",
+        )
+        if not linked:
+            return None
+        end_iso = linked[0].get("market_end_date")
+        if not end_iso:
+            return None
+        from datetime import datetime, timezone
+        # Acepta tanto "2026-05-04T20:00:00Z" como "2026-05-04T20:00:00+00:00"
+        end_dt = datetime.fromisoformat(str(end_iso).replace("Z", "+00:00"))
+        now_dt = datetime.now(timezone.utc)
+        delta_min = (end_dt - now_dt).total_seconds() / 60.0
+        return delta_min
+    except Exception as e:
+        logger.debug("guard_time_to_resolve: failed for pos=%s err=%s",
+                     str(pos.get("id", ""))[:8], e)
+        return None
+
+
 def manage_open_positions(client) -> Dict[str, int]:
     """Loop principal. TODAS las strategies."""
     if client is None:
@@ -604,6 +643,17 @@ def manage_open_positions(client) -> Dict[str, int]:
             else:
                 dust_exits += 1
         elif pnl_pct >= tp_pct:
+            # GUARD_TIME_TO_RESOLVE_V1: si faltan >90min para resolución y ya
+            # estamos en TP, NO cerramos — dejamos correr para que el trailing
+            # capture más ganancia. Solo aplica al TP fijo, no al trailing_stop.
+            mins_left = _minutes_to_resolve(pos)
+            if mins_left is not None and mins_left > GUARD_TIME_TO_RESOLVE_MIN:
+                logger.info(
+                    "GUARD_TIME_TO_RESOLVE: skip TP fijo pos=%s pnl=%.1f%% mins_left=%.0f (>%d) — dejando correr trailing",
+                    str(pos.get("id", ""))[:8], pnl_pct * 100, mins_left,
+                    GUARD_TIME_TO_RESOLVE_MIN,
+                )
+                continue
             ok = _close_position(client, pos, book, "take_profit", pnl_pct)
             if ok:
                 closed_tp += 1
