@@ -288,7 +288,7 @@ class PositionTracker:
             url = "%s/positions" % self._DATA_API
             resp = requests.get(
                 url,
-                params={"user": self._WALLET, "sizeThreshold": "0.01"},
+                params={"user": self._WALLET, "limit": 500},
                 timeout=REQUEST_TIMEOUT,
             )
             if resp.status_code >= 400:
@@ -298,7 +298,7 @@ class PositionTracker:
             for p in positions:
                 asset = str(p.get("asset") or p.get("tokenId") or p.get("token_id") or "")
                 if asset == tid:
-                    return float(p.get("size") or 0) >= float(size_tokens) * 0.95
+                    return float(p.get("size") or 0) > 0
             return False  # no encontrado = 0 en wallet
         except (requests.RequestException, ValueError) as exc:
             logger.debug("balance check fallo: %s", exc)
