@@ -117,7 +117,8 @@ def fetch_base44_open_positions():
             open_pos = [p for p in records if p.get("status") == "open"]
             deployed = sum(float(p.get("size_usdc") or 0) for p in open_pos)
             return len(open_pos), round(deployed, 2)
-    except Exception:
+    except Exception as e:
+        log_event("main", f"fetch_base44_open_positions_error: {str(e)}", level="error")
         return 0, 0.0
 
 
