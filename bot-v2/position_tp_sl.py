@@ -576,6 +576,42 @@ def _minutes_to_resolve(pos):
         return None
 
 
+
+# SWISSTONY_MIRROR_MODE_V1_TPSL: si Swisstony vende el mismo token que copiamos, salimos.
+# Esto convierte el sistema de copy-buy en mirror real BUY+SELL.
+def _find_recent_swisstony_sell(pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    token_id = pos.get("token_id")
+    if not token_id:
+        return None
+    try:
+        signals = list_records(
+            "WhaleSignal",
+            limit=20,
+            query={"token_id": token_id, "side": "SELL"},
+            sort="-whale_trade_ts",
+        )
+    except Exception:
+        return None
+
+    opened_ts = float(pos.get("opened_at_ts") or 0.0)
+    now_ts = time.time()
+    for sig in signals or []:
+        name = str(sig.get("whale_name") or "").lower()
+        addr = str(sig.get("whale_address") or "").lower()
+        is_swisstony = "swisstony" in name or "swiss_tony" in name or addr == "0x204f72f35326db932158cba6adff0b9a1da95e14"
+        if not is_swisstony:
+            continue
+        sell_ts = float(sig.get("whale_trade_ts") or 0.0)
+        if sell_ts <= 0:
+            continue
+        # Solo cuenta ventas posteriores a nuestra apertura, y no señales viejas.
+        if opened_ts and sell_ts < opened_ts - 10:
+            continue
+        if now_ts - sell_ts > 2 * 3600:
+            continue
+        return sig
+    return None
+
 def manage_open_positions(client) -> Dict[str, int]:
     """Loop principal. TODAS las strategies."""
     if client is None:
@@ -604,6 +640,7 @@ def manage_open_positions(client) -> Dict[str, int]:
     closed_tp = 0
     closed_sl = 0
     dust_exits = 0
+    closed_mirror = 0
 
     for pos in positions:
         token_id = pos.get("token_id")
@@ -617,6 +654,37 @@ def manage_open_positions(client) -> Dict[str, int]:
         side_str = (pos.get("side") or "BUY").upper()
         exit_price_now = book["bid"] if side_str == "BUY" else book["ask"]
         pnl_pct = _compute_pnl_pct(entry, exit_price_now, side_str)
+
+        # SWISSTONY_MIRROR_MODE_V1_TPSL: salida espejo. Si Swisstony vendió este token,
+        # cerramos nosotros también antes de esperar TP/SL.
+        mirror_sell = _find_recent_swisstony_sell(pos)
+        if mirror_sell:
+            ok = _close_position(client, pos, book, "swisstony_mirror_sell", pnl_pct)
+            try:
+                create_record("LogEvent", {
+                    "level": "warn",
+                    "module": "position_tp_sl",
+                    "message": f"SWISSTONY_MIRROR_EXIT: closed {str(pos.get('id'))[:8]} after Swisstony SELL",
+                    "data": {
+                        "position_id": pos.get("id"),
+                        "token_id": str(token_id)[-12:],
+                        "market": (pos.get("market") or pos.get("question") or "")[:120],
+                        "sell_trade_hash": mirror_sell.get("trade_hash"),
+                        "sell_price": mirror_sell.get("price"),
+                        "pnl_pct": pnl_pct,
+                        "closed_ok": ok,
+                    },
+                })
+            except Exception:
+                pass
+            if ok:
+                try:
+                    closed_mirror += 1
+                except Exception:
+                    pass
+            else:
+                dust_exits += 1
+            continue
 
         try:
             update_record("Position", pos.get("id"), {
@@ -727,4 +795,5 @@ def manage_open_positions(client) -> Dict[str, int]:
         "closed_tp": closed_tp,
         "closed_sl": closed_sl,
         "dust_exits": dust_exits,
+        "closed_mirror": closed_mirror,
     }
