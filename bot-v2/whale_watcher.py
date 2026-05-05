@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 import json
@@ -67,6 +68,14 @@ _last_run_at: float = 0.0
 _whales_cache: List[Dict[str, Any]] = []
 _whales_cache_at: float = 0.0
 
+# SWISSTONY_DEDICATED_LANE_V1: carril dedicado para swisstony, independiente del loop general 30s.
+# Corre cada 3s y deduplica localmente por transactionHash para no tocar cloud dos veces.
+_SWISSTONY_LANE_INTERVAL_SECONDS = int(os.environ.get("SWISSTONY_LANE_INTERVAL_SECONDS", "3"))
+_SWISSTONY_TX_CACHE_MAX = 500
+_last_swisstony_lane_at: float = 0.0
+_seen_tx_hashes = deque(maxlen=_SWISSTONY_TX_CACHE_MAX)
+_seen_tx_hash_set = set()
+
 
 def _load_tier_s_whales() -> List[Dict[str, Any]]:
     """MULTI_WHALE_SHADOW_V1 — carga Tier S + SHADOW (Multi-Whale Fase 1)."""
@@ -84,6 +93,33 @@ def _load_tier_s_whales() -> List[Dict[str, Any]]:
     if rows:
         logger.info("whale_watcher: %d wallets cargadas (S=%d SHADOW=%d)", len(rows), len(rows_s), len(rows_shadow))
     return _whales_cache
+
+
+def _is_swisstony_whale(whale: Dict[str, Any]) -> bool:
+    name = str(whale.get("display_name") or "").lower()
+    return "swisstony" in name or "swiss_tony" in name
+
+
+def _load_swisstony_whale() -> Optional[Dict[str, Any]]:
+    for whale in _load_tier_s_whales():
+        if _is_swisstony_whale(whale) and whale.get("enabled") is True:
+            return whale
+    return None
+
+
+def _remember_swisstony_tx(tx_hash: str) -> bool:
+    """SWISSTONY_DEDICATED_LANE_V1: True si es hash nuevo; False si ya lo vimos localmente."""
+    global _seen_tx_hashes, _seen_tx_hash_set
+    if not tx_hash:
+        return False
+    if tx_hash in _seen_tx_hash_set:
+        return False
+    if len(_seen_tx_hashes) >= _SWISSTONY_TX_CACHE_MAX:
+        old = _seen_tx_hashes.popleft()
+        _seen_tx_hash_set.discard(old)
+    _seen_tx_hashes.append(tx_hash)
+    _seen_tx_hash_set.add(tx_hash)
+    return True
 
 
 # FETCH_WALLET_TRADES_LIMIT_100: bump 30→100. Wallets activas (surfandturf 100+ trades/día) perdían trades frescos.
@@ -263,6 +299,59 @@ _FAST_PATH_ITF_CHALLENGER_QUALS_BLOCK_TERMS = (
     "aix en provence", "aix-en-provence", "cagliari", "ostrava", "francavilla",
     "antalya", "tallahassee", "meerbusch", "shymkent", "savannah", "oeiras", "bonita springs",
 )
+
+
+def _run_swisstony_lane_once() -> Dict[str, Any]:
+    """SWISSTONY_DEDICATED_LANE_V1: poll dedicado de swisstony cada 3s, con dedupe local por tx hash."""
+    whale = _load_swisstony_whale()
+    if not whale:
+        return {"ok": False, "reason": "swisstony_not_found"}
+    addr = (whale.get("wallet_address") or "").lower()
+    if not addr:
+        return {"ok": False, "reason": "swisstony_missing_address"}
+
+    raw_trades = _fetch_wallet_trades(addr, limit=100)
+    _ts_cutoff = time.time() - 700
+    dispatched = 0
+    seen = 0
+    for raw in raw_trades:
+        tx_hash = raw.get("transactionHash") or raw.get("tx_hash") or raw.get("id")
+        if not tx_hash or not _remember_swisstony_tx(str(tx_hash)):
+            seen += 1
+            continue
+        try:
+            if float(raw.get("timestamp") or 0) <= _ts_cutoff:
+                continue
+        except Exception:
+            continue
+        norm = _normalize_trade(raw, whale)
+        if not norm or not norm.get("trade_hash"):
+            continue
+        if _is_fast_path_candidate(norm):
+            _dispatch_fast_path(norm)
+            dispatched += 1
+
+    return {
+        "ok": True,
+        "wallet": "swisstony",
+        "raw": len(raw_trades),
+        "duplicates_seen": seen,
+        "dispatched": dispatched,
+    }
+
+
+def maybe_run_swisstony_lane() -> Optional[Dict[str, Any]]:
+    """SWISSTONY_DEDICATED_LANE_V1: llamado en cada loop principal; no espera WHALE_INTERVAL_SECONDS."""
+    global _last_swisstony_lane_at
+    now = time.time()
+    if now - _last_swisstony_lane_at < _SWISSTONY_LANE_INTERVAL_SECONDS:
+        return None
+    _last_swisstony_lane_at = now
+    try:
+        return _run_swisstony_lane_once()
+    except Exception as exc:
+        logger.warning("swisstony_lane fallo: %s", exc, exc_info=True)
+        return None
 
 
 def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
@@ -619,8 +708,12 @@ def run_whale_watcher_once() -> Dict[str, Any]:
 
 
 def maybe_run_whale_watcher() -> Optional[Dict[str, Any]]:
-    """Llamado en cada loop. Solo ejecuta si pasaron WHALE_INTERVAL_SECONDS."""
+    """Llamado en cada loop. Swisstony corre por carril 3s; el resto sigue cada 30s."""
     global _last_run_at
+
+    # SWISSTONY_DEDICATED_LANE_V1: carril dedicado, no bloquea ni altera el loop general de 30s.
+    maybe_run_swisstony_lane()
+
     now = time.time()
     if now - _last_run_at < WHALE_INTERVAL_SECONDS:
         return None
