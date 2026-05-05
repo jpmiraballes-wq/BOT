@@ -118,7 +118,7 @@ def fetch_base44_open_positions():
             deployed = sum(float(p.get("size_usdc") or 0) for p in open_pos)
             return len(open_pos), round(deployed, 2)
     except Exception as e:
-        log_event("main", f"fetch_base44_open_positions_error: {str(e)}", level="error")
+        logger.warning("fetch_base44_open_positions_error: %s", e)  # MAIN_BASE44_FALLBACK_LOGGER_V1
         return 0, 0.0
 
 
