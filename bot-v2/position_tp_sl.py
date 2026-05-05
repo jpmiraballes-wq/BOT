@@ -673,6 +673,40 @@ def _find_recent_swisstony_sell(pos: Dict[str, Any]) -> Optional[Dict[str, Any]]
         return sig
     return None
 
+# MIRROR_ONLY_ON_LOSS_V1: calcula el PnL aproximado del whale para decidir si
+# copiamos su SELL. Asumimos que nuestro entry_price ≈ swisstony entry_price
+# (somos mirror copy), así que (sell.price - our_entry) / our_entry ≈ swisstony_pnl_pct.
+# Solo devolvemos True si swisstony está saliendo con pérdida ≤ -20%.
+def _mirror_loss_qualifies(pos: Dict[str, Any], sell_signal: Optional[Dict[str, Any]]) -> bool:
+    if not sell_signal:
+        return False
+    try:
+        sell_price = float(sell_signal.get("price") or 0.0)
+        our_entry = float(pos.get("entry_price") or 0.0)
+        if sell_price <= 0 or our_entry <= 0:
+            return False
+        side = (pos.get("side") or "BUY").upper()
+        # Para BUY: ganamos si sell_price > entry. Pérdida si < entry.
+        # Para SELL (rare en copy): invertido.
+        if side == "BUY":
+            whale_pnl_pct = (sell_price - our_entry) / our_entry
+        else:
+            whale_pnl_pct = (our_entry - sell_price) / our_entry
+        qualifies = whale_pnl_pct <= -0.2
+        logger.info(
+            "MIRROR_GATE: pos=%s whale_sell=%.4f our_entry=%.4f whale_pnl=%.2f%% qualifies=%s",
+            str(pos.get("id", ""))[:8],
+            sell_price,
+            our_entry,
+            whale_pnl_pct * 100,
+            qualifies,
+        )
+        return bool(qualifies)
+    except Exception as e:
+        logger.debug("mirror_loss_qualifies failed: %s", e)
+        return False
+
+
 def manage_open_positions(client) -> Dict[str, int]:
     """Loop principal. TODAS las strategies."""
     if client is None:
@@ -736,13 +770,13 @@ def manage_open_positions(client) -> Dict[str, int]:
         exit_price_now = book["bid"] if side_str == "BUY" else book["ask"]
         pnl_pct = _compute_pnl_pct(entry, exit_price_now, side_str)
 
-        # SWISSTONY_MIRROR_DISABLED_V1 (JP 2026-05-05): mirror desactivado.
-        # El profit-runner (-35 SL, no fixed TP, trailing +10/-12) maneja todas
-        # las salidas. Mirror salía con +18% / -5% / -7.5% pisando el plan.
-        # SWISSTONY_MIRROR_MODE_V1_TPSL: salida espejo. Si Swisstony vendió este token,
-        # cerramos nosotros también antes de esperar TP/SL.
+        # MIRROR_ONLY_ON_LOSS_V1 (JP 2026-05-05): mirror solo dispara si swisstony
+        # vende con pérdida grande (≤-20%). Eso indica evento serio en el mercado
+        # (lesión, gol, news). Si vende ganando o perdiendo poco → ignorar y dejar
+        # que el profit-runner (trailing +10/-12, SL -35%) maneje la salida.
         mirror_sell = _find_recent_swisstony_sell(pos)
-        if False and mirror_sell:
+        mirror_qualifies = _mirror_loss_qualifies(pos, mirror_sell) if mirror_sell else False
+        if mirror_sell and mirror_qualifies:
             ok = _close_position(client, pos, book, "swisstony_mirror_sell", pnl_pct)
             try:
                 create_record("LogEvent", {
