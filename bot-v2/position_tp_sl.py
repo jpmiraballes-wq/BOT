@@ -582,7 +582,12 @@ def manage_open_positions(client) -> Dict[str, int]:
         return {"checked": 0, "closed_tp": 0, "closed_sl": 0, "dust_exits": 0}
 
     # FIX 2026-04-26 JP: monitorea TODAS las strategies (antes solo whale_consensus).
-    positions = list_records("Position", limit=50, query={"status": "open"}, sort="-opened_at")
+    # TP_SL_MANAGE_PARTIAL_FILLS_V1: gestionar posiciones abiertas y ventas parciales.
+    # sell_submitted no se toca hasta próximo ciclo/reconcile; sell_partially_filled
+    # mantiene remaining size_tokens y vuelve a intentar salida si TP/SL sigue activo.
+    open_positions = list_records("Position", limit=50, query={"status": "open"}, sort="-opened_at")
+    partial_positions = list_records("Position", limit=50, query={"status": "sell_partially_filled"}, sort="-updated_date")
+    positions = (open_positions or []) + (partial_positions or [])
     # TP_SL_CONFIGURABLE_FROM_BOTCONFIG_V1: leer SL/TP desde BotConfig en cada ciclo. Null-check explícito
     # — 0 no cae al fallback (decisión JP 2026-04-30 Madrid).
     cfg_rows = list_records("BotConfig", limit=1)
