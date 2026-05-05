@@ -646,6 +646,22 @@ def manage_open_positions(client) -> Dict[str, int]:
         token_id = pos.get("token_id")
         if not token_id:
             continue
+
+        # RECONCILE_SELL_UNFILLED_V1: si ya intentó vender, verificar balance real antes de reentrar
+        if pos.get("close_reason") == "sell_unfilled":
+            remaining = _fetch_onchain_balance(token_id)
+            if remaining <= 0.01:
+                # Polymarket ya vendió — construir book sintético con precio actual
+                book = _fetch_book(client, token_id)
+                if not book:
+                    entry = float(pos.get("entry_price") or 0.5)
+                    book = {"best_ask": entry, "best_bid": entry, "mid": entry}
+                entry = float(pos.get("entry_price") or 0)
+                pnl_pct = _compute_pnl_pct(entry, book["mid"], pos.get("side", "YES"))
+                _close_position(client, pos, book, "clob_sync_confirmed", pnl_pct)
+                continue
+            # Si todavía tiene balance real → tratar como posición normal
+
         book = _fetch_book(client, token_id)
         if not book:
             continue
