@@ -25,11 +25,25 @@ import fcntl as _fcntl
 
 _LOCK_FILE = os.path.expanduser('~/BOT/bot-v2/.bot.lock')
 _lock_fh = open(_LOCK_FILE, 'w')
-try:
-    _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-    _lock_fh.write(str(os.getpid()))
-    _lock_fh.flush()
-except IOError:
+# PID_LOCK_GRACEFUL_RESTART_V1: al reiniciar con pkill, el proceso viejo
+# puede tardar unos segundos en soltar el flock. Esperamos hasta 30s antes
+# de abortar para evitar falsos exit(1) durante deploys normales.
+_lock_acquired = False
+for _lock_attempt in range(30):
+    try:
+        _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        _lock_fh.seek(0)
+        _lock_fh.truncate()
+        _lock_fh.write(str(os.getpid()))
+        _lock_fh.flush()
+        _lock_acquired = True
+        break
+    except IOError:
+        if _lock_attempt == 0:
+            print("⏳ PID lock activo; esperando a que cierre el proceso anterior...")
+        time.sleep(1)
+
+if not _lock_acquired:
     print("❌ Bot ya está corriendo (PID lock activo en .bot.lock). Saliendo.")
     sys.exit(1)
 
