@@ -120,19 +120,38 @@ def _handle_signal(signum, _frame):
 
 def fetch_base44_open_positions():
     """Lee Position con status=open desde Base44 y retorna (count, deployed_usdc)."""
-    import urllib.request, json
+    # MAIN_FETCH_POSITIONS_REQUESTS_V1: urllib estaba devolviendo 403 en Base44.
+    # Usamos requests igual que base44_client.py y aplanamos records.data.
+    import requests
     from config import BASE44_API_KEY, BASE44_APP_ID
+    if not BASE44_API_KEY:
+        return 0, 0.0
     url = f"https://app.base44.com/api/apps/{BASE44_APP_ID}/entities/Position?limit=200&sort=-created_date"
-    req = urllib.request.Request(url, headers={"api_key": BASE44_API_KEY, "Content-Type": "application/json"})
+    headers = {
+        "api_key": BASE44_API_KEY,
+        "x-api-key": BASE44_API_KEY,
+        "Authorization": f"Bearer {BASE44_API_KEY}",
+        "Content-Type": "application/json",
+        "User-Agent": "polymarket-bot/2.0",
+    }
     try:
-        with urllib.request.urlopen(req, timeout=5) as r:
-            data = json.loads(r.read())
-            records = data if isinstance(data, list) else data.get("records", [])
-            open_pos = [p for p in records if p.get("status") == "open"]
-            deployed = sum(float(p.get("size_usdc") or 0) for p in open_pos)
-            return len(open_pos), round(deployed, 2)
+        resp = requests.get(url, headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        raw = data if isinstance(data, list) else data.get("records", [])
+        records = []
+        for r in raw:
+            if isinstance(r, dict) and isinstance(r.get("data"), dict):
+                merged = dict(r.get("data") or {})
+                merged.update({k: v for k, v in r.items() if k != "data"})
+                records.append(merged)
+            else:
+                records.append(r)
+        open_pos = [p for p in records if p.get("status") == "open"]
+        deployed = sum(float(p.get("size_usdc") or 0) for p in open_pos)
+        return len(open_pos), round(deployed, 2)
     except Exception as e:
-        logger.warning("fetch_base44_open_positions_error: %s", e)  # MAIN_BASE44_FALLBACK_LOGGER_V1
+        logger.warning("fetch_base44_open_positions_error: %s", e)
         return 0, 0.0
 
 
