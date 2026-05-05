@@ -238,8 +238,27 @@ def _compute_pnl_pct(entry: float, current: float, side: str) -> float:
     return (entry - current) / entry
 
 
+def _mark_sell_state(pos_id: str, state: str, reason: str, order_id: str = "", extra: str = "") -> None:
+    """TP_SL_CONFIRMED_CLOSE_V1: estado auditable del cierre. Nunca inventa closed."""
+    if not pos_id:
+        return
+    patch = {
+        "status": state,
+        "close_reason": state if not reason else f"{state}:{reason}",
+        "notes": f"TP_SL_CONFIRMED_CLOSE_V1 {state} order_id={order_id or '-'} {extra}".strip(),
+    }
+    try:
+        update_record("Position", pos_id, patch)
+        logger.warning("TP_SL_CONFIRMED_CLOSE:%s pos=%s order=%s reason=%s %s",
+                       state, pos_id[:8], order_id or '-', reason, extra)
+    except Exception as exc:
+        logger.warning("TP_SL_CONFIRMED_CLOSE: state update failed pos=%s state=%s err=%s",
+                       pos_id[:8], state, str(exc)[:100])
+
+
 def _try_close(client, token_id: str, side_str: str, shares: float,
-               price: float, order_type=None) -> Dict[str, Any]:
+               price: float, order_type=None, pos_id: Optional[str] = None,
+               reason: str = "") -> Dict[str, Any]:
     """
     Intenta cerrar `shares` al precio dado. Devuelve dict con resultado.
     order_type: OrderType.GTC (default) o OrderType.FAK para cross-spread.
@@ -264,6 +283,8 @@ def _try_close(client, token_id: str, side_str: str, shares: float,
         if not order_id or not success:
             return {"ok": False, "filled_shares": 0.0, "filled_price": 0.0,
                     "error": resp.get("error") or resp.get("status") or "rejected"}
+        _mark_sell_state(pos_id, "sell_submitted", reason, order_id,
+                         f"order_type={str(order_type)} price={_round_price(price):.2f} shares={shares:.2f}")
         # TP_SL_FILL_VERIFY_V1: si get_order falla, NO asumimos fill completo. Antes
         # del fix: except Exception: filled = shares → escribió Trade fantasma
         # cuando post_order acepta pero el SELL no llega a fillarse on-chain
@@ -339,13 +360,15 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                     db_shares, on_chain_shares, market_label[:30])
 
     attempts = []
-    res = _try_close(client, token_id, side_str, shares, current_price)
+    res = _try_close(client, token_id, side_str, shares, current_price,
+                     pos_id=pos_id, reason=reason)
     attempts.append({"strategy": "limit_at_book", "price": current_price,
                      "shares": shares})
 
     if not res["ok"] and "balance" in (res.get("error") or "").lower():
         reduced_shares = round(shares * 0.98, 2)
-        res = _try_close(client, token_id, side_str, reduced_shares, current_price)
+        res = _try_close(client, token_id, side_str, reduced_shares, current_price,
+                         pos_id=pos_id, reason=reason)
         attempts.append({"strategy": "balance_reduce_2pct", "price": current_price,
                          "shares": reduced_shares})
         if res["ok"]:
@@ -354,7 +377,7 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
     if not res["ok"] and "size_below_min" not in (res.get("error") or ""):
         cross_price = current_price
         res = _try_close(client, token_id, side_str, shares, cross_price,
-                         order_type=OrderType.FAK)
+                         order_type=OrderType.FAK, pos_id=pos_id, reason=reason)
         attempts.append({"strategy": "fak_cross_spread", "price": cross_price,
                          "shares": shares})
 
@@ -365,7 +388,7 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                      if side_str == "BUY"
                      else min(0.95, current_price + AGGRESSIVE_DISCOUNT_USD))
         res = _try_close(client, token_id, side_str, shares, agg_price,
-                         order_type=OrderType.FAK)
+                         order_type=OrderType.FAK, pos_id=pos_id, reason=reason)
         attempts.append({"strategy": "aggressive_fak", "price": agg_price,
                          "shares": shares})
 
@@ -390,6 +413,27 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         else:
             exit_price = raw_filled_price
         filled_shares = res["filled_shares"]
+        # TP_SL_CONFIRMED_CLOSE_V1: get_order confirmó fill, pero NO cerramos todavía.
+        # Verificamos balance real en Polymarket data-api. Si quedan shares,
+        # fue parcial o el data-api todavía no reflejó el SELL: mantener viva.
+        remaining_shares = _fetch_onchain_balance(token_id)
+        if remaining_shares > 0.01:
+            _mark_sell_state(
+                pos_id,
+                "sell_partially_filled",
+                reason,
+                res.get("order_id") or "",
+                f"filled={filled_shares:.2f} remaining={remaining_shares:.2f}",
+            )
+            update_record("Position", pos_id, {
+                "status": "sell_partially_filled",
+                "size_tokens": remaining_shares,
+                "current_price": current_price,
+                "pnl_unrealized": 0.0,
+            })
+            return False
+        _mark_sell_state(pos_id, "sell_confirmed", reason, res.get("order_id") or "",
+                         f"filled={filled_shares:.2f} remaining=0")
         notional_in = filled_shares * entry
         notional_out = filled_shares * exit_price
         pnl = (notional_out - notional_in) if side_str == "BUY" else (notional_in - notional_out)
@@ -446,21 +490,21 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
         )
         return True
 
-    # TP_SL_MID_DOUBLE_CONFIRM_V1: dust_unsellable SIN PnL fantasma (Bolt audit 2026-04-27).
-    # Si NO pudimos vender, NO sabemos el precio real de salida.
-    # NO inventamos PnL con current_price (puede ser bid roto).
-    # Marcamos dust_unsellable con pnl=0 y dejamos shares on-chain.
-    # NO creamos Trade record: el resolver lo hara al cerrar el mercado.
+    # TP_SL_CONFIRMED_CLOSE_V1: si NO hay Sell/Redeem confirmado, la Position NO se cierra.
+    # Antes este branch marcaba status=closed con dust_unsellable aunque los
+    # tokens siguieran on-chain. Eso generaba posiciones fantasma y PnL falso.
     last_err = (res.get("error") or "unknown")[:80]
+    remaining_shares = _fetch_onchain_balance(token_id)
     update_record("Position", pos_id, {
-        "status": "closed",
-        "close_reason": "dust_unsellable",
-        "close_time": now_ts_iso,
+        "status": "open",
+        "close_reason": "sell_unfilled",
+        "size_tokens": remaining_shares if remaining_shares > 0 else shares,
+        "current_price": current_price,
         "pnl_realized": 0.0,
         "pnl_unrealized": 0.0,
         "notes": (pos.get("notes") or "") +
-                 f" | dust_unsellable: {last_err} (intended {reason}, "
-                 f"shares on-chain hasta resolucion)",
+                 f" | TP_SL_CONFIRMED_CLOSE_V1: sell_unfilled: {last_err} (intended {reason}; "
+                 f"remaining_shares={remaining_shares:.2f}; NO Trade creado)",
     })
     try:
         logger.warning("dust_unsellable: %s reason=%s err=%s", pos_id[:8], reason, last_err)
