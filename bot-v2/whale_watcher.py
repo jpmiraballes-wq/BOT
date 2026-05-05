@@ -327,6 +327,18 @@ def _run_swisstony_lane_once() -> Dict[str, Any]:
         norm = _normalize_trade(raw, whale)
         if not norm or not norm.get("trade_hash"):
             continue
+        # SWISSTONY_MIRROR_MODE_V1_WATCHER: mirror completo de Swisstony.
+        # BUY puede disparar fast-path; SELL se manda inmediatamente al cloud
+        # para que position_tp_sl cierre nuestra Position del mismo token.
+        if str(norm.get("side") or "").upper() == "SELL":
+            _send_to_base44([norm])
+            dispatched += 1
+            logger.warning(
+                "SWISSTONY_MIRROR_SELL: sent SELL token=%s market=%s",
+                str(norm.get("token_id") or "")[-12:],
+                (norm.get("market_question") or norm.get("market_slug") or "")[:120],
+            )
+            continue
         if _is_fast_path_candidate(norm):
             _dispatch_fast_path(norm)
             dispatched += 1
