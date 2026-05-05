@@ -104,31 +104,32 @@ def _handle_signal(signum, _frame):
     _stop_requested = True
 
 
-def compute_capital_deployed(open_orders):
-    total = 0.0
-    for o in open_orders:
-        try:
-            price = float(o.get("price", 0.0))
-            size = float(o.get("original_size") or o.get("size") or 0.0)
-            total += price * size
-        except (TypeError, ValueError):
-            continue
-    return total
+def fetch_base44_open_positions():
+    """Lee Position con status=open desde Base44 y retorna (count, deployed_usdc)."""
+    import urllib.request, json
+    from config import BASE44_API_KEY, BASE44_APP_ID
+    url = f"https://app.base44.com/api/apps/{BASE44_APP_ID}/entities/Position?limit=200&sort=-created_date"
+    req = urllib.request.Request(url, headers={"api_key": BASE44_API_KEY, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+            records = data if isinstance(data, list) else data.get("records", [])
+            open_pos = [p for p in records if p.get("status") == "open"]
+            deployed = sum(float(p.get("size_usdc") or 0) for p in open_pos)
+            return len(open_pos), round(deployed, 2)
+    except Exception:
+        return 0, 0.0
 
 
 def build_snapshot(mode, rm, om, notes=""):
-    open_orders = om.get_open_orders() if om.client else []
-    deployed = compute_capital_deployed(open_orders)
+    open_count, deployed = fetch_base44_open_positions()
     return {
         "mode": mode,
-        # RM_NO_FAKE_CAPITAL_V1 — sin fallback fantasma. Si current_equity es 0 algo esta mal,
-        # mejor reportar 0 al dashboard que mentir con CAPITAL_USDC.
         "capital_total": float(rm.current_equity or 0.0),
         "capital_deployed": deployed,
         "daily_pnl": rm.daily_pnl,
         "drawdown_pct": rm.drawdown_pct,
-        "open_positions": len({o.get("market") or o.get("market_id")
-                               for o in open_orders if o}),
+        "open_positions": open_count,
         "notes": notes,
     }
 
