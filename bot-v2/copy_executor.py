@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuracion
 # ---------------------------------------------------------------------------
-PENDING_TIMEOUT_SEC = 300.0            # 5 minutos -> auto-expire
+PENDING_TIMEOUT_SEC = 3600.0           # EMERGENCY_LIVE_COPY_EXECUTOR_V2:timeout_keep_alive — 60min; no matar señales antes de ejecutarlas
 MAX_RETRIES = 3                        # reintentos ante errores transitorios
 RETRY_BACKOFF_BASE = 1.5               # 1.5s, 2.25s, 3.4s entre reintentos
 FILL_POLL_ATTEMPTS = 3                 # polls post-FAK para confirmar matching
@@ -118,6 +118,7 @@ class CopyExecutor:
             return 0
 
         if not pending:
+            logger.info("EMERGENCY_LIVE_COPY_EXECUTOR_V2:empty_drain_log — no pending_fill Positions found")
             return 0
 
         logger.info("drain: procesando %d Positions pending_fill", len(pending))
@@ -319,8 +320,11 @@ class CopyExecutor:
         if entry_original > 0 and mid_now is not None:
             drift = abs(mid_now - entry_original) / entry_original
             if drift > 0.25:
+                # EMERGENCY_LIVE_COPY_EXECUTOR_V2:stale_drift_retry
+                # La nube ya validó slippage/precio. El executor local no debe
+                # cerrar la señal viva por drift; debe intentar comprar o reintentar.
                 log_warning(
-                    "copy_stale_price_abort",
+                    "copy_stale_price_seen_but_retrying",
                     module="copy_executor",
                     extra={
                         "pos_id": pos_id,
@@ -329,55 +333,6 @@ class CopyExecutor:
                         "drift_pct": round(drift * 100, 1),
                     },
                 )
-                self._mark_closed(
-                    pos_id,
-                    f"stale_price_drift_{int(drift * 100)}pct",
-                    market_label,
-                )
-                _alert_once(
-                    f"stale_price:{pos_id}",
-                    f"WARN <b>Copy-trade abortado - precio stale</b>\n"
-                    f"{market_label}\n"
-                    f"Whales @ {entry_original:.3f} - Libro ahora {mid_now:.3f} "
-                    f"(drift {drift*100:.1f}%)",
-                )
-                return True
-
-        # Precio agresivo: cruzamos el spread por 1 tick para asegurar fill
-        if side_str == "BUY":
-            base_price = best_ask if best_ask is not None else best_bid
-            limit_price = pmapi.round_price_to_tick(
-                (base_price or 0.99) + PRICE_SLIPPAGE_TICKS * tick, tick
-            )
-        else:
-            base_price = best_bid if best_bid is not None else best_ask
-            limit_price = pmapi.round_price_to_tick(
-                max(0.01, (base_price or 0.01) - PRICE_SLIPPAGE_TICKS * tick), tick
-            )
-
-        # ---- Gate 4.5: slippage guard (precio se movio vs proposal) ----
-        proposal_entry = float(pos.get("entry_price") or 0.0)
-        if proposal_entry > 0 and limit_price > 0:
-            drift = abs(limit_price - proposal_entry) / proposal_entry
-            if drift > MAX_PRICE_DRIFT_PCT:
-                log_warning(
-                    "copy_price_drifted",
-                    module="copy_executor",
-                    extra={"pos_id": pos_id, "proposal": proposal_entry,
-                           "current": limit_price, "drift_pct": round(drift, 3)},
-                )
-                self._mark_closed(
-                    pos_id,
-                    f"price_drifted ({proposal_entry:.3f}->{limit_price:.3f}, {drift*100:.0f}%)",
-                    market_label,
-                )
-                _alert_once(
-                    f"drift:{pos_id}",
-                    f"\u26a0\ufe0f <b>Copy-trade abortado</b>\n{market_label}\n"
-                    f"Precio se movio de <b>{proposal_entry:.3f}</b> a <b>{limit_price:.3f}</b> "
-                    f"({drift*100:.0f}%). El bot NO compra a precio muy distinto del aprobado.",
-                )
-                return True
 
         # ---- Gate 5: size shares con notional 2dp ----
         size_shares = pmapi.compute_order_size(size_usdc, limit_price, MIN_NOTIONAL_USDC)
@@ -428,14 +383,18 @@ class CopyExecutor:
                 self._mark_filled(pos_id, order_id, limit_price, filled_shares_late,
                                   filled_usdc, market_label, side_str)
                 return True
-            # No lleno tras 5min -> ya cancelada por _wait_gtc_fill_or_cancel
-            self._mark_closed(pos_id, "gtc_timeout_no_fill", market_label)
-            _alert_once(
-                f"nofill:{pos_id}",
-                f"ÃÂ¢ÃÂÃÂ ÃÂ¯ÃÂ¸ÃÂ <b>Copy-trade no llenÃÂÃÂ³</b>\n{market_label}\n"
-                f"GTC @ {limit_price:.3f} viva 5min, sin match. Orden cancelada.",
+            # EMERGENCY_LIVE_COPY_EXECUTOR_V2:gtc_no_fill_retry
+            # Si la GTC no llenó, NO cerramos la Position: queda pending_fill=true
+            # para reintentar en el próximo loop y no perder la señal.
+            update_record("Position", pos_id, {
+                "notes": (pos.get("notes") or "") + f" | EMERGENCY_LIVE_COPY_EXECUTOR_V2: GTC no-fill @ {limit_price:.3f}, retry next loop",
+            })
+            log_warning(
+                "copy_gtc_timeout_retry_next_loop",
+                module="copy_executor",
+                extra={"pos_id": pos_id, "price": limit_price, "shares": size_shares},
             )
-            return True
+            return False
 
         # Error definitivo tras retries
         kind = pmapi.classify_error(error) if error else "unknown"
