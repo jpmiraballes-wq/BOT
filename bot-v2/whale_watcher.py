@@ -379,21 +379,23 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         size_usdc = float(tr.get("size_usdc") or 0)
     except Exception:
         return False
-    # ITF_CHALLENGER_QUALS_ABSOLUTE_BLOCK_MAC_V1: bloqueo absoluto ANTES del bypass de convicción.
-    # Si es ITF/Challenger/Qualification, no importa el monto del whale.
+    # SWISSTONY_MIRROR_AGGRESSIVE_MAC_V1: espejo agresivo de Swisstony.
+    # ITF/Challenger/Qualification solo pasan si es Swisstony y ticket >= $200.
+    # Tickets chicos o whales no-Swisstony siguen bloqueados.
     _noise_text = " ".join(str(tr.get(k) or "") for k in ("market_slug", "market_question", "question", "title")).lower()
-    if any(term in _noise_text for term in _FAST_PATH_ITF_CHALLENGER_QUALS_BLOCK_TERMS):
+    _is_swisstony = ("swisstony" in name) or ("swiss_tony" in name)
+    _big_conviction = _is_swisstony and size_usdc >= 200
+    if any(term in _noise_text for term in _FAST_PATH_ITF_CHALLENGER_QUALS_BLOCK_TERMS) and not _big_conviction:
         logger.info(
-            "fast_path_itf_challenger_quals_absolute_block: whale=%s size=$%.2f market=%s",
+            "fast_path_itf_challenger_quals_min_200_block: whale=%s size=$%.2f market=%s",
             name, size_usdc, (_noise_text[:120] or "unknown"),
         )
         return False
-
-    # SWISSTONY_CONVICTION_BYPASS_MAC_V1: swisstony $200+ mantiene bypass de otros filtros,
-    # pero YA NO bypassea ITF/Challenger/Qualifications (bloqueado arriba).
-    # NO bypassea NBA/MLB/KBL/Chinese/handicap/Spread/O/U/age_guard/dedup (innegociables).
-    _is_swisstony = ("swisstony" in name) or ("swiss_tony" in name)
-    _big_conviction = _is_swisstony and size_usdc >= 200
+    if any(term in _noise_text for term in _FAST_PATH_ITF_CHALLENGER_QUALS_BLOCK_TERMS) and _big_conviction:
+        logger.warning(
+            "SWISSTONY_MIRROR_AGGRESSIVE_MAC_V1: passing big ITF/quals ticket whale=%s size=$%.2f market=%s",
+            name, size_usdc, (_noise_text[:120] or "unknown"),
+        )
     if not (_FAST_PATH_MIN_PRICE <= price <= _FAST_PATH_MAX_PRICE):
         return False
     if size_usdc < _FAST_PATH_MIN_USDC:
