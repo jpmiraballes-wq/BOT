@@ -243,6 +243,16 @@ _FAST_PATH_DEDUP_60MIN_SECONDS = 3600
 # WHALE_WATCHER_TRI_PATCH_20260430 P2 DEDUP_CACHE_PERSIST_V1: dict cargado desde disco al arrancar.
 _condition_last_exec: Dict[str, float] = _load_dedup_cache()
 
+# ITF_CHALLENGER_QUALS_ABSOLUTE_BLOCK_MAC_V1 (JP+Opus 2026-05-05): bloqueo absoluto sin bypass.
+# Roma Qualifications, ITF, Challenger, Futures, Jiujiang/Wuxi quedan fuera
+# aunque swisstony meta $230-$899. Fast-path no debe ni llamar cloud.
+_FAST_PATH_ITF_CHALLENGER_QUALS_BLOCK_TERMS = (
+    "challenger", "itf", "futures", "qualifying", "qualification", "qualifications", "qualifier",
+    "jiujiang", "wuxi", "saint-malo", "saint malo", "mauthausen", "la bisbal",
+    "aix en provence", "aix-en-provence", "cagliari", "ostrava", "francavilla",
+    "antalya", "tallahassee", "meerbusch", "shymkent", "savannah", "oeiras", "bonita springs",
+)
+
 
 def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
     # Multi-Whale Fase 1: SHADOW whales NUNCA disparan fast-path.
@@ -257,9 +267,18 @@ def _is_fast_path_candidate(tr: Dict[str, Any]) -> bool:
         size_usdc = float(tr.get("size_usdc") or 0)
     except Exception:
         return False
-    # SWISSTONY_CONVICTION_BYPASS_MAC_V1 (JP+Opus 2026-04-30): si swisstony mete $200+ en este ticket
-    # individual, bypassea ITF blacklist + price>=75c + tenis-Challenger.
-    # Coherente con executeApprovedProposal/polymarketFetchWhaleActivity/whaleDetectConsensus.
+    # ITF_CHALLENGER_QUALS_ABSOLUTE_BLOCK_MAC_V1: bloqueo absoluto ANTES del bypass de convicción.
+    # Si es ITF/Challenger/Qualification, no importa el monto del whale.
+    _noise_text = " ".join(str(tr.get(k) or "") for k in ("market_slug", "market_question", "question", "title")).lower()
+    if any(term in _noise_text for term in _FAST_PATH_ITF_CHALLENGER_QUALS_BLOCK_TERMS):
+        logger.info(
+            "fast_path_itf_challenger_quals_absolute_block: whale=%s size=$%.2f market=%s",
+            name, size_usdc, (_noise_text[:120] or "unknown"),
+        )
+        return False
+
+    # SWISSTONY_CONVICTION_BYPASS_MAC_V1: swisstony $200+ mantiene bypass de otros filtros,
+    # pero YA NO bypassea ITF/Challenger/Qualifications (bloqueado arriba).
     # NO bypassea NBA/MLB/KBL/Chinese/handicap/Spread/O/U/age_guard/dedup (innegociables).
     _is_swisstony = ("swisstony" in name) or ("swiss_tony" in name)
     _big_conviction = _is_swisstony and size_usdc >= 200
