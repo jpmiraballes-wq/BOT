@@ -161,6 +161,17 @@ def _send_to_base44(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {"ok": False, "error": str(exc)}
 
 
+def _is_bot_paused() -> bool:
+    """KILL_SWITCH_FAST_PATH_V1: si BotConfig.paused/emergency_stop está activo, no crear proposals."""
+    try:
+        cfgs = list_records("BotConfig", limit=1)
+        cfg = (cfgs or [{}])[0]
+        return bool(cfg.get("paused") is True or cfg.get("emergency_stop") is True)
+    except Exception as exc:
+        logger.warning("fast_path_kill_switch_check_failed: %s", str(exc)[:120])
+        return True  # fail closed: si no podemos leer BotConfig, no disparamos fast-path
+
+
 # FAST_PATH_V1 helpers fast-path
 _FAST_PATH_TENNIS_TOP_KEYWORDS = (
     "madrid", "rome", "french", "wimbledon", "us-open", "australian",
@@ -447,6 +458,13 @@ def _has_open_position_for_condition(condition_id: str) -> bool:
 def _dispatch_fast_path(tr: Dict[str, Any]) -> None:
     """FAST_PATH_INLINE_V1: una sola POST a executeApprovedProposal con api_key header.
     La function crea la CopyTradeProposal con asServiceRole y ejecuta inline."""
+    if _is_bot_paused():
+        logger.warning(
+            "FAST_PATH_KILL_SWITCH: BotConfig paused/emergency_stop active — skip proposal whale=%s market=%s",
+            tr.get("whale_name"),
+            (tr.get("market_question") or tr.get("market_slug") or "")[:120],
+        )
+        return
     cid = tr.get("condition_id", "")
     # FAST_PATH_CONDITION_LOCKOUT_V1: lockout 60s por condition_id.
     now_ts = time.time()
