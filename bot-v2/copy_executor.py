@@ -303,6 +303,14 @@ class CopyExecutor:
 
         tick = pmapi.get_tick_size(token_id)
 
+        # COPY_EXECUTOR_LIMIT_PRICE_FIX_V1: limit_price debe existir antes de compute_order_size.
+        if side_str == "BUY":
+            base_price = float(best_ask if best_ask is not None else best_bid)
+            limit_price = min(0.99, round(base_price + (PRICE_SLIPPAGE_TICKS * tick), 4))
+        else:
+            base_price = float(best_bid if best_bid is not None else best_ask)
+            limit_price = max(0.01, round(base_price - (PRICE_SLIPPAGE_TICKS * tick), 4))
+
         # ---- STALE_PRICE_GUARD_V1 ----
         # Si el libro se alejÃÂ³ >25% del entry_price original (que viene del
         # proposal = precio al que las ballenas compraron), abortamos.
