@@ -80,6 +80,8 @@ TRAILING_ACTIVATION_PCT = 0.25  # JP+Opus 2026-05-04 noche: TP_SL_V2 — activa 
 TRAILING_DISTANCE_PCT = 0.08  # JP+Opus 2026-05-04 noche: TP_SL_V2 — deja correr 8% desde el pico (antes 10%)
 POLYMARKET_MIN_SHARES = 5.0
 AGGRESSIVE_DISCOUNT_USD = 0.02
+PENDING_FILL_GHOST_MAX_AGE_SEC = 10 * 60
+PENDING_FILL_MIN_ONCHAIN_BALANCE = 0.01
 
 # TP_SL_MID_DOUBLE_CONFIRM_V1 — Bolt audit 2026-04-27
 # Doble confirmación para SL catastrófico (<-40%).
@@ -254,6 +256,65 @@ def _mark_sell_state(pos_id: str, state: str, reason: str, order_id: str = "", e
     except Exception as exc:
         logger.warning("TP_SL_CONFIRMED_CLOSE: state update failed pos=%s state=%s err=%s",
                        pos_id[:8], state, str(exc)[:100])
+
+
+# PENDING_FILL_GHOST_GUARD_V1 (JP+Opus 2026-05-05):
+# Si cloud creó Position pending_fill=true pero el bot Mac/CLOB nunca dejó balance
+# on-chain, cerramos la Position como fantasma. Evita que FAST_PATH_DB_CREATED
+# quede como Position open eterna sin haber llegado a Polymarket.
+def _position_age_seconds(pos: Dict[str, Any]) -> float:
+    raw = pos.get("opened_at_ts")
+    if raw:
+        try:
+            return time.time() - float(raw)
+        except Exception:
+            pass
+    raw = pos.get("opened_at") or pos.get("created_date")
+    if not raw:
+        return 0.0
+    try:
+        from datetime import datetime
+        return time.time() - datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _reconcile_pending_fill_ghosts(positions) -> Dict[str, int]:
+    stats = {"pending_ghost_closed": 0, "pending_fill_confirmed": 0}
+    for pos in positions or []:
+        if not pos.get("pending_fill"):
+            continue
+        if _position_age_seconds(pos) < PENDING_FILL_GHOST_MAX_AGE_SEC:
+            continue
+
+        pos_id = pos.get("id")
+        token_id = pos.get("token_id")
+        balance = _fetch_onchain_balance(token_id)
+
+        if balance <= PENDING_FILL_MIN_ONCHAIN_BALANCE:
+            update_record("Position", pos_id, {
+                "status": "closed",
+                "pending_fill": False,
+                "close_reason": "tx_failed_onchain",
+                "close_time": now_iso(),
+                "pnl_realized": 0.0,
+                "pnl_unrealized": 0.0,
+                "notes": (pos.get("notes") or "") + " | PENDING_FILL_GHOST_GUARD_V1: no on-chain balance after 10min",
+            })
+            log_warning(
+                "pending_fill_ghost_closed",
+                module="position_tp_sl",
+                extra={"pos_id": pos_id, "token_id": str(token_id)[:12], "balance": balance},
+            )
+            stats["pending_ghost_closed"] += 1
+        else:
+            update_record("Position", pos_id, {
+                "pending_fill": False,
+                "size_tokens": round(balance, 4),
+                "notes": (pos.get("notes") or "") + f" | PENDING_FILL_GHOST_GUARD_V1: confirmed on-chain balance={balance:.4f}",
+            })
+            stats["pending_fill_confirmed"] += 1
+    return stats
 
 
 def _try_close(client, token_id: str, side_str: str, shares: float,
@@ -634,7 +695,11 @@ def manage_open_positions(client) -> Dict[str, int]:
     default_tp = float(cfg_tp) if cfg_tp is not None else DEFAULT_TP_PCT
     if not positions:
         return {"checked": 0, "closed_tp": 0, "closed_sl": 0, "dust_exits": 0}
+    # PENDING_FILL_GHOST_GUARD_V1: antes de saltarlas, reconciliamos las que
+    # llevan >10min pending_fill=true contra balance real on-chain.
+    pending_stats = _reconcile_pending_fill_ghosts(positions)
 
+    # Saltamos las que aún están en pending_fill reciente.
     positions = [p for p in positions if not p.get("pending_fill")]
 
     closed_tp = 0
@@ -812,4 +877,6 @@ def manage_open_positions(client) -> Dict[str, int]:
         "closed_sl": closed_sl,
         "dust_exits": dust_exits,
         "closed_mirror": closed_mirror,
+        "pending_ghost_closed": pending_stats["pending_ghost_closed"],
+        "pending_fill_confirmed": pending_stats["pending_fill_confirmed"],
     }
