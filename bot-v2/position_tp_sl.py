@@ -71,13 +71,13 @@ def _fetch_onchain_balance(token_id):
         logger.warning("onchain_balance fetch failed for %s: %s", str(token_id)[:12], e)
         return 0.0
 
-DEFAULT_TP_PCT = 0.35  # JP+Opus 2026-05-04: TP_SL_V2 — sube de 12% a 35% para capturar resoluciones grandes (caso City vendido a +22%)
-DEFAULT_SL_PCT = -0.08
+DEFAULT_TP_PCT = 0.95  # PROFIT_RUNNER_35_12_V1: TP fijo practicamente apagado; dejar correr ganadoras con trailing
+DEFAULT_SL_PCT = -0.35  # PROFIT_RUNNER_35_12_V1: stop inicial amplio; no vender por ruido inicial -8/-12/-20%
 # TRAILING_STOP_V1: trailing stop dinámico. Cuando max_pnl_pct (HWM) supera
 # TRAILING_ACTIVATION_PCT, el SL efectivo pasa a max_pnl_pct - TRAILING_DISTANCE_PCT.
 # Mientras max_pnl_pct < TRAILING_ACTIVATION_PCT se usa el SL fijo (default_sl).
-TRAILING_ACTIVATION_PCT = 0.25  # JP+Opus 2026-05-04 noche: TP_SL_V2 — activa trailing a partir de +25% (antes 50%)
-TRAILING_DISTANCE_PCT = 0.08  # JP+Opus 2026-05-04 noche: TP_SL_V2 — deja correr 8% desde el pico (antes 10%)
+TRAILING_ACTIVATION_PCT = 0.10  # PROFIT_RUNNER_35_12_V1: trailing solo cuando ya gana +10%
+TRAILING_DISTANCE_PCT = 0.12  # PROFIT_RUNNER_35_12_V1: vender solo si cae 12% desde el maximo
 POLYMARKET_MIN_SHARES = 5.0
 AGGRESSIVE_DISCOUNT_USD = 0.02
 PENDING_FILL_GHOST_MAX_AGE_SEC = 10 * 60
@@ -778,7 +778,7 @@ def manage_open_positions(client) -> Dict[str, int]:
             pass
 
         tp_pct = default_tp
-        sl_pct = default_sl
+        sl_pct = min(-0.35, float(default_sl))  # PROFIT_RUNNER_35_12_V1: nunca stop mas corto que -35%
         try:
             linked = list_records(
                 "CopyTradeProposal",
@@ -788,7 +788,7 @@ def manage_open_positions(client) -> Dict[str, int]:
             )
             if linked:
                 p = linked[0]
-                tp_pct = float(p.get("take_profit_pct") or default_tp)
+                tp_pct = max(0.95, float(p.get("take_profit_pct") or default_tp))  # PROFIT_RUNNER_35_12_V1: ignora TP chico 8/12/35%, profit-runner real
                 # BOTCONFIG_OVERRIDES_PROPOSAL_SL_V1: BotConfig.stop_loss manda siempre. Las proposals viejas
                 # tienen stop_loss_pct=-0.08 hardcodeado del schema y pisaban el -0.35
                 # de BotConfig (caso Arsenal cerró a -8.5%). TP sigue respetando proposal.
