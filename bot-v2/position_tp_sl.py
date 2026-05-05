@@ -736,10 +736,13 @@ def manage_open_positions(client) -> Dict[str, int]:
         exit_price_now = book["bid"] if side_str == "BUY" else book["ask"]
         pnl_pct = _compute_pnl_pct(entry, exit_price_now, side_str)
 
+        # SWISSTONY_MIRROR_DISABLED_V1 (JP 2026-05-05): mirror desactivado.
+        # El profit-runner (-35 SL, no fixed TP, trailing +10/-12) maneja todas
+        # las salidas. Mirror salía con +18% / -5% / -7.5% pisando el plan.
         # SWISSTONY_MIRROR_MODE_V1_TPSL: salida espejo. Si Swisstony vendió este token,
         # cerramos nosotros también antes de esperar TP/SL.
         mirror_sell = _find_recent_swisstony_sell(pos)
-        if mirror_sell:
+        if False and mirror_sell:
             ok = _close_position(client, pos, book, "swisstony_mirror_sell", pnl_pct)
             try:
                 create_record("LogEvent", {
