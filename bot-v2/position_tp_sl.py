@@ -833,10 +833,22 @@ def manage_open_positions(client) -> Dict[str, int]:
         except Exception:
             pass
 
-        # TRAILING_STOP_REORDER_V1: bloque trailing reubicado acá. Necesita sl_pct ya definida
-        # (línea 526 + override 537). Va antes de PANIC_EXIT para que el elif
-        # pnl_pct <= effective_sl_pct (línea ~571) tenga ambas variables listas.
-        # TRAILING_STOP_V1 + TRAILING_STOP_VAR_FIX_V1: actualizar high-water mark y calcular SL efectivo.
+        # TRAILING_RESPECT_BOTCONFIG_V1 (JP+Opus 2026-05-05): leemos BotConfig
+        # en cada loop. Si trailing_stop_enabled=false → SL fijo, sin trailing.
+        # Si está enabled → usamos los thresholds de BotConfig (no las constantes
+        # hardcodeadas). Caso Arsenal -8% post +16% HWM = trailing actuó cuando JP
+        # lo había desactivado en DB pero el bot ignoraba el flag.
+        try:
+            _bot_cfg_list = list_records("BotConfig", limit=1, sort="-updated_date")
+            _bot_cfg = _bot_cfg_list[0] if _bot_cfg_list else {}
+        except Exception:
+            _bot_cfg = {}
+        _trailing_enabled = bool(_bot_cfg.get("trailing_stop_enabled", False))
+        _trailing_act = float(_bot_cfg.get("trailing_activation_pct") or TRAILING_ACTIVATION_PCT)
+        _trailing_dist = float(_bot_cfg.get("trailing_distance_pct") or TRAILING_DISTANCE_PCT)
+
+        # TRAILING_STOP_V1 + TRAILING_STOP_VAR_FIX_V1: actualizar high-water mark.
+        # Lo actualizamos siempre (aunque trailing esté off) para mantener telemetría.
         prev_max = pos.get("max_pnl_pct")
         prev_max_f = float(prev_max) if prev_max is not None else None
         new_max = pnl_pct if (prev_max_f is None or pnl_pct > prev_max_f) else prev_max_f
@@ -846,12 +858,13 @@ def manage_open_positions(client) -> Dict[str, int]:
             except Exception as _e:
                 logger.debug("trailing: update max_pnl_pct failed pos=%s err=%s",
                              str(pos.get("id", ""))[:8], _e)
-        if new_max is not None and new_max >= TRAILING_ACTIVATION_PCT:
-            effective_sl_pct = new_max - TRAILING_DISTANCE_PCT
+        # Decisión del SL efectivo: solo activamos trailing si BotConfig lo permite.
+        if _trailing_enabled and new_max is not None and new_max >= _trailing_act:
+            effective_sl_pct = new_max - _trailing_dist
             sl_mode = "trailing"
         else:
             effective_sl_pct = sl_pct
-            sl_mode = "fixed"
+            sl_mode = "fixed_botconfig_off" if not _trailing_enabled else "fixed"
 
         # PANIC_EXIT_V1 — panic exit toma precedencia sobre TP/SL normal.
         # Si pnl <= -30% y age >= 5min, vender al market sin más checks.
