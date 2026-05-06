@@ -306,6 +306,11 @@ def _run_swisstony_lane_once() -> Dict[str, Any]:
     whale = _load_swisstony_whale()
     if not whale:
         return {"ok": False, "reason": "swisstony_not_found"}
+    # ONLY_SWISSTONY_WATCHER_V1 (JP+Opus 2026-05-06): hard guard defensivo. Si por
+    # cualquier razón _load_swisstony_whale devuelve otra wallet (rename, bug DB),
+    # abortamos silencioso. Solo swisstony pasa.
+    if not _is_swisstony_whale(whale):
+        return {"ok": False, "reason": "only_swisstony_watcher_v1_not_swisstony"}
     addr = (whale.get("wallet_address") or "").lower()
     if not addr:
         return {"ok": False, "reason": "swisstony_missing_address"}
