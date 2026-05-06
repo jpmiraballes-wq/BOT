@@ -386,6 +386,18 @@ def _close_position(client, pos: Dict[str, Any], book: Dict[str, float],
                     reason: str, pnl_pct: float) -> bool:
     """Cascada: GTC limit -> balance reduce -> FAK cross -> aggressive FAK -> dust_exit."""
     pos_id = pos.get("id")
+    # SHADOW_PURE_SL_PANIC_SKIP_V1 (JP+Opus 2026-05-06): si la Position viene de
+    # swisstony (marker en notes), NUNCA cerramos por logica interna (SL, panic_exit,
+    # trailing, TP, balance-fix, dust). La unica salida valida es el SELL real del
+    # whale, que pasa por reason que empieza con "swisstony_mirror".
+    # Reversible: borrar este bloque entero.
+    notes_lower = str(pos.get("notes") or "").lower()
+    if "swisstony" in notes_lower and not str(reason).startswith("swisstony_mirror"):
+        logger.info(
+            "SHADOW_PURE_SL_PANIC_SKIP_V1: blocked %s for pos=%s pnl_pct=%.2f",
+            reason, str(pos_id)[:8], pnl_pct
+        )
+        return False
     # TP_SL_THRESHOLD_AGE_V1 FIX B: bloquear SL si el trade tiene <90s de vida (book ruidoso).
     if reason == "stop_loss" and _is_too_young(pos):
         return False
