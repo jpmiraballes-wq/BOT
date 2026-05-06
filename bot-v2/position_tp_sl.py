@@ -774,9 +774,14 @@ def manage_open_positions(client) -> Dict[str, int]:
         # vende con pérdida grande (≤-20%). Eso indica evento serio en el mercado
         # (lesión, gol, news). Si vende ganando o perdiendo poco → ignorar y dejar
         # que el profit-runner (trailing +10/-12, SL -35%) maneje la salida.
+        # MIRROR_KILLED_V2_2026_05_06 (JP+Opus): mirror sell DESACTIVADO completo.
+        # Razón: el 6-may Pigato (+$10) y Carabelli (+$7) cerraron por mirror con
+        # partidos vivos, ignorando trailing/SL/TP. JP: "si el partido vive, no salimos
+        # por capricho de swisstony". Profit-runner (-35 SL, 0.95 TP, trailing +10/-12)
+        # + PANIC_EXIT manejan TODAS las salidas. Reversible: quitar 'False:' línea de abajo.
         mirror_sell = _find_recent_swisstony_sell(pos)
         mirror_qualifies = _mirror_loss_qualifies(pos, mirror_sell) if mirror_sell else False
-        if mirror_sell and mirror_qualifies:
+        if False:
             ok = _close_position(client, pos, book, "swisstony_mirror_sell", pnl_pct)
             try:
                 create_record("LogEvent", {
