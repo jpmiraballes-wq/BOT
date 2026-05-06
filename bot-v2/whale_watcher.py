@@ -335,14 +335,49 @@ def _run_swisstony_lane_once() -> Dict[str, Any]:
         # Position cerrada 10min después de abrir, partido EN JUEGO, close_reason=
         # 'no_balance_on_chain' pnl=$0 (real -$3.97). Forzamos a False para que
         # los SELL del whale ya NO disparen mirror. Las BUYs siguen igual.
-        if False and str(norm.get("side") or "").upper() == "SELL":
+        # SHADOW_PURE_MIRROR_SELL_PROPORTIONAL_V1 (JP+Opus 2026-05-06):
+        # resucitado del MIRROR_WATCHER_KILLED_V1. Calculamos sell_pct contra el
+        # balance previo del whale en este token (sumando BUYs/SELLs anteriores
+        # del cache raw_trades) y lo mandamos en el payload. El cloud lo registra
+        # en la WhaleSignal; el bot Python lo usa en _find_recent_swisstony_sell.
+        # Si no hay history previo o falla → sell_pct=1.0 (full close, safe default).
+        # Aceptado riesgo bug Noguchi pnl=$0/no_balance_on_chain — auditoría aparte.
+        if str(norm.get("side") or "").upper() == "SELL":
+            try:
+                sell_size = float(norm.get("size_tokens") or norm.get("size") or 0)
+                tok = str(norm.get("token_id") or norm.get("asset") or "")
+                cur_ts = float(raw.get("timestamp") or 0)
+                prior_balance = 0.0
+                if sell_size > 0 and tok and cur_ts > 0:
+                    for prior in raw_trades:
+                        if prior is raw:
+                            continue
+                        if str(prior.get("asset") or prior.get("token_id") or "") != tok:
+                            continue
+                        prior_ts = float(prior.get("timestamp") or 0)
+                        if prior_ts <= 0 or prior_ts >= cur_ts:
+                            continue
+                        ps = str(prior.get("side") or "").upper()
+                        psize = float(prior.get("size") or 0)
+                        if ps == "BUY":
+                            prior_balance += psize
+                        elif ps == "SELL":
+                            prior_balance -= psize
+                sell_pct = 1.0
+                if prior_balance > 0.01:
+                    sell_pct = min(1.0, sell_size / prior_balance)
+                norm["sell_pct"] = round(sell_pct, 4)
+                norm["mirror_kind"] = "swisstony_proportional"
+                logger.info(
+                    "SHADOW_PURE_MIRROR_SELL_PROPORTIONAL_V1: token=%s sell_size=%.2f prior=%.2f pct=%.4f",
+                    tok[-12:], sell_size, prior_balance, sell_pct
+                )
+            except Exception as e:
+                logger.warning("SHADOW_PURE_MIRROR_SELL_PROPORTIONAL_V1 calc failed: %s — defaulting sell_pct=1.0", e)
+                norm["sell_pct"] = 1.0
+                norm["mirror_kind"] = "swisstony_proportional"
             _send_to_base44([norm])
             dispatched += 1
-            logger.warning(
-                "SWISSTONY_MIRROR_SELL: sent SELL token=%s market=%s",
-                str(norm.get("token_id") or "")[-12:],
-                (norm.get("market_question") or norm.get("market_slug") or "")[:120],
-            )
             continue
         if _is_fast_path_candidate(norm):
             _dispatch_fast_path(norm)
