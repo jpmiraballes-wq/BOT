@@ -330,7 +330,12 @@ def _run_swisstony_lane_once() -> Dict[str, Any]:
         # SWISSTONY_MIRROR_MODE_V1_WATCHER: mirror completo de Swisstony.
         # BUY puede disparar fast-path; SELL se manda inmediatamente al cloud
         # para que position_tp_sl cierre nuestra Position del mismo token.
-        if str(norm.get("side") or "").upper() == "SELL":
+        # MIRROR_WATCHER_KILLED_V1_2026_05_06 (JP+Opus+Bolt): segundo loop de
+        # mirror que escapaba al pushKillMirrorV2. Caso Noguchi 6-may 12:56:
+        # Position cerrada 10min después de abrir, partido EN JUEGO, close_reason=
+        # 'no_balance_on_chain' pnl=$0 (real -$3.97). Forzamos a False para que
+        # los SELL del whale ya NO disparen mirror. Las BUYs siguen igual.
+        if False and str(norm.get("side") or "").upper() == "SELL":
             _send_to_base44([norm])
             dispatched += 1
             logger.warning(
