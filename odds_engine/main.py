@@ -63,7 +63,7 @@ def run_once() -> dict:
     events, odds_outcomes = odds_client.fetch_events_with_odds()
     markets = poly_client.fetch_active_markets()
     fair_values = aggregate_fair_values(odds_outcomes)
-    mappings = build_mapping_candidates(events, markets)
+    mappings = build_mapping_candidates(events, markets, runtime)
     markets_by_id = _index_markets(markets)
     outcomes_by_event = _outcomes_by_event(odds_outcomes)
 
