@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from dataclasses import replace
 
@@ -30,6 +31,58 @@ def _outcomes_by_event(outcomes):
     for o in outcomes:
         out.setdefault(o.external_event_id, []).append(o)
     return out
+
+
+def _norm_outcome_text(value: str) -> str:
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9 +\-.]+', ' ', (value or '').lower())).strip()
+
+
+def _extract_line(value: str) -> str:
+    m = re.search(r'(?<!\d)([+-]?\d+(?:\.\d+)?|[+-]?\d+pt\d+)(?!\d)', value or '', re.I)
+    if not m:
+        return ''
+    raw = m.group(1).lower().replace('pt', '.')
+    try:
+        x = float(raw)
+        if x.is_integer():
+            return str(int(x))
+        return str(x).rstrip('0').rstrip('.')
+    except Exception:
+        return raw
+
+
+def _outcome_matches_market(event, odds, market, mapping) -> bool:
+    """Gate signal creation by market/outcome compatibility.
+
+    For H2H we preserve the old behavior: the team/outcome must appear in the
+    market question/slug. For PAPER_ONLY_DERIVATIVES_V1 we allow exact totals
+    and spreads only when the odds market_key and line match the mapped market.
+    """
+    question = _norm_outcome_text((market.question or '') + ' ' + (market.slug or ''))
+    outcome = _norm_outcome_text(odds.outcome_name or '')
+    mtype = str(getattr(mapping, 'market_type', '') or '')
+    br = mapping.confidence_breakdown or {}
+    expected_line = str(br.get('derivative_line') or '')
+
+    if mtype == 'total_exact':
+        if odds.market_key != 'totals':
+            return False
+        if not expected_line or _extract_line(outcome) != expected_line:
+            return False
+        return outcome.startswith('over ') or outcome.startswith('under ')
+
+    if mtype == 'spread_exact':
+        if odds.market_key != 'spreads':
+            return False
+        if not expected_line:
+            return False
+        # Odds API canonical outcome is 'Team -1.5' / 'Team +1.5'. Polymarket
+        # question usually names only one spread side. Only pass matching line.
+        # Team-side matching remains intentionally lenient; token selection in
+        # signal_engine decides the YES/NO side and risk still gates execution.
+        return _extract_line(outcome).lstrip('+') == expected_line.lstrip('+')
+
+    return outcome in question
 
 
 def _dedupe_key(entity: str, item) -> str:
@@ -187,9 +240,6 @@ def _emit_no_candidate_diagnostic(event, sport_markets, runtime) -> None:
         )
     else:
         log.info('no_candidate_diagnostic event=%s sport=%s pool=%s no scored candidates', event.id, event.sport_key, len(sport_markets))
-    # --- diagnostics: unified no-candidate logging ---
-    # Additional grep-friendly diagnostic lines: pool size + top-N rejected
-    # candidates with validator label/reason/scores. Pure observability.
     try:
         from mapper import debug_score_event_against_markets
         _pool = sport_markets or []
@@ -213,7 +263,7 @@ def _emit_no_candidate_diagnostic(event, sport_markets, runtime) -> None:
                 float(_r.get('away_score', 0.0)),
                 _cat, _slug, _q,
             )
-    except Exception as _diag_exc:  # diagnostic must never break the run
+    except Exception as _diag_exc:
         log.info(
             'mapping_candidate_debug_error event=%s sport=%s err=%s',
             getattr(event, 'id', ''), getattr(event, 'sport_key', ''), _diag_exc,
@@ -222,7 +272,6 @@ def _emit_no_candidate_diagnostic(event, sport_markets, runtime) -> None:
 
 # ----- Money Hunter V1 helpers ----------------------------------------------
 def _top_signal_dict(signal, event, market, mapping, runtime) -> dict:
-    """Build the per-signal diagnostic dict with thresholds and gaps."""
     min_edge = float(getattr(runtime, 'min_edge', 0.0) or 0.0)
     min_liq = float(getattr(runtime, 'min_liquidity', 0.0) or 0.0)
     max_spread = float(getattr(runtime, 'max_spread', 0.0) or 0.0)
@@ -290,7 +339,6 @@ def _aggregate_blocked_reasons(stats_by_sport: dict) -> dict:
 
 def _money_hunter_decision(stats_by_sport: dict, signals_count: int, approved_count: int,
                             paper_count: int, test_paper_count: int, blocked_global: dict) -> tuple[str, str]:
-    """Return (money_hunter_status, next_action) Ã¢ÂÂ pure observation, no thresholds touched."""
     if paper_count > 0:
         return 'PAPER_TRADES_CREATED', 'evaluate_paper_pnl_before_live'
     if test_paper_count > 0:
@@ -343,7 +391,6 @@ def _build_money_hunter_report(runtime, stats_by_sport: dict, events, odds_outco
             'top_blocked_reason': top_reason,
             'blocked_reasons': dict(blocked),
         })
-    # Keep only the most informative diagnostics to avoid bloating BotLog.
     top_diags = top_signal_diagnostics[:10]
     return {
         'mode': runtime.bot_mode,
@@ -370,8 +417,6 @@ def run_once() -> dict:
     settings.validate()
     bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
     runtime = settings.with_bot_config(bot_cfg)
-    # Controlled multi-sport PAPER probe. It only widens data collection/mapping.
-    # RiskManager and PaperBroker still block live modes and only allow PAPER trades.
     runtime = replace(runtime, odds_sport_keys=controlled_sport_keys(runtime.odds_sport_keys))
     log.info(
         'starting odds_engine run_once mode=%s sports=%s base44_write=%s',
@@ -395,9 +440,6 @@ def run_once() -> dict:
     markets_by_sport: dict[str, list] = {}
     for ev in events:
         bucket = markets_by_sport.setdefault(ev.sport_key, [])
-    # Heuristic: assume all discovered markets are eligible to be scored against
-    # any event in the same sport. We don't filter by sport here because the
-    # discovery already filters with _looks_like_sports_market / _market_relevant_to_event.
     _all_markets = list(markets)
     for sport_key in list(markets_by_sport.keys()):
         markets_by_sport[sport_key] = _all_markets
@@ -483,10 +525,10 @@ def run_once() -> dict:
             if fair is None:
                 bump_blocked(sport_stats, 'missing_fair_value')
                 continue
-            if odds.outcome_name.lower() not in (market.question + ' ' + market.slug).lower():
+            if not _outcome_matches_market(event, odds, market, mapping):
                 bump_blocked(sport_stats, 'outcome_not_in_polymarket_question')
                 continue
-            signal_key = f"{event.id}:{market.id}:{market.yes_token_id or ''}"
+            signal_key = f"{event.id}:{market.id}:{market.yes_token_id or ''}:{odds.outcome_name}"
             if signal_key in seen_signals_this_run:
                 continue
             seen_signals_this_run.add(signal_key)
