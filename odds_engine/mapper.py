@@ -201,7 +201,7 @@ def score_event_against_markets(event: ExternalEvent, markets: list[PolymarketMa
     for pm in markets:
         try:
             validator = validate_market(event, pm)
-            mtype = classify_market(pm.question)
+            mtype = classify_market_type(pm.question)
             pbreak = _participant_breakdown(event, pm)
             sport = _sport_score(event, pm)
             participants = max(float(pbreak['strict_score']), min(validator.home_score, validator.away_score))
