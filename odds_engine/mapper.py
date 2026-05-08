@@ -134,6 +134,19 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                     confidence = max(confidence, 0.88)
                 status = 'auto_approved' if confidence >= min(runtime.min_mapping_confidence, 0.88) else 'needs_review'
                 mtype = 'moneyline_full_event'
+            elif validator.label == 'safe_relaxed_h2h':
+                # SAFE_RELAXED_V1: both team names match strongly, no derivative
+                # terms, no futures/outrights. Auto-approve with a STRICTER
+                # confidence floor than exact_h2h_moneyline (0.90 vs 0.88) AND
+                # require both name scores >= 0.92.
+                market_type_score = 0.85
+                confidence = (0.15 * sport) + (0.50 * participants) + (0.15 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
+                strong_names = validator.home_score >= 0.92 and validator.away_score >= 0.92
+                if strong_names:
+                    status = 'auto_approved' if confidence >= min(runtime.min_mapping_confidence, 0.90) else 'needs_review'
+                else:
+                    status = 'needs_review'
+                mtype = 'moneyline_full_event'
             elif validator.label == 'likely_h2h':
                 market_type_score = 0.65
                 confidence = (0.15 * sport) + (0.48 * participants) + (0.15 * timing) + (0.12 * market_type_score) + (0.10 * outcome_clarity)
