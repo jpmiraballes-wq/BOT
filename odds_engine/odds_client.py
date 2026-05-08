@@ -31,6 +31,33 @@ def _normalize_name(name: str) -> str:
     return re.sub(r'\s+', ' ', s).strip()
 
 
+def _point_label(value: Any) -> str:
+    if value is None or value == '':
+        return ''
+    try:
+        x = float(value)
+        if x.is_integer():
+            return str(int(x))
+        return str(x).rstrip('0').rstrip('.')
+    except Exception:
+        return str(value)
+
+
+def _odds_outcome_name(market_key: str, outcome: dict) -> str:
+    name = str(outcome.get('name') or '')
+    point = _point_label(outcome.get('point'))
+    if market_key == 'totals' and point:
+        # Canonical names used later by fair_value/signal_engine.
+        # Odds API returns names like Over / Under and point=2.5.
+        return f'{name} {point}'.strip()
+    if market_key == 'spreads' and point:
+        # Canonical names: Team -1.5 / Team +1.5.
+        if not point.startswith('-'):
+            point = f'+{point}'
+        return f'{name} {point}'.strip()
+    return name
+
+
 class OddsApiClient:
     def __init__(self, cfg: Settings | None = None) -> None:
         self.cfg = cfg or default_settings
@@ -85,17 +112,28 @@ class OddsApiClient:
                 raw_payload=item,
             )
             events.append(event)
-            outcomes.extend(self._extract_h2h_outcomes(event, item, received_at))
+            outcomes.extend(self._extract_supported_outcomes(event, item, received_at))
         return events, outcomes
 
-    def _extract_h2h_outcomes(self, event: ExternalEvent, item: dict, received_at: str) -> list[OddsOutcome]:
+    def _extract_supported_outcomes(self, event: ExternalEvent, item: dict, received_at: str) -> list[OddsOutcome]:
+        """Extract h2h plus PAPER-only safe derivative odds.
+
+        Supported market keys:
+        - h2h: team winner / moneyline
+        - totals: Over/Under line, canonical outcome_name like 'Over 2.5'
+        - spreads: team handicap, canonical outcome_name like 'Barcelona -1.5'
+
+        No live trading is enabled here; this only provides fair values for the
+        existing PAPER pipeline and risk checks.
+        """
         out: list[OddsOutcome] = []
+        supported = {'h2h', 'totals', 'spreads'}
         for bookmaker in item.get('bookmakers') or []:
             bookmaker_key = str(bookmaker.get('key') or bookmaker.get('title') or 'unknown')
             last_update = bookmaker.get('last_update')
             for market in bookmaker.get('markets') or []:
                 market_key = str(market.get('key') or '')
-                if market_key != 'h2h':
+                if market_key not in supported:
                     continue
                 raw_probs = []
                 rows = []
@@ -113,7 +151,7 @@ class OddsApiClient:
                         external_event_id=event.id,
                         bookmaker=bookmaker_key,
                         market_key=market_key,
-                        outcome_name=str(outcome.get('name') or ''),
+                        outcome_name=_odds_outcome_name(market_key, outcome),
                         decimal_odds=dec,
                         implied_probability_raw=prob,
                         implied_probability_normalized=prob / total,
@@ -122,3 +160,7 @@ class OddsApiClient:
                         raw_payload={'bookmaker': bookmaker, 'market': market, 'outcome': outcome},
                     ))
         return out
+
+    # Backwards-compatible alias for older callers/tests.
+    def _extract_h2h_outcomes(self, event: ExternalEvent, item: dict, received_at: str) -> list[OddsOutcome]:
+        return [o for o in self._extract_supported_outcomes(event, item, received_at) if o.market_key == 'h2h']
