@@ -48,9 +48,8 @@ def _event_queries(event: ExternalEvent) -> list[str]:
             f'{_last_name(home)} {_last_name(away)}'.strip(),
             f'{_last_name(away)} {_last_name(home)}'.strip(),
         ])
-    for q in [home, away, _last_name(home), _last_name(away)]:
-        if q and len(q) >= 4:
-            queries.append(q)
+    # Keep targeted discovery small and high signal. Single-name searches can be
+    # noisy, so only use them after exact/last-name pair queries.
     seen = set()
     out = []
     for q in queries:
@@ -59,7 +58,7 @@ def _event_queries(event: ExternalEvent) -> list[str]:
         if key and key not in seen:
             seen.add(key)
             out.append(q)
-    return out[:6]
+    return out[:4]
 
 
 class PolymarketPublicClient:
@@ -80,11 +79,9 @@ class PolymarketPublicClient:
             'ascending': 'false',
         }
         if search:
-            # Gamma commonly accepts search-like query params. If unsupported,
-            # the API simply returns a generic page and local matching still protects us.
             params['search'] = search
             params['q'] = search
-        resp = requests.get(url, params=params, timeout=25)
+        resp = requests.get(url, params=params, timeout=12)
         resp.raise_for_status()
         data = resp.json()
         raw_markets = data.get('data') if isinstance(data, dict) else data
@@ -94,33 +91,33 @@ class PolymarketPublicClient:
         return [m for m in parsed if m.id and m.question]
 
     def fetch_markets_for_events(self, events: list[ExternalEvent], broad_limit: int = 300) -> list[PolymarketMarket]:
-        """Fetch broad markets plus targeted searches around event participants.
-
-        This is deliberately conservative: local mapper still requires both H2H
-        participants, so extra generic markets do not become tradable signals.
-        """
+        """Fetch broad markets plus small targeted searches around event participants."""
         by_id: dict[str, PolymarketMarket] = {}
+        calls = 0
 
         def add_many(items: list[PolymarketMarket]) -> None:
             for m in items:
                 by_id.setdefault(m.id, m)
 
-        # Broad discovery: several pages by volume, because sports markets may not
-        # sit in the top 300 global markets at every moment.
-        for offset in (0, broad_limit, broad_limit * 2):
+        # Broad discovery: two pages by volume. More pages are too slow for a
+        # 5-minute loop and do not materially improve H2H signal quality yet.
+        for offset in (0, broad_limit):
             try:
                 add_many(self.fetch_active_markets(limit=broad_limit, offset=offset))
+                calls += 1
             except Exception as exc:
                 log.warning('polymarket broad fetch failed offset=%s err=%s', offset, exc)
 
-        # Targeted discovery: only first 30 external events to protect Gamma/API rate.
-        for event in events[:30]:
+        # Targeted discovery: top 10 external events only, 4 strong queries each.
+        for event in events[:10]:
             for query in _event_queries(event):
                 try:
-                    add_many(self.fetch_active_markets(limit=50, offset=0, search=query))
+                    add_many(self.fetch_active_markets(limit=25, offset=0, search=query))
+                    calls += 1
                 except Exception as exc:
                     log.debug('polymarket targeted fetch failed query=%s err=%s', query, exc)
 
+        log.info('polymarket_discovery markets=%s api_calls=%s targeted_events=%s', len(by_id), calls, min(len(events), 10))
         return list(by_id.values())
 
     def _parse_market(self, m: dict[str, Any]) -> PolymarketMarket:
