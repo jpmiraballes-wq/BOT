@@ -92,7 +92,8 @@ def _looks_like_sports_market(market: PolymarketMarket) -> bool:
     sports_terms = [
         'ufc', 'mma', 'fight', 'boxing', 'soccer', 'football', 'premier',
         'champions league', 'la liga', 'serie a', 'nba', 'nfl', 'mlb', 'nhl',
-        'tennis', 'atp', 'wta', 'world cup',
+        'tennis', 'atp', 'wta', 'world cup', 'reds', 'astros', 'yankees',
+        'dodgers', 'mets', 'cubs', 'padres', 'phillies', 'braves',
     ]
     non_sports_terms = [
         'election', 'senedd', 'market cap', 'ipo', 'fed', 'bitcoin', 'ethereum',
@@ -133,7 +134,6 @@ class PolymarketPublicClient:
         return [m for m in parsed if m.id and m.question]
 
     def fetch_markets_for_events(self, events: list[ExternalEvent], broad_limit: int = 300) -> list[PolymarketMarket]:
-        """Fetch broad sports markets plus locally filtered targeted searches."""
         by_id: dict[str, PolymarketMarket] = {}
         calls = 0
         targeted_raw = 0
@@ -175,14 +175,20 @@ class PolymarketPublicClient:
         return list(by_id.values())
 
     def _parse_market(self, m: dict[str, Any]) -> PolymarketMarket:
-        token_ids = _json_list(m.get('clobTokenIds'))
-        outcomes = _json_list(m.get('outcomes'))
-        prices = _json_list(m.get('outcomePrices'))
+        token_ids = [str(x) for x in _json_list(m.get('clobTokenIds'))]
+        outcomes = [str(x) for x in _json_list(m.get('outcomes'))]
+        prices_raw = _json_list(m.get('outcomePrices'))
+        outcome_prices = []
+        for p in prices_raw:
+            fp = _safe_float(p)
+            if fp is not None:
+                outcome_prices.append(fp)
+
         best_bid = _safe_float(m.get('bestBid'))
         best_ask = _safe_float(m.get('bestAsk'))
-        if (best_bid is None or best_ask is None) and prices:
-            p = _safe_float(prices[0])
-            if p is not None and 0 < p < 1:
+        if (best_bid is None or best_ask is None) and outcome_prices:
+            p = outcome_prices[0]
+            if 0 < p < 1:
                 best_bid = max(0.01, p - 0.01)
                 best_ask = min(0.99, p + 0.01)
         midpoint = None
@@ -198,9 +204,11 @@ class PolymarketPublicClient:
             start_date=m.get('startDate') or m.get('start_date_iso'),
             end_date=m.get('endDate') or m.get('end_date_iso') or m.get('endDateIso'),
             condition_id=m.get('conditionId'),
-            yes_token_id=str(token_ids[0]) if len(token_ids) > 0 else None,
-            no_token_id=str(token_ids[1]) if len(token_ids) > 1 else None,
-            outcomes=[str(x) for x in outcomes],
+            yes_token_id=token_ids[0] if len(token_ids) > 0 else None,
+            no_token_id=token_ids[1] if len(token_ids) > 1 else None,
+            outcomes=outcomes,
+            token_ids=token_ids,
+            outcome_prices=outcome_prices,
             best_bid=best_bid,
             best_ask=best_ask,
             midpoint=midpoint,
