@@ -93,7 +93,7 @@ def run_once() -> dict:
     paper = PaperBroker(risk, runtime)
 
     events, odds_outcomes = odds_client.fetch_events_with_odds()
-    markets = poly_client.fetch_active_markets()
+    markets = poly_client.fetch_markets_for_events(events)
     fair_values = aggregate_fair_values(odds_outcomes)
     mappings = build_mapping_candidates(events, markets, runtime)
     markets_by_id = _index_markets(markets)
