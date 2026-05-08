@@ -190,7 +190,7 @@ class Signal:
             'fair_probability': self.fair_value,
             'polymarket_price': self.polymarket_price,
             'edge_pct': self.edge_bruto,
-            'side': 'BUY' if self.action == 'BUY' else 'SELL',
+            'side': 'BUY',
             'status': 'pending' if self.risk_status == 'approved' else 'rejected',
             'detected_at': self.created_at,
         }
