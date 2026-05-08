@@ -4,7 +4,7 @@ from typing import Any
 import json
 import requests
 
-from config import settings
+from config import Settings, settings as default_settings
 from models import PolymarketMarket
 
 
@@ -30,11 +30,12 @@ def _json_list(value) -> list:
 
 
 class PolymarketPublicClient:
-    def __init__(self) -> None:
-        self.gamma_url = settings.polymarket_gamma_url.rstrip('/')
-        self.clob_url = settings.polymarket_clob_url.rstrip('/')
+    def __init__(self, cfg: Settings | None = None) -> None:
+        self.cfg = cfg or default_settings
+        self.gamma_url = self.cfg.polymarket_gamma_url.rstrip('/')
+        self.clob_url = self.cfg.polymarket_clob_url.rstrip('/')
 
-    def fetch_active_markets(self, limit: int = 500) -> list[PolymarketMarket]:
+    def fetch_active_markets(self, limit: int = 300) -> list[PolymarketMarket]:
         url = f'{self.gamma_url}/markets'
         params = {
             'active': 'true',
@@ -50,7 +51,9 @@ class PolymarketPublicClient:
         raw_markets = data.get('data') if isinstance(data, dict) else data
         if not isinstance(raw_markets, list):
             return []
-        return [self._parse_market(m) for m in raw_markets if isinstance(m, dict)]
+        parsed = [self._parse_market(m) for m in raw_markets if isinstance(m, dict)]
+        # Keep only markets with IDs/questions to avoid empty records.
+        return [m for m in parsed if m.id and m.question]
 
     def _parse_market(self, m: dict[str, Any]) -> PolymarketMarket:
         token_ids = _json_list(m.get('clobTokenIds'))
