@@ -23,11 +23,18 @@ DERIVATIVE_TERMS = [
     'corner', 'card', 'points', 'goalscorer', 'assist', 'sets', 'map ',
 ]
 
+UNSAFE_DERIVATIVE_TERMS = [
+    'corner', 'corners', 'card', 'cards', 'goalscorer', 'anytime',
+    'exact score', 'correct score', 'btts', 'both teams to score', 'first half',
+    'second half', '1h', '2h', 'map ', 'sets', 'kills', 'round', 'method',
+    'win by', 'top scorer', 'finish in', 'standings', 'season', 'transfer',
+]
+
 
 def normalize_name(name: str) -> str:
     s = unicodedata.normalize('NFKD', name or '').encode('ascii', 'ignore').decode('ascii')
     s = s.lower()
-    s = re.sub(r'[^a-z0-9 ]+', ' ', s)
+    s = re.sub(r'[^a-z0-9 +\-.]+', ' ', s)
     s = re.sub(r'\b(fc|cf|club|the|team)\b', ' ', s)
     s = re.sub(r'\s+', ' ', s).strip()
     return ALIASES.get(s, s)
@@ -57,7 +64,43 @@ def _time_score(event: ExternalEvent, market: PolymarketMarket) -> float:
     return 0.0
 
 
+def _extract_line(text: str) -> str:
+    m = re.search(r'(?<!\d)([+-]?\d+(?:\.\d+)?|[+-]?\d+pt\d+)(?!\d)', text or '', re.I)
+    if not m:
+        return ''
+    raw = m.group(1).lower().replace('pt', '.')
+    try:
+        x = float(raw)
+        if x.is_integer():
+            return str(int(x))
+        return str(x).rstrip('0').rstrip('.')
+    except Exception:
+        return raw
+
+
+def _safe_derivative_type(question: str) -> tuple[str, str]:
+    """Return (type, line) for PAPER-only derivative markets safe to compare.
+
+    Supported now: full-game totals and spreads with an explicit line.
+    Explicitly excludes corners/cards/BTTS/exact score/player props/futures.
+    """
+    q = normalize_name(question)
+    if any(term in f' {q} ' for term in UNSAFE_DERIVATIVE_TERMS):
+        return '', ''
+    line = _extract_line(q)
+    if not line:
+        return '', ''
+    if 'spread' in q or 'handicap' in q:
+        return 'spread_exact', line
+    if 'o u' in q or 'over under' in q or 'total' in q or 'over ' in q or 'under ' in q:
+        return 'total_exact', line
+    return '', ''
+
+
 def classify_market_type(question: str) -> str:
+    dtype, _line = _safe_derivative_type(question)
+    if dtype:
+        return dtype
     q = normalize_name(question)
     if any(x in q for x in DERIVATIVE_TERMS):
         return 'unsupported_derivative'
@@ -99,7 +142,7 @@ def _sport_score(event: ExternalEvent, market: PolymarketMarket) -> float:
         return 1.0 if any(x in text for x in ['mma', 'ufc', 'fight']) else 0.55
     if 'soccer' in event.sport_key or 'football' in text:
         return 1.0 if any(x in text for x in ['soccer', 'football', 'champions', 'premier', 'liga', 'cup']) else 0.55
-    if any(x in event.sport_key for x in ['basketball', 'nba', 'americanfootball', 'nfl', 'tennis', 'baseball', 'mlb']):
+    if any(x in event.sport_key for x in ['basketball', 'nba', 'americanfootball', 'nfl', 'tennis', 'baseball', 'mlb', 'icehockey', 'nhl']):
         return 0.75
     return 0.5
 
@@ -114,19 +157,31 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                 continue
 
             mtype = classify_market_type(pm.question)
+            dtype, dline = _safe_derivative_type(pm.question)
             pbreak = _participant_breakdown(ev, pm)
             sport = _sport_score(ev, pm)
             participants = max(float(pbreak['strict_score']), min(validator.home_score, validator.away_score))
             timing = _time_score(ev, pm)
             outcome_clarity = 0.85 if pm.yes_token_id else 0.25
+            note = 'strict validator: auto approval only for exact H2H moneyline markets'
 
             if validator.label == 'derivative_prop' or mtype == 'unsupported_derivative':
-                market_type_score = 0.0
-                confidence = (0.15 * sport) + (0.45 * participants) + (0.15 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
-                if confidence < 0.70:
-                    continue
-                status = 'needs_review'
-                mtype = 'unsupported_derivative'
+                if dtype and dline and validator.home_score >= 0.92 and validator.away_score >= 0.92 and timing >= 0.85:
+                    # PAPER_ONLY_DERIVATIVES_V1: only full-game exact totals/spreads,
+                    # same teams, strong names, close time, explicit line. This does
+                    # not touch live trading; risk_manager still gates all signals.
+                    market_type_score = 0.90
+                    confidence = (0.15 * sport) + (0.50 * participants) + (0.15 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
+                    status = 'auto_approved' if confidence >= min(runtime.min_mapping_confidence, 0.90) else 'needs_review'
+                    mtype = dtype
+                    note = 'paper_only_safe_derivative_exact_line'
+                else:
+                    market_type_score = 0.0
+                    confidence = (0.15 * sport) + (0.45 * participants) + (0.15 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
+                    if confidence < 0.70:
+                        continue
+                    status = 'needs_review'
+                    mtype = 'unsupported_derivative'
             elif validator.label == 'exact_h2h_moneyline':
                 market_type_score = 1.0
                 confidence = (0.15 * sport) + (0.50 * participants) + (0.15 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
@@ -135,10 +190,6 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                 status = 'auto_approved' if confidence >= min(runtime.min_mapping_confidence, 0.88) else 'needs_review'
                 mtype = 'moneyline_full_event'
             elif validator.label == 'safe_relaxed_h2h':
-                # SAFE_RELAXED_V1: both team names match strongly, no derivative
-                # terms, no futures/outrights. Auto-approve with a STRICTER
-                # confidence floor than exact_h2h_moneyline (0.90 vs 0.88) AND
-                # require both name scores >= 0.92.
                 market_type_score = 0.85
                 confidence = (0.15 * sport) + (0.50 * participants) + (0.15 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
                 strong_names = validator.home_score >= 0.92 and validator.away_score >= 0.92
@@ -167,7 +218,9 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                     'polymarket_outcome': pm.outcomes[0] if pm.outcomes else 'YES',
                     'validator_label': validator.label,
                     'validator_reason': validator.reason,
-                    'note': 'strict validator: auto approval only for exact H2H moneyline markets',
+                    'derivative_type': dtype,
+                    'derivative_line': dline,
+                    'note': note,
                 },
                 confidence_breakdown={
                     'sport': sport,
@@ -181,6 +234,8 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                     'validator_label': validator.label,
                     'validator_reason': validator.reason,
                     'derivative_detected': validator.derivative_detected,
+                    'derivative_type': dtype,
+                    'derivative_line': dline,
                     'question': pm.question,
                 },
             ))
@@ -189,19 +244,13 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
 
 
 def score_event_against_markets(event: ExternalEvent, markets: list[PolymarketMarket], runtime: Settings | None = None, k: int = 3) -> list[dict]:
-    """Diagnostic helper: rank ALL markets against an event using the same
-    scoring used by build_mapping_candidates, but WITHOUT filtering them out.
-
-    Returns the top-k (by confidence) with full breakdown so we can answer:
-      "this event had no candidate because the closest market was X with
-      validator_label=Y, both_present=Z, etc."
-    """
     cfg = runtime or default_settings
     rows = []
     for pm in markets:
         try:
             validator = validate_market(event, pm)
             mtype = classify_market_type(pm.question)
+            dtype, dline = _safe_derivative_type(pm.question)
             pbreak = _participant_breakdown(event, pm)
             sport = _sport_score(event, pm)
             participants = max(float(pbreak['strict_score']), min(validator.home_score, validator.away_score))
@@ -215,7 +264,7 @@ def score_event_against_markets(event: ExternalEvent, markets: list[PolymarketMa
                 market_type_score = 0.65
                 confidence = (0.15 * sport) + (0.48 * participants) + (0.15 * timing) + (0.12 * market_type_score) + (0.10 * outcome_clarity)
             elif validator.label == 'derivative_prop':
-                market_type_score = 0.0
+                market_type_score = 0.90 if dtype else 0.0
                 confidence = (0.15 * sport) + (0.45 * participants) + (0.15 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
             else:
                 market_type_score = 0.0
@@ -237,8 +286,10 @@ def score_event_against_markets(event: ExternalEvent, markets: list[PolymarketMa
                 'validator_reason': validator.reason,
                 'derivative_detected': bool(validator.derivative_detected),
                 'classified_market_type': mtype,
+                'derivative_type': dtype,
+                'derivative_line': dline,
                 'min_mapping_confidence': float(cfg.min_mapping_confidence),
-                'reject_reason': _diagnostic_reject_reason(validator, confidence, cfg),
+                'reject_reason': _diagnostic_reject_reason(validator, confidence, cfg, dtype, dline, timing),
             })
         except Exception:
             continue
@@ -246,9 +297,10 @@ def score_event_against_markets(event: ExternalEvent, markets: list[PolymarketMa
     return rows[: max(1, int(k))]
 
 
-def _diagnostic_reject_reason(validator, confidence: float, cfg: Settings) -> str:
-    """Plain-language reason a market did not become a mapping candidate."""
+def _diagnostic_reject_reason(validator, confidence: float, cfg: Settings, dtype: str = '', dline: str = '', timing: float = 0.0) -> str:
     if validator.label == 'derivative_prop':
+        if dtype and dline and timing >= 0.85:
+            return 'safe_derivative_candidate_exact_line'
         return 'derivative_or_prop_market'
     if validator.label == 'unrelated':
         return 'missing_one_or_both_participants'
@@ -270,12 +322,6 @@ def best_candidate_for_event(event_id: str, candidates: list[MappingCandidate]) 
 
 # --- diagnostics: debug_score_event_against_markets ---
 def debug_score_event_against_markets(event, markets, top_n: int = 5):
-    """Read-only scoring of all markets against an event, for diagnostics.
-
-    Calls validate_market(event, market) for each market. Does NOT create
-    mappings, does NOT auto-approve, does NOT change risk. Returns a list of
-    plain dicts (top_n) sorted by validator label priority and name scores.
-    """
     label_priority = {
         'exact_h2h_moneyline': 0,
         'safe_relaxed_h2h': 1,
@@ -315,9 +361,6 @@ def debug_score_event_against_markets(event, markets, top_n: int = 5):
             'reason': reason,
             'home_score': round(home_score, 4),
             'away_score': round(away_score, 4),
-            # 'confidence' here is just a coarse hint for sorting, not a
-            # real mapping confidence. The real confidence is computed in
-            # build_mapping_candidates and is NOT touched by this helper.
             'confidence': round((home_score + away_score) / 2.0, 4),
             '_pri': label_priority.get(label, 50),
             '_name_avg': (home_score + away_score) / 2.0,
