@@ -146,6 +146,150 @@ def _emit_sport_probe_logs(stats_by_sport: dict[str, dict]) -> None:
         _log_to_base44('info', 'sport_probe', payload)
 
 
+# ----- Money Hunter V1 helpers ----------------------------------------------
+def _top_signal_dict(signal, event, market, mapping, runtime) -> dict:
+    """Build the per-signal diagnostic dict with thresholds and gaps."""
+    min_edge = float(getattr(runtime, 'min_edge', 0.0) or 0.0)
+    min_liq = float(getattr(runtime, 'min_liquidity', 0.0) or 0.0)
+    max_spread = float(getattr(runtime, 'max_spread', 0.0) or 0.0)
+    edge_bruto = float(getattr(signal, 'edge_bruto', 0.0) or 0.0)
+    return {
+        'sport_key': getattr(event, 'sport_key', 'unknown'),
+        'external_event_id': signal.external_event_id,
+        'polymarket_market_id': signal.polymarket_market_id,
+        'market_question': getattr(market, 'question', '') or '',
+        'outcome': signal.outcome,
+        'fair_value': float(signal.fair_value or 0.0),
+        'polymarket_price': float(signal.polymarket_price or 0.0),
+        'edge_bruto': edge_bruto,
+        'spread': float(signal.spread or 0.0),
+        'edge_neto': float(signal.edge_neto or 0.0),
+        'min_edge_required': min_edge,
+        'edge_gap': round(min_edge - edge_bruto, 6),
+        'liquidity': float(signal.liquidity or 0.0),
+        'min_liquidity_required': min_liq,
+        'spread_limit': max_spread,
+        'confidence': float(signal.confidence or 0.0),
+        'risk_status': signal.risk_status,
+        'reject_reason': signal.reject_reason or '',
+        'mapping_status': getattr(mapping, 'status', '') or '',
+        'token_present': bool(signal.token_id),
+        'explanation': signal.explanation,
+    }
+
+
+def _emit_top_signal_diagnostic(signal, event, market, mapping, runtime) -> None:
+    payload = _top_signal_dict(signal, event, market, mapping, runtime)
+    _log_to_base44('info', 'top_signal_diagnostic', payload)
+    log.info(
+        'top_signal_diagnostic sport=%s outcome=%s fair=%.4f price=%.4f edge=%.4f min_edge=%.4f gap=%.4f reason=%s token=%s',
+        payload['sport_key'], payload['outcome'], payload['fair_value'],
+        payload['polymarket_price'], payload['edge_bruto'],
+        payload['min_edge_required'], payload['edge_gap'],
+        payload['reject_reason'] or 'approved',
+        'yes' if payload['token_present'] else 'no',
+    )
+
+
+def _log_edge_below_threshold(signal, event, market, runtime) -> None:
+    min_edge = float(getattr(runtime, 'min_edge', 0.0) or 0.0)
+    edge_bruto = float(getattr(signal, 'edge_bruto', 0.0) or 0.0)
+    log.info(
+        'edge_below_threshold sport=%s event=%s outcome=%s question=%r '
+        'fair=%.4f polymarket_price=%.4f edge=%.4f min_edge=%.4f gap=%.4f',
+        getattr(event, 'sport_key', 'unknown'),
+        signal.external_event_id, signal.outcome,
+        getattr(market, 'question', '') or '',
+        float(signal.fair_value or 0.0),
+        float(signal.polymarket_price or 0.0),
+        edge_bruto, min_edge, round(min_edge - edge_bruto, 6),
+    )
+
+
+def _aggregate_blocked_reasons(stats_by_sport: dict) -> dict:
+    totals: dict[str, int] = {}
+    for stats in stats_by_sport.values():
+        for reason, n in (stats.get('blocked_reasons') or {}).items():
+            totals[reason] = totals.get(reason, 0) + int(n)
+    return totals
+
+
+def _money_hunter_decision(stats_by_sport: dict, signals_count: int, approved_count: int,
+                            paper_count: int, test_paper_count: int, blocked_global: dict) -> tuple[str, str]:
+    """Return (money_hunter_status, next_action) — pure observation, no thresholds touched."""
+    if paper_count > 0:
+        return 'PAPER_TRADES_CREATED', 'evaluate_paper_pnl_before_live'
+    if test_paper_count > 0:
+        return 'ONLY_TEST_TRADES', 'disable_test_mode_and_wait_for_real_edge'
+
+    edge_block = int(blocked_global.get('edge_below_threshold', 0))
+    no_cand = int(blocked_global.get('no_candidate_after_validator', 0))
+    miss_token = int(blocked_global.get('missing_matched_outcome_token', 0))
+    spread_block = int(blocked_global.get('spread_too_wide', 0))
+    liq_block = int(blocked_global.get('liquidity_too_low', 0))
+
+    sports_no_match = sum(
+        1 for s in stats_by_sport.values()
+        if int(s.get('mapping_candidates', 0)) == 0 and int(s.get('events', 0)) > 0
+    )
+
+    if signals_count > 0 and approved_count == 0 and edge_block > 0:
+        return 'PIPELINE_OK_NO_EDGE', 'watch_more_or_lower_threshold_in_paper_only'
+    if miss_token > 0 and signals_count > 0:
+        return 'TOKEN_MAPPING_GAP', 'fix_outcome_token_mapping'
+    if spread_block > 0 or liq_block > 0:
+        return 'MARKET_QUALITY_BLOCKED', 'wait_for_better_market_quality'
+    if sports_no_match >= 2 or no_cand > 0:
+        return 'NEEDS_DISCOVERY_EXPANSION', 'improve_polymarket_discovery_for_sport'
+    if int(sum(s.get('mapping_candidates', 0) for s in stats_by_sport.values())) == 0:
+        return 'NO_MARKET_MATCHES', 'improve_polymarket_discovery_for_sport'
+    return 'OBSERVING', 'keep_watching_no_action_needed'
+
+
+def _build_money_hunter_report(runtime, stats_by_sport: dict, events, odds_outcomes,
+                                markets, mappings, signals_count, approved_count,
+                                paper_count, test_paper_count, top_signal_diagnostics,
+                                money_hunter_status, next_action) -> dict:
+    blocked_global = _aggregate_blocked_reasons(stats_by_sport)
+    by_sport = []
+    for sport_key, stats in stats_by_sport.items():
+        blocked = stats.get('blocked_reasons') or {}
+        top_reason = max(blocked.items(), key=lambda kv: kv[1])[0] if blocked else ''
+        by_sport.append({
+            'sport_key': sport_key,
+            'events': int(stats.get('events', 0)),
+            'odds_outcomes': int(stats.get('odds_outcomes', 0)),
+            'polymarket_markets': int(stats.get('polymarket_markets', 0)),
+            'mapping_candidates': int(stats.get('mapping_candidates', 0)),
+            'auto_approved_mappings': int(stats.get('auto_approved_mappings', 0)),
+            'signals': int(stats.get('signals', 0)),
+            'positive_net_edge_signals': int(stats.get('positive_net_edge_signals', 0)),
+            'approved_signals': int(stats.get('approved_signals', 0)),
+            'paper_trades_created': int(stats.get('paper_trades_created', 0)),
+            'top_blocked_reason': top_reason,
+            'blocked_reasons': dict(blocked),
+        })
+    # Keep only the most informative diagnostics to avoid bloating BotLog.
+    top_diags = top_signal_diagnostics[:10]
+    return {
+        'mode': runtime.bot_mode,
+        'paper_force_test_trade': bool(getattr(runtime, 'paper_force_test_trade', False)),
+        'total_events': len(events),
+        'total_odds_outcomes': len(odds_outcomes),
+        'total_polymarket_markets': len(markets),
+        'total_mapping_candidates': len(mappings),
+        'total_signals': int(signals_count),
+        'approved_signals': int(approved_count),
+        'real_paper_trades': int(paper_count),
+        'test_paper_trades': int(test_paper_count),
+        'blocked_reasons': blocked_global,
+        'by_sport': by_sport,
+        'top_signal_diagnostics_sample': top_diags,
+        'money_hunter_status': money_hunter_status,
+        'next_action': next_action,
+    }
+# ----- end Money Hunter V1 helpers ------------------------------------------
+
 def run_once() -> dict:
     settings.validate()
     bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
@@ -211,6 +355,7 @@ def run_once() -> dict:
     approved_count = 0
     paper_count = 0
     test_paper_count = 0
+    top_signal_diagnostics: list[dict] = []
     seen_signals_this_run: set[str] = set()
 
     enabled = bool(bot_cfg.get('enabled', False)) if bot_cfg else False
@@ -267,6 +412,10 @@ def run_once() -> dict:
                 sport_stats['approved_signals'] += 1
             else:
                 bump_blocked(sport_stats, signal.reject_reason or 'rejected')
+            _emit_top_signal_diagnostic(signal, event, market, mapping, runtime)
+            top_signal_diagnostics.append(_top_signal_dict(signal, event, market, mapping, runtime))
+            if signal.reject_reason == 'edge_below_threshold':
+                _log_edge_below_threshold(signal, event, market, runtime)
             trade = paper.open_from_signal(signal)
             if trade:
                 _write('PaperTrade', trade)
@@ -303,6 +452,20 @@ def run_once() -> dict:
         'paper_force_test_trade': runtime.paper_force_test_trade,
         'base44_write_enabled': settings.base44_write_enabled,
     }
+    blocked_global = _aggregate_blocked_reasons(stats_by_sport)
+    money_hunter_status, next_action = _money_hunter_decision(
+        stats_by_sport, signals_count, approved_count,
+        paper_count, test_paper_count, blocked_global,
+    )
+    summary['money_hunter_status'] = money_hunter_status
+    summary['next_action'] = next_action
+    money_hunter_report = _build_money_hunter_report(
+        runtime, stats_by_sport, events, odds_outcomes, markets, mappings,
+        signals_count, approved_count, paper_count, test_paper_count,
+        top_signal_diagnostics, money_hunter_status, next_action,
+    )
+    _log_to_base44('info', 'money_hunter_report', money_hunter_report)
+    log.info('money_hunter_status=%s next_action=%s', money_hunter_status, next_action)
     _log_to_base44('info', 'run_once_complete', summary)
     log.info('summary: %s', summary)
     return summary
