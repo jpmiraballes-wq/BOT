@@ -13,7 +13,7 @@ from signal_engine import build_buy_signal
 from paper_broker import PaperBroker
 from storage import store
 from base44_client import base44
-from models import BotLog, now_iso
+from models import BotLog, now_iso, stable_id
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('odds_engine')
@@ -30,14 +30,40 @@ def _outcomes_by_event(outcomes):
     return out
 
 
+def _dedupe_key(entity: str, item) -> str:
+    payload = item.base44_payload() if hasattr(item, 'base44_payload') else item
+    if entity == 'ExternalEvent':
+        return f"{entity}:{payload.get('external_id')}"
+    if entity == 'PolymarketEvent':
+        return f"{entity}:{payload.get('polymarket_id') or payload.get('slug')}"
+    if entity == 'PolymarketMarket':
+        return f"{entity}:{payload.get('condition_id') or payload.get('question')}"
+    if entity == 'EventMapping':
+        return f"{entity}:{payload.get('external_event_id')}:{payload.get('polymarket_event_id')}"
+    if entity == 'MarketMapping':
+        return f"{entity}:{payload.get('event_mapping_id')}:{payload.get('polymarket_market_id')}:{payload.get('external_outcome')}"
+    if entity in {'OddsSnapshot', 'PolymarketSnapshot'}:
+        # snapshots are time-series; dedupe only per minute bucket to avoid flooding.
+        captured = str(payload.get('captured_at') or now_iso())[:16]
+        return f"{entity}:{stable_id(str(payload))}:{captured}"
+    if entity in {'Signal', 'PaperTrade'}:
+        return f"{entity}:{payload.get('signal_id') or payload.get('id') or stable_id(str(payload))}"
+    return f"{entity}:{stable_id(str(payload))}"
+
+
 def _write(entity: str, item, send_base44: bool = True) -> None:
     store.append(entity.lower(), item)
     if not send_base44 or not settings.base44_write_enabled:
         return
+    key = _dedupe_key(entity, item)
+    if store.base44_was_sent(key):
+        return
     if hasattr(item, 'base44_payload'):
-        base44.post_record(entity, item.base44_payload())
+        result = base44.post_record(entity, item.base44_payload())
     else:
-        base44.post_record(entity, item)
+        result = base44.post_record(entity, item)
+    if result is not None:
+        store.mark_base44_sent(key)
 
 
 def _log_to_base44(level: str, message: str, data: dict) -> None:
