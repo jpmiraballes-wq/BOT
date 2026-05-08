@@ -18,7 +18,6 @@ def build_buy_signal(
     price = float(market.best_ask or 0.0)
     spread = float(market.spread or 0.0)
     edge = fair_value - price
-    # edge neto simple: descuenta spread completo. Luego agregaremos slippage/model error.
     edge_neto = edge - spread
     result = risk.validate_signal_inputs(mapping, market, odds, fair_value, price, edge)
     action = 'BUY' if result.approved else 'IGNORE'
@@ -28,7 +27,9 @@ def build_buy_signal(
         f'risk={result.reason}'
     )
     return Signal(
-        id=stable_id(mapping.external_event_id, market.id, token_id, now_iso()),
+        # Stable ID: one current signal per external event + polymarket market + token.
+        # Do not include now_iso here or every loop creates duplicates.
+        id=stable_id('signal', mapping.external_event_id, market.id, token_id),
         strategy='odds_mispricing_v1',
         external_event_id=mapping.external_event_id,
         polymarket_market_id=market.id,
