@@ -210,6 +210,7 @@ def run_once() -> dict:
     signals_count = 0
     approved_count = 0
     paper_count = 0
+    test_paper_count = 0
     seen_signals_this_run: set[str] = set()
 
     enabled = bool(bot_cfg.get('enabled', False)) if bot_cfg else False
@@ -271,6 +272,20 @@ def run_once() -> dict:
                 _write('PaperTrade', trade)
                 paper_count += 1
                 sport_stats['paper_trades_created'] += 1
+            elif test_paper_count == 0 and runtime.paper_force_test_trade:
+                test_trade = paper.force_test_trade_from_signal(signal)
+                if test_trade:
+                    _write('PaperTrade', test_trade)
+                    test_paper_count += 1
+                    sport_stats['paper_trades_created'] = sport_stats.get('paper_trades_created', 0) + 1
+                    _log_to_base44('info', 'paper_trade_test_created', {
+                        'event': signal.external_event_id,
+                        'market': signal.polymarket_market_id,
+                        'edge_neto': signal.edge_neto,
+                        'reason': 'forced_paper_pipeline_test',
+                    })
+                    log.info('paper_trade_test_created event=%s market=%s edge_neto=%s',
+                             signal.external_event_id, signal.polymarket_market_id, signal.edge_neto)
 
     _emit_sport_probe_logs(stats_by_sport)
     summary = {
@@ -284,6 +299,8 @@ def run_once() -> dict:
         'signals': signals_count,
         'approved_signals': approved_count,
         'paper_trades': paper_count,
+        'test_paper_trades': test_paper_count,
+        'paper_force_test_trade': runtime.paper_force_test_trade,
         'base44_write_enabled': settings.base44_write_enabled,
     }
     _log_to_base44('info', 'run_once_complete', summary)
