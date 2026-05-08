@@ -85,6 +85,8 @@ class PolymarketMarket:
     yes_token_id: Optional[str]
     no_token_id: Optional[str]
     outcomes: list[str]
+    token_ids: list[str]
+    outcome_prices: list[float]
     best_bid: Optional[float]
     best_ask: Optional[float]
     midpoint: Optional[float]
@@ -108,7 +110,7 @@ class PolymarketMarket:
             'condition_id': self.condition_id or self.id,
             'question': self.question,
             'outcomes': self.outcomes,
-            'token_ids': [x for x in [self.yes_token_id, self.no_token_id] if x],
+            'token_ids': self.token_ids or [x for x in [self.yes_token_id, self.no_token_id] if x],
             'ends_at': self.end_date,
             'active': True,
             'raw': self.raw_payload,
@@ -152,7 +154,7 @@ class MappingCandidate:
             'event_mapping_id': stable_id('event_mapping', self.external_event_id, self.polymarket_market_id),
             'polymarket_market_id': self.polymarket_market_id,
             'external_outcome': str(self.outcome_mapping.get('external_outcome') or ''),
-            'polymarket_outcome': str(self.outcome_mapping.get('polymarket_outcome') or 'YES'),
+            'polymarket_outcome': str(self.outcome_mapping.get('polymarket_outcome') or ''),
             'verified': self.status == 'auto_approved',
         }
 
@@ -163,6 +165,7 @@ class Signal:
     strategy: str
     external_event_id: str
     polymarket_market_id: str
+    outcome: str
     token_id: str
     action: str
     fair_value: float
@@ -186,7 +189,7 @@ class Signal:
             'market_mapping_id': stable_id('market_mapping', self.external_event_id, self.polymarket_market_id, self.token_id),
             'external_event_id': self.external_event_id,
             'polymarket_market_id': self.polymarket_market_id,
-            'outcome': 'YES',
+            'outcome': self.outcome,
             'fair_probability': self.fair_value,
             'polymarket_price': self.polymarket_price,
             'edge_pct': self.edge_bruto,
@@ -230,8 +233,8 @@ class PaperTrade:
         return {
             'signal_id': self.signal_id,
             'polymarket_market_id': self.polymarket_market_id,
-            'outcome': 'YES',
-            'side': 'BUY' if self.side.upper() in {'YES', 'BUY'} else 'SELL',
+            'outcome': self.side,
+            'side': 'BUY',
             'entry_price': self.entry_price,
             'exit_price': self.exit_price,
             'size_usdc': self.size_usd,
