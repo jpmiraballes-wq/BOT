@@ -110,6 +110,11 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
     for ev in events:
         for pm in markets:
             validator = validate_market(ev, pm)
+            # Hard drop completely unrelated markets. They should not be persisted
+            # as mappings because they pollute Base44 and hide real discovery problems.
+            if validator.label == 'unrelated':
+                continue
+
             mtype = classify_market_type(pm.question)
             pbreak = _participant_breakdown(ev, pm)
             sport = _sport_score(ev, pm)
@@ -134,10 +139,7 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                 confidence = (0.15 * sport) + (0.48 * participants) + (0.15 * timing) + (0.12 * market_type_score) + (0.10 * outcome_clarity)
                 status = 'needs_review'
             else:
-                confidence = (0.15 * sport) + (0.55 * participants) + (0.10 * timing) + (0.10 * 0.20) + (0.10 * outcome_clarity)
-                if confidence < 0.55:
-                    continue
-                status = 'needs_review'
+                continue
 
             candidates.append(MappingCandidate(
                 external_event_id=ev.id,
