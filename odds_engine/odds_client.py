@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 import requests
 
-from config import settings
+from config import Settings, settings as default_settings
 from models import ExternalEvent, OddsOutcome, stable_id, now_iso
 
 
@@ -33,14 +32,15 @@ def _normalize_name(name: str) -> str:
 
 
 class OddsApiClient:
-    def __init__(self, api_key: str | None = None) -> None:
-        self.api_key = api_key or settings.odds_api_key
+    def __init__(self, cfg: Settings | None = None) -> None:
+        self.cfg = cfg or default_settings
+        self.api_key = self.cfg.odds_api_key
         self.base_url = 'https://api.the-odds-api.com/v4'
 
     def fetch_events_with_odds(self) -> tuple[list[ExternalEvent], list[OddsOutcome]]:
         events: list[ExternalEvent] = []
         outcomes: list[OddsOutcome] = []
-        for sport_key in settings.odds_sport_keys:
+        for sport_key in self.cfg.odds_sport_keys:
             evs, outs = self._fetch_sport(sport_key)
             events.extend(evs)
             outcomes.extend(outs)
@@ -50,8 +50,8 @@ class OddsApiClient:
         url = f'{self.base_url}/sports/{sport_key}/odds'
         params = {
             'apiKey': self.api_key,
-            'regions': settings.odds_regions,
-            'markets': settings.odds_markets,
+            'regions': self.cfg.odds_regions,
+            'markets': self.cfg.odds_markets,
             'oddsFormat': 'decimal',
             'dateFormat': 'iso',
         }
