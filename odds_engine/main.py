@@ -7,7 +7,7 @@ from dataclasses import replace
 from config import settings
 from odds_client import OddsApiClient
 from polymarket_client import PolymarketPublicClient
-from mapper import build_mapping_candidates, best_candidate_for_event
+from mapper import build_mapping_candidates, best_candidate_for_event, score_event_against_markets
 from fair_value import aggregate_fair_values, event_fair_value_for_name
 from risk_manager import RiskManager
 from signal_engine import build_buy_signal
@@ -146,6 +146,49 @@ def _emit_sport_probe_logs(stats_by_sport: dict[str, dict]) -> None:
         _log_to_base44('info', 'sport_probe', payload)
 
 
+def _emit_no_candidate_diagnostic(event, sport_markets, runtime) -> None:
+    """When an event ends up with no mapping candidate, log the top-3 closest
+    Polymarket markets and the concrete reason each one was rejected.
+    Pure observability: no logic change, no trades created here."""
+    if not sport_markets:
+        payload = {
+            'event_id': event.id,
+            'sport_key': event.sport_key,
+            'home_team': event.home_team,
+            'away_team': event.away_team,
+            'reason': 'no_polymarket_market_for_this_sport_at_all',
+            'top_candidates': [],
+        }
+        _log_to_base44('info', 'no_candidate_diagnostic', payload)
+        log.info('no_candidate_diagnostic event=%s sport=%s NO MARKETS in pool', event.id, event.sport_key)
+        return
+    top = score_event_against_markets(event, sport_markets, runtime, k=3)
+    payload = {
+        'event_id': event.id,
+        'sport_key': event.sport_key,
+        'home_team': event.home_team,
+        'away_team': event.away_team,
+        'pool_size': len(sport_markets),
+        'top_candidates': top,
+    }
+    _log_to_base44('info', 'no_candidate_diagnostic', payload)
+    if top:
+        best = top[0]
+        log.info(
+            'no_candidate_diagnostic event=%s sport=%s pool=%s best_q=%r conf=%.3f label=%s reason=%s home=%.2f away=%.2f both=%s',
+            event.id, event.sport_key, len(sport_markets),
+            (best.get('question') or '')[:80],
+            float(best.get('confidence', 0.0)),
+            best.get('validator_label'),
+            best.get('reject_reason'),
+            float(best.get('home_score', 0.0)),
+            float(best.get('away_score', 0.0)),
+            bool(best.get('both_present')),
+        )
+    else:
+        log.info('no_candidate_diagnostic event=%s sport=%s pool=%s no scored candidates', event.id, event.sport_key, len(sport_markets))
+
+
 # ----- Money Hunter V1 helpers ----------------------------------------------
 def _top_signal_dict(signal, event, market, mapping, runtime) -> dict:
     """Build the per-signal diagnostic dict with thresholds and gaps."""
@@ -216,7 +259,7 @@ def _aggregate_blocked_reasons(stats_by_sport: dict) -> dict:
 
 def _money_hunter_decision(stats_by_sport: dict, signals_count: int, approved_count: int,
                             paper_count: int, test_paper_count: int, blocked_global: dict) -> tuple[str, str]:
-    """Return (money_hunter_status, next_action) — pure observation, no thresholds touched."""
+    """Return (money_hunter_status, next_action) â pure observation, no thresholds touched."""
     if paper_count > 0:
         return 'PAPER_TRADES_CREATED', 'evaluate_paper_pnl_before_live'
     if test_paper_count > 0:
@@ -316,6 +359,15 @@ def run_once() -> dict:
     markets_by_id = _index_markets(markets)
     outcomes_by_event = _outcomes_by_event(odds_outcomes)
     _emit_mapping_debug(events, markets_by_id, mappings)
+    markets_by_sport: dict[str, list] = {}
+    for ev in events:
+        bucket = markets_by_sport.setdefault(ev.sport_key, [])
+    # Heuristic: assume all discovered markets are eligible to be scored against
+    # any event in the same sport. We don't filter by sport here because the
+    # discovery already filters with _looks_like_sports_market / _market_relevant_to_event.
+    _all_markets = list(markets)
+    for sport_key in list(markets_by_sport.keys()):
+        markets_by_sport[sport_key] = _all_markets
 
     event_sport = {event.id: event.sport_key for event in events}
     stats_by_sport = _init_sport_stats(runtime.odds_sport_keys)
@@ -384,6 +436,10 @@ def run_once() -> dict:
         mapping = best_candidate_for_event(event.id, mappings)
         if not mapping:
             bump_blocked(sport_stats, 'no_candidate_after_validator')
+            try:
+                _emit_no_candidate_diagnostic(event, markets_by_sport.get(event.sport_key, []), runtime)
+            except Exception as exc:
+                log.debug('no_candidate_diagnostic failed event=%s err=%s', event.id, exc)
             continue
         market = markets_by_id.get(mapping.polymarket_market_id)
         if not market:
