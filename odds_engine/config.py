@@ -75,7 +75,10 @@ class Settings:
     max_spread: float = _float('MAX_SPREAD', 0.04)
     min_liquidity: float = _float('MIN_LIQUIDITY', 1000.0)
     min_mapping_confidence: float = _float('MIN_MAPPING_CONFIDENCE', 0.85)
+    # Strict default remains 5 minutes. PAPER can safely observe/trade with a
+    # separate wider TTL because live modes are blocked in V1.
     default_odds_ttl_seconds: int = _int('DEFAULT_ODDS_TTL_SECONDS', 300)
+    paper_odds_ttl_seconds: int = _int('PAPER_ODDS_TTL_SECONDS', 900)
 
     def __post_init__(self):
         # Important: dataclasses.replace(settings, odds_sport_keys=[...]) is used
