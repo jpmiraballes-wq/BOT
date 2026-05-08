@@ -343,8 +343,15 @@ class PolymarketPublicClient:
                 except Exception as exc:
                     log.debug('polymarket league fetch failed sport=%s query=%s err=%s', sport_key, query, exc)
 
+        # A-discovery: query ALL events of each sport, capped per sport (not per slice)
+        # to keep API call volume bounded. The cap default is much higher now (24).
+        _TARGETED_EVENTS_CAP = max(1, int(self.cfg.polymarket_target_events_per_sport))
         for sport_key, sport_events in events_by_sport.items():
-            for event in sport_events[: max(1, int(self.cfg.polymarket_target_events_per_sport))]:
+            count_for_sport = 0
+            for event in sport_events:
+                if count_for_sport >= _TARGETED_EVENTS_CAP:
+                    break
+                count_for_sport += 1
                 targeted_events += 1
                 for query in _event_queries(event):
                     try:
