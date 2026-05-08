@@ -175,10 +175,14 @@ def build_buy_signal(
     if not token_id:
         result.approved = False
         result.reason = 'missing_matched_outcome_token'
+    odds_age = risk.odds_age_seconds(odds)
+    odds_ttl = risk.odds_ttl_seconds()
+    odds_age_text = 'unknown' if odds_age is None else f'{odds_age:.1f}'
     action = 'BUY' if result.approved else 'IGNORE'
     explanation = (
         f'outcome={outcome_label} fair={fair_value:.4f} polymarket_price={price:.4f} '
         f'edge={edge:.4f} spread={spread:.4f} mapping={mapping.confidence_score:.3f} '
+        f'odds_age={odds_age_text}s odds_ttl={odds_ttl}s '
         f'token={token_id[:10] if token_id else "MISSING"} risk={result.reason}'
     )
     return Signal(
