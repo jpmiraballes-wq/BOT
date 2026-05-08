@@ -266,3 +266,66 @@ def best_candidate_for_event(event_id: str, candidates: list[MappingCandidate]) 
     if len(matches) > 1 and matches[0].confidence_score - matches[1].confidence_score < 0.08:
         matches[0].status = 'needs_review'
     return matches[0]
+
+
+# --- diagnostics: debug_score_event_against_markets ---
+def debug_score_event_against_markets(event, markets, top_n: int = 5):
+    """Read-only scoring of all markets against an event, for diagnostics.
+
+    Calls validate_market(event, market) for each market. Does NOT create
+    mappings, does NOT auto-approve, does NOT change risk. Returns a list of
+    plain dicts (top_n) sorted by validator label priority and name scores.
+    """
+    label_priority = {
+        'exact_h2h_moneyline': 0,
+        'safe_relaxed_h2h': 1,
+        'likely_h2h': 2,
+        'derivative_prop': 3,
+        'unrelated': 4,
+    }
+    rows = []
+    for pm in markets or []:
+        try:
+            v = validate_market(event, pm)
+        except Exception as exc:  # pragma: no cover - defensive
+            rows.append({
+                'market_id': getattr(pm, 'id', '') or '',
+                'question': getattr(pm, 'question', '') or '',
+                'category': getattr(pm, 'category', '') or '',
+                'slug': getattr(pm, 'slug', '') or '',
+                'label': 'error',
+                'reason': f'validator_exception:{exc}',
+                'home_score': 0.0,
+                'away_score': 0.0,
+                'confidence': 0.0,
+                '_pri': 99,
+                '_name_avg': 0.0,
+            })
+            continue
+        home_score = float(getattr(v, 'home_score', 0.0) or 0.0)
+        away_score = float(getattr(v, 'away_score', 0.0) or 0.0)
+        label = str(getattr(v, 'label', '') or 'unrelated')
+        reason = str(getattr(v, 'reason', '') or '')
+        rows.append({
+            'market_id': getattr(pm, 'id', '') or '',
+            'question': getattr(pm, 'question', '') or '',
+            'category': getattr(pm, 'category', '') or '',
+            'slug': getattr(pm, 'slug', '') or '',
+            'label': label,
+            'reason': reason,
+            'home_score': round(home_score, 4),
+            'away_score': round(away_score, 4),
+            # 'confidence' here is just a coarse hint for sorting, not a
+            # real mapping confidence. The real confidence is computed in
+            # build_mapping_candidates and is NOT touched by this helper.
+            'confidence': round((home_score + away_score) / 2.0, 4),
+            '_pri': label_priority.get(label, 50),
+            '_name_avg': (home_score + away_score) / 2.0,
+        })
+    rows.sort(key=lambda r: (r['_pri'], -r['_name_avg'], -r['home_score'], -r['away_score']))
+    out = []
+    for r in rows[: max(0, int(top_n))]:
+        r.pop('_pri', None)
+        r.pop('_name_avg', None)
+        out.append(r)
+    return out
