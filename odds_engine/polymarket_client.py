@@ -183,35 +183,40 @@ def _aliases_for_team(name: str) -> list[str]:
 
 
 def _event_queries(event: ExternalEvent) -> list[str]:
+    # DISCOVERY_WIDEN_V1: try single-team alias queries FIRST. Polymarket
+    # Gamma search hits futures/championship/single-team markets much more
+    # often than concatenated "home away" strings. Pair queries are kept
+    # as fallback for true H2H markets.
     home = event.home_team or ''
     away = event.away_team or ''
     home_last = _last_name(home)
     away_last = _last_name(away)
     home_aliases = _aliases_for_team(home)
     away_aliases = _aliases_for_team(away)
-    queries = []
+    queries: list[str] = []
+    # 1) Single-team queries first (most productive on Gamma).
+    for token in home_aliases[:4] + away_aliases[:4]:
+        queries.append(token)
+    if home_last:
+        queries.append(home_last)
+    if away_last:
+        queries.append(away_last)
+    # 2) League-level fallback.
+    queries.extend(SPORT_DISCOVERY_QUERIES.get(event.sport_key, [])[:2])
+    # 3) Pair queries (H2H markets).
     if home and away:
         queries.extend([
-            f'{home} {away}',
-            f'{away} {home}',
             f'{home} vs {away}',
             f'{away} vs {home}',
-            f'{home} at {away}',
-            f'{away} at {home}',
-            f'{home} @ {away}',
-            f'{away} @ {home}',
             f'{home_last} {away_last}'.strip(),
             f'{away_last} {home_last}'.strip(),
         ])
-    for h in home_aliases[:4]:
-        for a in away_aliases[:4]:
+    for h in home_aliases[:3]:
+        for a in away_aliases[:3]:
             if h != a:
-                queries.extend([f'{h} {a}', f'{a} {h}', f'{h} vs {a}', f'{a} vs {h}'])
-    for token in home_aliases[:4] + away_aliases[:4]:
-        queries.append(token)
-    queries.extend(SPORT_DISCOVERY_QUERIES.get(event.sport_key, [])[:2])
+                queries.append(f'{h} {a}')
     seen = set()
-    out = []
+    out: list[str] = []
     for q in queries:
         q = ' '.join(str(q).split())
         key = q.lower()
@@ -236,31 +241,60 @@ def _contains_aliases(name: str, text: str) -> bool:
 
 
 def _market_relevant_to_event(event: ExternalEvent, market: PolymarketMarket) -> bool:
+    # DISCOVERY_WIDEN_V1: at discovery time keep markets that mention EITHER
+    # team. Auto-approval still requires both participants (market_validator.py),
+    # so this only widens the pool — no false positives reach paper trading.
     text = _normalize(' '.join([market.question, market.slug, market.category, ' '.join(market.outcomes or [])]))
-    return _contains_aliases(event.home_team, text) and _contains_aliases(event.away_team, text)
+    return _contains_aliases(event.home_team, text) or _contains_aliases(event.away_team, text)
+
+
+_GENERIC_SPORTS_TERMS = [
+    'ufc', 'mma', 'fight', 'boxing', 'soccer', 'football', 'premier',
+    'champions league', 'la liga', 'serie a', 'nba', 'nfl', 'mlb', 'nhl',
+    'tennis', 'atp', 'wta', 'world cup', 'baseball', 'basketball', 'hockey',
+    'playoffs', 'stanley cup', 'epl', 'la liga', 'bundesliga',
+    'super bowl', 'finals', 'mvp', 'champion', 'title', 'series',
+    'home run', 'goal', 'touchdown', 'cup final',
+]
+
+_NON_SPORTS_TERMS = [
+    'election', 'senedd', 'market cap', 'ipo', 'bitcoin', 'ethereum',
+    'temperature', 'weather', 'movie', 'album', 'oscar', 'grammy',
+]
+
+
+def _build_team_term_set() -> set[str]:
+    """Whitelist tokens derived from TEAM_ALIASES so every team registered
+    there counts as a sports market. Built once at import time."""
+    terms: set[str] = set()
+    for full_name, aliases in TEAM_ALIASES.items():
+        terms.add(full_name)
+        for tok in full_name.split():
+            if len(tok) >= 4:
+                terms.add(tok)
+        for alias in aliases:
+            if len(alias) >= 3:
+                terms.add(alias)
+    return terms
+
+
+_TEAM_TERMS = _build_team_term_set()
 
 
 def _looks_like_sports_market(market: PolymarketMarket) -> bool:
+    # DISCOVERY_WIDEN_V1: whitelist now derived from TEAM_ALIASES + generic
+    # sport tokens. Removes false negatives for teams that were missing from
+    # the previous hardcoded list (Heat, Bucks, Newcastle, Brewers, etc.).
     text = _normalize(' '.join([market.question, market.slug, market.category, ' '.join(market.outcomes or [])]))
-    sports_terms = [
-        'ufc', 'mma', 'fight', 'boxing', 'soccer', 'football', 'premier',
-        'champions league', 'la liga', 'serie a', 'nba', 'nfl', 'mlb', 'nhl',
-        'tennis', 'atp', 'wta', 'world cup', 'baseball', 'basketball', 'hockey',
-        'playoffs', 'stanley cup', 'reds', 'astros', 'yankees', 'dodgers', 'mets',
-        'cubs', 'padres', 'phillies', 'braves', 'rockies', 'orioles', 'athletics',
-        'blue jays', 'angels', 'red sox', 'rays', 'marlins', 'nationals',
-        'guardians', 'twins', 'white sox', 'mariners', 'lakers', 'celtics',
-        'knicks', 'warriors', 'thunder', 'nuggets', 'pacers', 'bruins', 'oilers',
-        'panthers', 'rangers', 'maple leafs', 'real madrid', 'barcelona',
-        'arsenal', 'chelsea', 'liverpool', 'manchester', 'tottenham',
-    ]
-    non_sports_terms = [
-        'election', 'senedd', 'market cap', 'ipo', 'fed', 'bitcoin', 'ethereum',
-        'trump', 'president', 'temperature', 'weather', 'movie', 'album',
-    ]
-    if any(x in text for x in non_sports_terms):
+    if any(x in text for x in _NON_SPORTS_TERMS):
         return False
-    return any(x in text for x in sports_terms)
+    if any(x in text for x in _GENERIC_SPORTS_TERMS):
+        return True
+    wrapped = f' {text} '
+    for term in _TEAM_TERMS:
+        if f' {term} ' in wrapped:
+            return True
+    return False
 
 
 class PolymarketPublicClient:
@@ -375,6 +409,14 @@ class PolymarketPublicClient:
             len(by_id), calls, targeted_events, broad_raw, broad_kept, league_raw, league_kept,
             targeted_raw, targeted_kept, dict(per_sport_hits),
         )
+        # DISCOVERY_WIDEN_V1: per-sport observability (no logic change).
+        for sport_key, hits in per_sport_hits.items():
+            kept_total = int(hits.get('targeted_kept', 0)) + int(hits.get('league_kept', 0))
+            raw_total = int(hits.get('targeted_raw', 0)) + int(hits.get('league_raw', 0))
+            log.info(
+                'polymarket_discovery_per_sport sport=%s raw=%s kept=%s rejected=%s detail=%s',
+                sport_key, raw_total, kept_total, max(0, raw_total - kept_total), dict(hits),
+            )
         return list(by_id.values())
 
     def _parse_market(self, m: dict[str, Any]) -> PolymarketMarket:
