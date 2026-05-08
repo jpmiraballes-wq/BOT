@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -37,19 +37,20 @@ class Settings:
     odds_api_key: str = os.getenv('ODDS_API_KEY', '').strip()
     odds_regions: str = os.getenv('ODDS_REGIONS', 'us,eu')
     odds_markets: str = os.getenv('ODDS_MARKETS', 'h2h')
-    odds_sport_keys: list[str] = None  # set in __post_init__ style below
+    odds_sport_keys: list[str] = None
 
     polymarket_gamma_url: str = os.getenv('POLYMARKET_GAMMA_URL', 'https://gamma-api.polymarket.com')
     polymarket_clob_url: str = os.getenv('POLYMARKET_CLOB_URL', 'https://clob.polymarket.com')
 
-    base44_api_url: str = os.getenv('BASE44_API_URL', '').strip()
-    base44_api_token: str = os.getenv('BASE44_API_TOKEN', '').strip()
-    base44_app_id: str = os.getenv('BASE44_APP_ID', '69e1e225a40599eb44ced81e')
+    # Base44 app entity API. This intentionally supports the old env names too.
+    base44_base_url: str = os.getenv('BASE44_BASE_URL', os.getenv('BASE44_API_URL', 'https://app.base44.com')).strip()
+    base44_api_key: str = os.getenv('EXTERNAL_BASE44_API_KEY', os.getenv('BASE44_API_KEY', os.getenv('BASE44_API_TOKEN', ''))).strip()
+    base44_app_id: str = os.getenv('EXTERNAL_BASE44_APP_ID', os.getenv('BASE44_APP_ID', '69e1e225a40599eb44ced81e')).strip()
 
     starting_capital_usd: float = _float('STARTING_CAPITAL_USD', 500.0)
     paper_trade_usd: float = _float('PAPER_TRADE_USD', 5.0)
     max_total_exposure_usd: float = _float('MAX_TOTAL_EXPOSURE_USD', 100.0)
-    min_edge: float = _float('MIN_EDGE', 0.04)
+    min_edge: float = _float('MIN_EDGE', 0.03)
     max_spread: float = _float('MAX_SPREAD', 0.04)
     min_liquidity: float = _float('MIN_LIQUIDITY', 1000.0)
     min_mapping_confidence: float = _float('MIN_MAPPING_CONFIDENCE', 0.85)
@@ -64,6 +65,26 @@ class Settings:
             raise RuntimeError('Only OBSERVE and PAPER are allowed in odds_engine V1')
         if not self.odds_api_key:
             raise RuntimeError('Missing ODDS_API_KEY in odds_engine/.env')
+
+    def with_bot_config(self, config: dict) -> 'Settings':
+        """Return a runtime settings object constrained by Base44 BotConfig.
+
+        Base44 can disable signal/trade creation. Live mode is still blocked in
+        V1 even if the dashboard says live.
+        """
+        if not config:
+            return self
+        mode_raw = str(config.get('mode') or 'paper').upper()
+        mode = 'PAPER' if mode_raw != 'OBSERVE' else 'OBSERVE'
+        if mode_raw == 'LIVE':
+            mode = 'PAPER'
+        return replace(
+            self,
+            bot_mode=mode,
+            min_edge=float(config.get('min_edge_pct') or self.min_edge),
+            paper_trade_usd=float(config.get('max_position_size_usdc') or self.paper_trade_usd),
+            max_total_exposure_usd=float(config.get('max_position_size_usdc') or self.paper_trade_usd) * float(config.get('max_open_positions') or 1),
+        )
 
 
 settings = Settings()
