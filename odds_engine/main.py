@@ -50,8 +50,8 @@ def run_once() -> dict:
     runtime = settings.with_bot_config(bot_cfg)
     log.info('starting odds_engine run_once mode=%s sports=%s base44=%s', runtime.bot_mode, runtime.odds_sport_keys, base44.enabled)
 
-    odds_client = OddsApiClient(runtime.odds_api_key)
-    poly_client = PolymarketPublicClient()
+    odds_client = OddsApiClient(runtime)
+    poly_client = PolymarketPublicClient(runtime)
     risk = RiskManager(runtime)
     paper = PaperBroker(risk, runtime)
 
