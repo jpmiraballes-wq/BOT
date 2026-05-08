@@ -51,9 +51,9 @@ class Settings:
     polymarket_gamma_url: str = os.getenv('POLYMARKET_GAMMA_URL', 'https://gamma-api.polymarket.com')
     polymarket_clob_url: str = os.getenv('POLYMARKET_CLOB_URL', 'https://clob.polymarket.com')
     polymarket_broad_limit: int = _int('POLYMARKET_BROAD_LIMIT', 300)
-    polymarket_broad_pages: int = _int('POLYMARKET_BROAD_PAGES', 2)
-    polymarket_target_events_per_sport: int = _int('POLYMARKET_TARGET_EVENTS_PER_SPORT', 8)
-    polymarket_search_results_per_query: int = _int('POLYMARKET_SEARCH_RESULTS_PER_QUERY', 40)
+    polymarket_broad_pages: int = _int('POLYMARKET_BROAD_PAGES', 4)
+    polymarket_target_events_per_sport: int = _int('POLYMARKET_TARGET_EVENTS_PER_SPORT', 24)
+    polymarket_search_results_per_query: int = _int('POLYMARKET_SEARCH_RESULTS_PER_QUERY', 60)
 
     base44_base_url: str = os.getenv('BASE44_BASE_URL', os.getenv('BASE44_API_URL', 'https://app.base44.com')).strip()
     base44_api_key: str = os.getenv('EXTERNAL_BASE44_API_KEY', os.getenv('BASE44_API_KEY', os.getenv('BASE44_API_TOKEN', ''))).strip()
