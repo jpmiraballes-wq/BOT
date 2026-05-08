@@ -40,6 +40,11 @@ def _similar(a: str, b: str) -> float:
     return max(fuzz.partial_ratio(aa, bb), fuzz.token_set_ratio(aa, bb)) / 100.0
 
 
+def _is_binary_yes_no(market: PolymarketMarket) -> bool:
+    outcomes = [_norm(x) for x in (market.outcomes or [])]
+    return len(outcomes) >= 2 and outcomes[0] == 'yes' and outcomes[1] == 'no'
+
+
 def _match_outcome_index(market: PolymarketMarket, outcome_name: str) -> int | None:
     target = _norm(outcome_name)
     if not target:
@@ -98,13 +103,20 @@ def _binary_side_from_derivative(mapping: MappingCandidate, market: PolymarketMa
 
 
 def _binary_side_from_question(market: PolymarketMarket, outcome_name: str) -> int | None:
-    """Infer YES/NO token side for binary H2H questions like 'Team A vs Team B'.
+    """Infer YES/NO token side for binary H2H questions.
 
-    Polymarket often stores outcomes as Yes/No while the real team names live only
-    in the question/slug. For a clean H2H market we map first-mentioned team to
-    YES and second-mentioned team to NO. If confidence is not clear, return None.
+    Polymarket often stores outcomes as Yes/No while the real selection lives in
+    the question/slug. For clean 'Team A vs Team B' questions we map the first
+    mentioned team to YES and second to NO. For binary draw markets like
+    'Will Team A vs Team B end in a draw?' we map Odds API 'Draw' to YES.
     """
     question = market.question or market.slug or ''
+    q_norm = _norm(question)
+    out_norm = _norm(outcome_name)
+
+    if _is_binary_yes_no(market) and out_norm == 'draw' and 'draw' in q_norm:
+        return 0
+
     parts = re.split(r'\s+(?:vs\.?|v\.?|versus)\s+', question, flags=re.I)
     if len(parts) < 2:
         return None
