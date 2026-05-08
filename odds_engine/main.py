@@ -78,8 +78,6 @@ def run_once() -> dict:
     approved_count = 0
     paper_count = 0
 
-    # If the dashboard switch is disabled, the engine still ingests reference data
-    # but does not create Signals/PaperTrades. This is the safe default.
     enabled = bool(bot_cfg.get('enabled', False)) if bot_cfg else False
     if not enabled:
         summary = {
@@ -111,7 +109,7 @@ def run_once() -> dict:
                 continue
             if odds.outcome_name.lower() not in (market.question + ' ' + market.slug).lower():
                 continue
-            signal = build_buy_signal(mapping, market, odds, fair, risk)
+            signal = build_buy_signal(mapping, market, odds, fair, risk, runtime)
             _write('Signal', signal)
             signals_count += 1
             if signal.risk_status == 'approved':
