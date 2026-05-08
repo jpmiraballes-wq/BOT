@@ -7,6 +7,7 @@ import sys
 
 from main import run_once, _log_to_base44
 import paper_mark
+import paper_portfolio_summary
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('odds_engine')
@@ -33,6 +34,14 @@ def main() -> int:
             except Exception as mark_exc:
                 log.exception('paper mark failed: %s', mark_exc)
                 _log_to_base44('error', 'paper_mark_failed', {'error': str(mark_exc)})
+
+            # Best-effort paper portfolio summary.
+            # Never fail the engine because of portfolio reporting.
+            try:
+                paper_portfolio_summary.main()
+            except Exception as summary_exc:
+                log.exception('paper portfolio summary failed: %s', summary_exc)
+                _log_to_base44('error', 'paper_portfolio_summary_failed', {'error': str(summary_exc)})
 
             return 0
         except Exception as exc:
