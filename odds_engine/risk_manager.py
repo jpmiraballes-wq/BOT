@@ -24,10 +24,17 @@ class RiskManager:
         return int(self.cfg.default_odds_ttl_seconds)
 
     def odds_age_seconds(self, outcome: OddsOutcome) -> float | None:
-        ts = outcome.provider_last_update or outcome.received_at
+        # In PAPER we care whether *our fetched snapshot* is fresh enough for the
+        # simulator. Some providers keep provider_last_update old for slow-moving
+        # markets, which incorrectly rejects newly fetched PAPER signals as stale.
+        # LIVE/OBSERVE keeps the stricter provider timestamp behavior.
+        if self.cfg.bot_mode == 'PAPER':
+            ts = outcome.received_at or outcome.provider_last_update
+        else:
+            ts = outcome.provider_last_update or outcome.received_at
         try:
             dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00')).astimezone(timezone.utc)
-            return (datetime.now(timezone.utc) - dt).total_seconds()
+            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
         except Exception:
             return None
 
