@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections import Counter
 from dataclasses import replace
 
@@ -293,13 +292,18 @@ def run_once() -> dict:
 
 
 def main() -> int:
-    while True:
-        try:
-            run_once()
-        except Exception as exc:
-            log.exception('run failed: %s', exc)
-            _log_to_base44('error', 'run_failed', {'error': str(exc)})
-        time.sleep(settings.loop_interval_seconds)
+    """Run exactly one scan.
+
+    launchd already schedules this job with StartInterval=60. Keeping an
+    internal while/sleep loop here creates overlapping engines and stale runs.
+    """
+    try:
+        run_once()
+        return 0
+    except Exception as exc:
+        log.exception('run failed: %s', exc)
+        _log_to_base44('error', 'run_failed', {'error': str(exc)})
+        return 1
 
 
 if __name__ == '__main__':
