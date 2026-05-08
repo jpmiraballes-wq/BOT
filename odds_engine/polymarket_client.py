@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any
 import json
 import logging
+import re
+import unicodedata
 import requests
+from rapidfuzz import fuzz
 
 from config import Settings, settings as default_settings
 from models import PolymarketMarket, ExternalEvent
@@ -32,6 +35,13 @@ def _json_list(value) -> list:
     return []
 
 
+def _normalize(value: str) -> str:
+    s = unicodedata.normalize('NFKD', value or '').encode('ascii', 'ignore').decode('ascii')
+    s = s.lower()
+    s = re.sub(r'[^a-z0-9 ]+', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
 def _last_name(name: str) -> str:
     parts = [p for p in (name or '').replace('-', ' ').split() if p]
     return parts[-1] if parts else ''
@@ -48,8 +58,6 @@ def _event_queries(event: ExternalEvent) -> list[str]:
             f'{_last_name(home)} {_last_name(away)}'.strip(),
             f'{_last_name(away)} {_last_name(home)}'.strip(),
         ])
-    # Keep targeted discovery small and high signal. Single-name searches can be
-    # noisy, so only use them after exact/last-name pair queries.
     seen = set()
     out = []
     for q in queries:
@@ -59,6 +67,40 @@ def _event_queries(event: ExternalEvent) -> list[str]:
             seen.add(key)
             out.append(q)
     return out[:4]
+
+
+def _contains_name(name: str, text: str) -> bool:
+    n = _normalize(name)
+    if not n:
+        return False
+    wrapped = f' {text} '
+    if f' {n} ' in wrapped:
+        return True
+    parts = [p for p in n.split() if len(p) >= 3]
+    if parts and f' {parts[-1]} ' in wrapped:
+        return True
+    return max(fuzz.partial_ratio(n, text), fuzz.token_set_ratio(n, text)) >= 88
+
+
+def _market_relevant_to_event(event: ExternalEvent, market: PolymarketMarket) -> bool:
+    text = _normalize(' '.join([market.question, market.slug, market.category]))
+    return _contains_name(event.home_team, text) and _contains_name(event.away_team, text)
+
+
+def _looks_like_sports_market(market: PolymarketMarket) -> bool:
+    text = _normalize(' '.join([market.question, market.slug, market.category]))
+    sports_terms = [
+        'ufc', 'mma', 'fight', 'boxing', 'soccer', 'football', 'premier',
+        'champions league', 'la liga', 'serie a', 'nba', 'nfl', 'mlb', 'nhl',
+        'tennis', 'atp', 'wta', 'world cup',
+    ]
+    non_sports_terms = [
+        'election', 'senedd', 'market cap', 'ipo', 'fed', 'bitcoin', 'ethereum',
+        'trump', 'president', 'temperature', 'weather', 'movie', 'album',
+    ]
+    if any(x in text for x in non_sports_terms):
+        return False
+    return any(x in text for x in sports_terms)
 
 
 class PolymarketPublicClient:
@@ -91,33 +133,45 @@ class PolymarketPublicClient:
         return [m for m in parsed if m.id and m.question]
 
     def fetch_markets_for_events(self, events: list[ExternalEvent], broad_limit: int = 300) -> list[PolymarketMarket]:
-        """Fetch broad markets plus small targeted searches around event participants."""
+        """Fetch broad sports markets plus locally filtered targeted searches."""
         by_id: dict[str, PolymarketMarket] = {}
         calls = 0
+        targeted_raw = 0
+        targeted_kept = 0
+        broad_raw = 0
+        broad_kept = 0
 
         def add_many(items: list[PolymarketMarket]) -> None:
             for m in items:
                 by_id.setdefault(m.id, m)
 
-        # Broad discovery: two pages by volume. More pages are too slow for a
-        # 5-minute loop and do not materially improve H2H signal quality yet.
         for offset in (0, broad_limit):
             try:
-                add_many(self.fetch_active_markets(limit=broad_limit, offset=offset))
+                items = self.fetch_active_markets(limit=broad_limit, offset=offset)
                 calls += 1
+                broad_raw += len(items)
+                filtered = [m for m in items if _looks_like_sports_market(m)]
+                broad_kept += len(filtered)
+                add_many(filtered)
             except Exception as exc:
                 log.warning('polymarket broad fetch failed offset=%s err=%s', offset, exc)
 
-        # Targeted discovery: top 10 external events only, 4 strong queries each.
         for event in events[:10]:
             for query in _event_queries(event):
                 try:
-                    add_many(self.fetch_active_markets(limit=25, offset=0, search=query))
+                    items = self.fetch_active_markets(limit=25, offset=0, search=query)
                     calls += 1
+                    targeted_raw += len(items)
+                    filtered = [m for m in items if _market_relevant_to_event(event, m)]
+                    targeted_kept += len(filtered)
+                    add_many(filtered)
                 except Exception as exc:
                     log.debug('polymarket targeted fetch failed query=%s err=%s', query, exc)
 
-        log.info('polymarket_discovery markets=%s api_calls=%s targeted_events=%s', len(by_id), calls, min(len(events), 10))
+        log.info(
+            'polymarket_discovery markets=%s api_calls=%s targeted_events=%s broad_raw=%s broad_kept=%s targeted_raw=%s targeted_kept=%s',
+            len(by_id), calls, min(len(events), 10), broad_raw, broad_kept, targeted_raw, targeted_kept,
+        )
         return list(by_id.values())
 
     def _parse_market(self, m: dict[str, Any]) -> PolymarketMarket:
