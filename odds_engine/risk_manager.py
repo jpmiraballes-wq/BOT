@@ -18,14 +18,24 @@ class RiskManager:
         self.cfg = cfg or default_settings
         self.open_exposure_usd = 0.0
 
-    def odds_are_fresh(self, outcome: OddsOutcome) -> bool:
+    def odds_ttl_seconds(self) -> int:
+        if self.cfg.bot_mode == 'PAPER':
+            return int(getattr(self.cfg, 'paper_odds_ttl_seconds', self.cfg.default_odds_ttl_seconds))
+        return int(self.cfg.default_odds_ttl_seconds)
+
+    def odds_age_seconds(self, outcome: OddsOutcome) -> float | None:
         ts = outcome.provider_last_update or outcome.received_at
         try:
             dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00')).astimezone(timezone.utc)
-            age = (datetime.now(timezone.utc) - dt).total_seconds()
-            return age <= self.cfg.default_odds_ttl_seconds
+            return (datetime.now(timezone.utc) - dt).total_seconds()
         except Exception:
+            return None
+
+    def odds_are_fresh(self, outcome: OddsOutcome) -> bool:
+        age = self.odds_age_seconds(outcome)
+        if age is None:
             return False
+        return age <= self.odds_ttl_seconds()
 
     def validate_signal_inputs(
         self,
