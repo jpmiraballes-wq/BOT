@@ -31,8 +31,6 @@ def _outcomes_by_event(outcomes):
 
 
 def _write(entity: str, item, send_base44: bool = True) -> None:
-    # Local JSONL is the full audit trail. Base44 is intentionally throttled
-    # during first runs so the dashboard does not get flooded.
     store.append(entity.lower(), item)
     if not send_base44 or not settings.base44_write_enabled:
         return
@@ -51,9 +49,14 @@ def _log_to_base44(level: str, message: str, data: dict) -> None:
 
 def run_once() -> dict:
     settings.validate()
-    bot_cfg = base44.fetch_bot_config()
+    bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
     runtime = settings.with_bot_config(bot_cfg)
-    log.info('starting odds_engine run_once mode=%s sports=%s base44=%s', runtime.bot_mode, runtime.odds_sport_keys, base44.enabled)
+    log.info(
+        'starting odds_engine run_once mode=%s sports=%s base44_write=%s',
+        runtime.bot_mode,
+        runtime.odds_sport_keys,
+        settings.base44_write_enabled,
+    )
 
     odds_client = OddsApiClient(runtime)
     poly_client = PolymarketPublicClient(runtime)
@@ -97,7 +100,7 @@ def run_once() -> dict:
             'signals': 0,
             'approved_signals': 0,
             'paper_trades': 0,
-            'note': 'BotConfig.enabled=false, ingestion only',
+            'note': 'BotConfig.enabled=false or Base44 writes disabled, ingestion only',
             'base44_write_enabled': settings.base44_write_enabled,
         }
         _log_to_base44('info', 'run_once_ingestion_only', summary)
