@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 
 from config import settings
 from odds_client import OddsApiClient
@@ -76,6 +77,55 @@ def _log_to_base44(level: str, message: str, data: dict) -> None:
         base44.post_record('BotLog', item.base44_payload())
 
 
+def _emit_mapping_debug(events, markets_by_id, mappings, limit: int = 8) -> None:
+    by_event = {}
+    labels = Counter()
+    statuses = Counter()
+    for m in mappings:
+        by_event.setdefault(m.external_event_id, []).append(m)
+        statuses[m.status] += 1
+        label = m.confidence_breakdown.get('validator_label') if isinstance(m.confidence_breakdown, dict) else None
+        if label:
+            labels[label] += 1
+
+    debug_rows = []
+    for event in events[:limit]:
+        matches = by_event.get(event.id, [])
+        if not matches:
+            debug_rows.append({
+                'event': f'{event.home_team} vs {event.away_team}',
+                'best_question': None,
+                'reason': 'no_candidate_after_validator',
+            })
+            continue
+        best = matches[0]
+        market = markets_by_id.get(best.polymarket_market_id)
+        br = best.confidence_breakdown or {}
+        debug_rows.append({
+            'event': f'{event.home_team} vs {event.away_team}',
+            'best_question': market.question if market else None,
+            'confidence': best.confidence_score,
+            'status': best.status,
+            'market_type': best.market_type,
+            'validator_label': br.get('validator_label'),
+            'validator_reason': br.get('validator_reason'),
+            'home_score': br.get('home_score'),
+            'away_score': br.get('away_score'),
+            'both_present': br.get('both_present'),
+            'liquidity': market.liquidity if market else None,
+            'spread': market.spread if market else None,
+        })
+
+    payload = {
+        'mapping_candidates': len(mappings),
+        'validator_labels': dict(labels),
+        'mapping_statuses': dict(statuses),
+        'top_events': debug_rows,
+    }
+    log.info('mapping_debug: %s', payload)
+    _log_to_base44('info', 'mapping_debug', payload)
+
+
 def run_once() -> dict:
     settings.validate()
     bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
@@ -98,6 +148,7 @@ def run_once() -> dict:
     mappings = build_mapping_candidates(events, markets, runtime)
     markets_by_id = _index_markets(markets)
     outcomes_by_event = _outcomes_by_event(odds_outcomes)
+    _emit_mapping_debug(events, markets_by_id, mappings)
 
     for idx, e in enumerate(events):
         _write('ExternalEvent', e, send_base44=idx < runtime.base44_max_events)
