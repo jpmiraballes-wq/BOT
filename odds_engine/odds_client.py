@@ -37,6 +37,13 @@ class OddsApiClient:
         self.api_key = self.cfg.odds_api_key
         self.base_url = 'https://api.the-odds-api.com/v4'
 
+    def fetch_sports(self) -> list[dict]:
+        url = f'{self.base_url}/sports'
+        resp = requests.get(url, params={'apiKey': self.api_key}, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
     def fetch_events_with_odds(self) -> tuple[list[ExternalEvent], list[OddsOutcome]]:
         events: list[ExternalEvent] = []
         outcomes: list[OddsOutcome] = []
