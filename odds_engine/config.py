@@ -44,7 +44,7 @@ class Settings:
     odds_api_key: str = os.getenv('ODDS_API_KEY', '').strip()
     odds_regions: str = os.getenv('ODDS_REGIONS', 'us,eu')
     odds_markets: str = os.getenv('ODDS_MARKETS', 'h2h')
-    odds_sport_keys: list[str] = None
+    odds_sport_keys: list[str] | None = None
 
     polymarket_gamma_url: str = os.getenv('POLYMARKET_GAMMA_URL', 'https://gamma-api.polymarket.com')
     polymarket_clob_url: str = os.getenv('POLYMARKET_CLOB_URL', 'https://clob.polymarket.com')
@@ -70,7 +70,10 @@ class Settings:
     default_odds_ttl_seconds: int = _int('DEFAULT_ODDS_TTL_SECONDS', 300)
 
     def __post_init__(self):
-        object.__setattr__(self, 'odds_sport_keys', _csv('ODDS_SPORT_KEYS', 'mma_mixed_martial_arts'))
+        # Important: dataclasses.replace(settings, odds_sport_keys=[...]) is used
+        # by diagnostics/probes. Do not overwrite explicit sport keys with .env.
+        if self.odds_sport_keys is None:
+            object.__setattr__(self, 'odds_sport_keys', _csv('ODDS_SPORT_KEYS', 'mma_mixed_martial_arts'))
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def validate(self) -> None:
