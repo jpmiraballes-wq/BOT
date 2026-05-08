@@ -175,6 +175,77 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
     return candidates
 
 
+def score_event_against_markets(event: ExternalEvent, markets: list[PolymarketMarket], runtime: Settings | None = None, k: int = 3) -> list[dict]:
+    """Diagnostic helper: rank ALL markets against an event using the same
+    scoring used by build_mapping_candidates, but WITHOUT filtering them out.
+
+    Returns the top-k (by confidence) with full breakdown so we can answer:
+      "this event had no candidate because the closest market was X with
+      validator_label=Y, both_present=Z, etc."
+    """
+    cfg = runtime or default_settings
+    rows = []
+    for pm in markets:
+        try:
+            validator = validate_market(event, pm)
+            mtype = classify_market(pm.question)
+            pbreak = _participant_breakdown(event, pm)
+            sport = _sport_score(event, pm)
+            participants = max(float(pbreak['strict_score']), min(validator.home_score, validator.away_score))
+            timing = _time_score(event, pm)
+            outcome_clarity = 0.85 if pm.yes_token_id else 0.25
+
+            if validator.label == 'exact_h2h_moneyline':
+                market_type_score = 1.0
+                confidence = (0.15 * sport) + (0.50 * participants) + (0.15 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
+            elif validator.label == 'likely_h2h':
+                market_type_score = 0.65
+                confidence = (0.15 * sport) + (0.48 * participants) + (0.15 * timing) + (0.12 * market_type_score) + (0.10 * outcome_clarity)
+            elif validator.label == 'derivative_prop':
+                market_type_score = 0.0
+                confidence = (0.15 * sport) + (0.45 * participants) + (0.15 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
+            else:
+                market_type_score = 0.0
+                confidence = (0.15 * sport) + (0.40 * participants) + (0.15 * timing) + (0.05 * market_type_score) + (0.10 * outcome_clarity)
+
+            rows.append({
+                'polymarket_market_id': pm.id,
+                'question': pm.question,
+                'slug': pm.slug,
+                'confidence': round(confidence, 4),
+                'home_score': round(max(pbreak['home_score'], validator.home_score), 4),
+                'away_score': round(max(pbreak['away_score'], validator.away_score), 4),
+                'both_present': bool(pbreak['both_present'] or validator.both_participants_present),
+                'partial_strict_score': round(pbreak['strict_score'], 4),
+                'partial_soft_score': round(pbreak['soft_score'], 4),
+                'sport_score': round(sport, 4),
+                'time_score': round(timing, 4),
+                'validator_label': validator.label,
+                'validator_reason': validator.reason,
+                'derivative_detected': bool(validator.derivative_detected),
+                'classified_market_type': mtype,
+                'min_mapping_confidence': float(cfg.min_mapping_confidence),
+                'reject_reason': _diagnostic_reject_reason(validator, confidence, cfg),
+            })
+        except Exception:
+            continue
+    rows.sort(key=lambda r: r['confidence'], reverse=True)
+    return rows[: max(1, int(k))]
+
+
+def _diagnostic_reject_reason(validator, confidence: float, cfg: Settings) -> str:
+    """Plain-language reason a market did not become a mapping candidate."""
+    if validator.label == 'derivative_prop':
+        return 'derivative_or_prop_market'
+    if validator.label == 'unrelated':
+        return 'missing_one_or_both_participants'
+    if validator.label == 'likely_h2h' and confidence < cfg.min_mapping_confidence:
+        return 'h2h_likely_but_confidence_below_min_mapping_confidence'
+    if validator.label == 'exact_h2h_moneyline' and confidence < min(cfg.min_mapping_confidence, 0.88):
+        return 'h2h_exact_but_confidence_below_threshold'
+    return 'ok_or_close'
+
+
 def best_candidate_for_event(event_id: str, candidates: list[MappingCandidate]) -> MappingCandidate | None:
     matches = [c for c in candidates if c.external_event_id == event_id]
     if not matches:
