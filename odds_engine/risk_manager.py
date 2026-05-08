@@ -18,14 +18,36 @@ class RiskManager:
         self.cfg = cfg or default_settings
         self.open_exposure_usd = 0.0
 
-    def odds_are_fresh(self, outcome: OddsOutcome) -> bool:
-        ts = outcome.provider_last_update or outcome.received_at
+    def _age_seconds(self, ts: str | None) -> float | None:
+        if not ts:
+            return None
         try:
             dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00')).astimezone(timezone.utc)
-            age = (datetime.now(timezone.utc) - dt).total_seconds()
-            return age <= self.cfg.default_odds_ttl_seconds
+            return (datetime.now(timezone.utc) - dt).total_seconds()
         except Exception:
-            return False
+            return None
+
+    def odds_freshness_debug(self, outcome: OddsOutcome) -> dict:
+        """Return ages used by Money Hunter diagnostics.
+
+        `provider_last_update` can be older than the actual API capture. For this
+        V1 PAPER engine, the hard stale guard should block stale local/API data,
+        not valid odds that were freshly received but whose bookmaker timestamp is
+        a few minutes old.
+        """
+        received_age = self._age_seconds(outcome.received_at)
+        provider_age = self._age_seconds(outcome.provider_last_update)
+        return {
+            'received_age_seconds': received_age,
+            'provider_age_seconds': provider_age,
+            'ttl_seconds': self.cfg.default_odds_ttl_seconds,
+            'fresh_by_received_at': received_age is not None and received_age <= self.cfg.default_odds_ttl_seconds,
+            'fresh_by_provider_last_update': provider_age is not None and provider_age <= self.cfg.default_odds_ttl_seconds,
+        }
+
+    def odds_are_fresh(self, outcome: OddsOutcome) -> bool:
+        debug = self.odds_freshness_debug(outcome)
+        return bool(debug['fresh_by_received_at'])
 
     def validate_signal_inputs(
         self,
