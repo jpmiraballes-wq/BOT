@@ -38,6 +38,8 @@ def _bool(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class Settings:
     bot_mode: str = os.getenv('BOT_MODE', 'PAPER').upper()
+    paper_force_test_trade: bool = _bool('PAPER_FORCE_TEST_TRADE', False)
+    test_trade_size_usd: float = _float('TEST_TRADE_SIZE_USDC', 1.0)
     loop_interval_seconds: int = _int('LOOP_INTERVAL_SECONDS', 60)
     data_dir: Path = Path(os.getenv('DATA_DIR', './data'))
 
