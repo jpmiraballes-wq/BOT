@@ -99,7 +99,7 @@ def _sport_score(event: ExternalEvent, market: PolymarketMarket) -> float:
         return 1.0 if any(x in text for x in ['mma', 'ufc', 'fight']) else 0.55
     if 'soccer' in event.sport_key or 'football' in text:
         return 1.0 if any(x in text for x in ['soccer', 'football', 'champions', 'premier', 'liga', 'cup']) else 0.55
-    if any(x in event.sport_key for x in ['basketball', 'nba', 'americanfootball', 'nfl', 'tennis']):
+    if any(x in event.sport_key for x in ['basketball', 'nba', 'americanfootball', 'nfl', 'tennis', 'baseball', 'mlb']):
         return 0.75
     return 0.5
 
@@ -110,8 +110,6 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
     for ev in events:
         for pm in markets:
             validator = validate_market(ev, pm)
-            # Hard drop completely unrelated markets. They should not be persisted
-            # as mappings because they pollute Base44 and hide real discovery problems.
             if validator.label == 'unrelated':
                 continue
 
@@ -120,7 +118,7 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
             sport = _sport_score(ev, pm)
             participants = max(float(pbreak['strict_score']), min(validator.home_score, validator.away_score))
             timing = _time_score(ev, pm)
-            outcome_clarity = 0.85 if pm.yes_token_id and pm.best_ask is not None else 0.25
+            outcome_clarity = 0.85 if pm.yes_token_id else 0.25
 
             if validator.label == 'derivative_prop' or mtype == 'unsupported_derivative':
                 market_type_score = 0.0
@@ -132,7 +130,9 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
             elif validator.label == 'exact_h2h_moneyline':
                 market_type_score = 1.0
                 confidence = (0.15 * sport) + (0.50 * participants) + (0.15 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
-                status = 'auto_approved' if confidence >= runtime.min_mapping_confidence else 'needs_review'
+                if validator.home_score >= 0.98 and validator.away_score >= 0.98:
+                    confidence = max(confidence, 0.88)
+                status = 'auto_approved' if confidence >= min(runtime.min_mapping_confidence, 0.88) else 'needs_review'
                 mtype = 'moneyline_full_event'
             elif validator.label == 'likely_h2h':
                 market_type_score = 0.65
