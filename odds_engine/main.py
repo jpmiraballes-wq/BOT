@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
+from dataclasses import replace
 
 from config import settings
 from odds_client import OddsApiClient
@@ -15,6 +16,7 @@ from paper_broker import PaperBroker
 from storage import store
 from base44_client import base44
 from models import BotLog, now_iso, stable_id
+from multi_sport_probe import controlled_sport_keys, new_stats, bump_blocked, probe_payload
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('odds_engine')
@@ -94,6 +96,7 @@ def _emit_mapping_debug(events, markets_by_id, mappings, limit: int = 8) -> None
         if not matches:
             debug_rows.append({
                 'event': f'{event.home_team} vs {event.away_team}',
+                'sport_key': getattr(event, 'sport_key', None),
                 'best_question': None,
                 'reason': 'no_candidate_after_validator',
             })
@@ -103,6 +106,7 @@ def _emit_mapping_debug(events, markets_by_id, mappings, limit: int = 8) -> None
         br = best.confidence_breakdown or {}
         debug_rows.append({
             'event': f'{event.home_team} vs {event.away_team}',
+            'sport_key': getattr(event, 'sport_key', None),
             'best_question': market.question if market else None,
             'confidence': best.confidence_score,
             'status': best.status,
@@ -126,10 +130,30 @@ def _emit_mapping_debug(events, markets_by_id, mappings, limit: int = 8) -> None
     _log_to_base44('info', 'mapping_debug', payload)
 
 
+def _init_sport_stats(sport_keys: list[str]) -> dict[str, dict]:
+    return {sport_key: new_stats() for sport_key in sport_keys}
+
+
+def _sport_stats_for(stats_by_sport: dict[str, dict], sport_key: str) -> dict:
+    if sport_key not in stats_by_sport:
+        stats_by_sport[sport_key] = new_stats()
+    return stats_by_sport[sport_key]
+
+
+def _emit_sport_probe_logs(stats_by_sport: dict[str, dict]) -> None:
+    for sport_key, stats in stats_by_sport.items():
+        payload = probe_payload(sport_key, stats)
+        log.info('sport_probe: %s', payload)
+        _log_to_base44('info', 'sport_probe', payload)
+
+
 def run_once() -> dict:
     settings.validate()
     bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
     runtime = settings.with_bot_config(bot_cfg)
+    # Controlled multi-sport PAPER probe. It only widens data collection/mapping.
+    # RiskManager and PaperBroker still block live modes and only allow PAPER trades.
+    runtime = replace(runtime, odds_sport_keys=controlled_sport_keys(runtime.odds_sport_keys))
     log.info(
         'starting odds_engine run_once mode=%s sports=%s base44_write=%s',
         runtime.bot_mode,
@@ -149,6 +173,26 @@ def run_once() -> dict:
     markets_by_id = _index_markets(markets)
     outcomes_by_event = _outcomes_by_event(odds_outcomes)
     _emit_mapping_debug(events, markets_by_id, mappings)
+
+    event_sport = {event.id: event.sport_key for event in events}
+    stats_by_sport = _init_sport_stats(runtime.odds_sport_keys)
+    for event in events:
+        _sport_stats_for(stats_by_sport, event.sport_key)['events'] += 1
+    for outcome in odds_outcomes:
+        sport_key = event_sport.get(outcome.external_event_id, 'unknown')
+        _sport_stats_for(stats_by_sport, sport_key)['odds_outcomes'] += 1
+    mapped_market_ids_by_sport: dict[str, set[str]] = {k: set() for k in stats_by_sport}
+    for mapping in mappings:
+        sport_key = event_sport.get(mapping.external_event_id, 'unknown')
+        stats = _sport_stats_for(stats_by_sport, sport_key)
+        stats['mapping_candidates'] += 1
+        mapped_market_ids_by_sport.setdefault(sport_key, set()).add(mapping.polymarket_market_id)
+        if mapping.status == 'auto_approved':
+            stats['auto_approved_mappings'] += 1
+        else:
+            bump_blocked(stats, 'mapping_not_auto_approved')
+    for sport_key, market_ids in mapped_market_ids_by_sport.items():
+        _sport_stats_for(stats_by_sport, sport_key)['polymarket_markets'] = len(market_ids)
 
     for idx, e in enumerate(events):
         _write('ExternalEvent', e, send_base44=idx < runtime.base44_max_events)
@@ -171,9 +215,11 @@ def run_once() -> dict:
 
     enabled = bool(bot_cfg.get('enabled', False)) if bot_cfg else False
     if not enabled:
+        _emit_sport_probe_logs(stats_by_sport)
         summary = {
             'mode': runtime.bot_mode,
             'enabled': False,
+            'sports': runtime.odds_sport_keys,
             'events': len(events),
             'odds_outcomes': len(odds_outcomes),
             'polymarket_markets': len(markets),
@@ -189,17 +235,22 @@ def run_once() -> dict:
         return summary
 
     for event in events:
+        sport_stats = _sport_stats_for(stats_by_sport, event.sport_key)
         mapping = best_candidate_for_event(event.id, mappings)
         if not mapping:
+            bump_blocked(sport_stats, 'no_candidate_after_validator')
             continue
         market = markets_by_id.get(mapping.polymarket_market_id)
         if not market:
+            bump_blocked(sport_stats, 'missing_polymarket_market')
             continue
         for odds in outcomes_by_event.get(event.id, []):
             fair = event_fair_value_for_name(event.id, odds.outcome_name, fair_values)
             if fair is None:
+                bump_blocked(sport_stats, 'missing_fair_value')
                 continue
             if odds.outcome_name.lower() not in (market.question + ' ' + market.slug).lower():
+                bump_blocked(sport_stats, 'outcome_not_in_polymarket_question')
                 continue
             signal_key = f"{event.id}:{market.id}:{market.yes_token_id or ''}"
             if signal_key in seen_signals_this_run:
@@ -208,16 +259,25 @@ def run_once() -> dict:
             signal = build_buy_signal(mapping, market, odds, fair, risk, runtime)
             _write('Signal', signal)
             signals_count += 1
+            sport_stats['signals'] += 1
+            if signal.edge_neto > 0:
+                sport_stats['positive_net_edge_signals'] += 1
             if signal.risk_status == 'approved':
                 approved_count += 1
+                sport_stats['approved_signals'] += 1
+            else:
+                bump_blocked(sport_stats, signal.reject_reason or 'rejected')
             trade = paper.open_from_signal(signal)
             if trade:
                 _write('PaperTrade', trade)
                 paper_count += 1
+                sport_stats['paper_trades_created'] += 1
 
+    _emit_sport_probe_logs(stats_by_sport)
     summary = {
         'mode': runtime.bot_mode,
         'enabled': enabled,
+        'sports': runtime.odds_sport_keys,
         'events': len(events),
         'odds_outcomes': len(odds_outcomes),
         'polymarket_markets': len(markets),
