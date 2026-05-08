@@ -45,7 +45,9 @@ class Settings:
 
     odds_api_key: str = os.getenv('ODDS_API_KEY', '').strip()
     odds_regions: str = os.getenv('ODDS_REGIONS', 'us,eu')
-    odds_markets: str = os.getenv('ODDS_MARKETS', 'h2h')
+    # PAPER_ONLY_DERIVATIVES_V1: fetch h2h plus spreads/totals so safe
+    # derivative markets can be compared against matching Odds API markets.
+    odds_markets: str = os.getenv('ODDS_MARKETS', 'h2h,spreads,totals')
     odds_sport_keys: list[str] | None = None
 
     polymarket_gamma_url: str = os.getenv('POLYMARKET_GAMMA_URL', 'https://gamma-api.polymarket.com')
