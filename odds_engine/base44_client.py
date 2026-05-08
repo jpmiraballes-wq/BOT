@@ -28,10 +28,9 @@ class Base44Client:
         return f'{self.base_url}/api/apps/{self.app_id}/entities/{entity}'
 
     def _headers(self) -> dict[str, str]:
+        # Base44 external API expects ONLY the api_key header.
         return {
             'api_key': self.api_key,
-            'x-api-key': self.api_key,
-            'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json',
             'User-Agent': 'independent-odds-engine-v1',
         }
