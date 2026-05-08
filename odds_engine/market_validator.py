@@ -21,28 +21,53 @@ MONEYLINE_TERMS = [
     ' beat ', ' defeat ', ' defeats ', ' win ', ' wins ', ' vs ', ' v ', ' against ',
 ]
 
+COMMON_TEAM_WORDS = {
+    'fc', 'cf', 'club', 'team', 'the',
+    'united', 'city', 'athletic', 'real', 'sporting',
+    'national', 'nationals', 'state', 'county', 'deportivo', 'racing',
+}
+
 
 def normalize_text(value: str) -> str:
     s = unicodedata.normalize('NFKD', value or '').encode('ascii', 'ignore').decode('ascii')
     s = s.lower()
     s = re.sub(r'[^a-z0-9 ]+', ' ', s)
-    s = re.sub(r'\b(fc|cf|club|the|team)\b', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
+
+
+def _meaningful_parts(value: str) -> list[str]:
+    return [p for p in normalize_text(value).split() if len(p) >= 3 and p not in COMMON_TEAM_WORDS]
 
 
 def _name_score(name: str, text: str) -> float:
     n = normalize_text(name)
+    t = normalize_text(text)
     if not n:
         return 0.0
-    wrapped = f' {text} '
+
+    wrapped = f' {t} '
     if f' {n} ' in wrapped:
         return 1.0
-    parts = [p for p in n.split() if len(p) >= 3]
-    partial = max(fuzz.partial_ratio(n, text), fuzz.token_set_ratio(n, text)) / 100.0
-    if parts:
-        last = parts[-1]
+
+    meaningful_parts = _meaningful_parts(name)
+    matched_meaningful = [p for p in meaningful_parts if f' {p} ' in wrapped]
+
+    # Safety: never accept a match only because a generic suffix overlaps.
+    # Example: Newcastle United must not match Incheon United.
+    if len(meaningful_parts) >= 2 and not matched_meaningful:
+        return 0.0
+
+    partial = max(fuzz.partial_ratio(n, t), fuzz.token_set_ratio(n, t)) / 100.0
+
+    # Single-token fallback is allowed only for a meaningful, non-generic token.
+    if meaningful_parts:
+        last = meaningful_parts[-1]
         if f' {last} ' in wrapped:
             partial = max(partial, 0.82)
+
+    if len(meaningful_parts) >= 2 and not matched_meaningful and partial < 0.96:
+        return 0.0
+
     return partial
 
 
