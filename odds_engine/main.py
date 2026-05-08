@@ -16,6 +16,8 @@ from storage import store
 from base44_client import base44
 from models import BotLog, now_iso, stable_id
 from multi_sport_probe import controlled_sport_keys, new_stats, bump_blocked, probe_payload
+import json
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('odds_engine')
@@ -290,6 +292,40 @@ def _build_money_hunter_report(runtime, stats_by_sport: dict, events, odds_outco
     }
 # ----- end Money Hunter V1 helpers ------------------------------------------
 
+def _paper_trade_already_open(trade) -> bool:
+    """Local PAPER guardrail: avoid opening duplicate paper positions.
+
+    A duplicate is same event + token + side while status=open.
+    This protects JSONL/Base44 from repeated appends on every scheduler run.
+    """
+    path = Path(__file__).resolve().parent / 'data' / 'papertrade.jsonl'
+    if not path.exists():
+        return False
+
+    try:
+        with path.open('r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+
+                if (
+                    row.get('status') == 'open'
+                    and row.get('external_event_id') == trade.external_event_id
+                    and row.get('token_id') == trade.token_id
+                    and row.get('side') == trade.side
+                ):
+                    return True
+    except Exception as exc:
+        log.warning('paper_trade_dedupe_check_failed error=%s', exc)
+        return False
+
+    return False
+
 def run_once() -> dict:
     settings.validate()
     bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
@@ -417,12 +453,30 @@ def run_once() -> dict:
             if signal.reject_reason == 'edge_below_threshold':
                 _log_edge_below_threshold(signal, event, market, runtime)
             trade = paper.open_from_signal(signal)
+            if trade and _paper_trade_already_open(trade):
+                log.info(
+                    'paper_trade_duplicate_open_skip event=%s market=%s token=%s side=%s',
+                    trade.external_event_id,
+                    trade.polymarket_market_id,
+                    trade.token_id,
+                    trade.side,
+                )
+                trade = None
             if trade:
                 _write('PaperTrade', trade)
                 paper_count += 1
                 sport_stats['paper_trades_created'] += 1
             elif test_paper_count == 0 and runtime.paper_force_test_trade:
                 test_trade = paper.force_test_trade_from_signal(signal)
+                if test_trade and _paper_trade_already_open(test_trade):
+                    log.info(
+                        'paper_trade_duplicate_open_skip event=%s market=%s token=%s side=%s test=true',
+                        test_trade.external_event_id,
+                        test_trade.polymarket_market_id,
+                        test_trade.token_id,
+                        test_trade.side,
+                    )
+                    test_trade = None
                 if test_trade:
                     _write('PaperTrade', test_trade)
                     test_paper_count += 1
