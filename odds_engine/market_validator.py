@@ -12,6 +12,9 @@ DERIVATIVE_TERMS = [
     'over', 'under', 'total', 'spread', 'handicap', 'points', 'goals',
     'first half', 'second half', 'regular time', 'regulation', 'corner',
     'card', 'cards', 'score', 'finish', 'finishes', 'by ', 'margin',
+    # Important safety: draw/tie markets are not team moneyline markets.
+    # Example: "Will Team A vs Team B end in a draw?" must never map to Team A/Team B.
+    ' draw ', ' tie ', ' tied ', ' stalemate ',
 ]
 
 MONEYLINE_TERMS = [

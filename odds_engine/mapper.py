@@ -21,6 +21,8 @@ DERIVATIVE_TERMS = [
     'regular time', 'regulation', 'first half', 'second half', 'spread',
     'handicap', 'over ', 'under ', 'total', 'score', 'round', 'method',
     'corner', 'card', 'points', 'goalscorer', 'assist', 'sets', 'map ',
+    # Important safety: draw/tie markets are not team moneyline markets.
+    ' draw ', ' tie ', ' tied ', ' stalemate ',
 ]
 
 
