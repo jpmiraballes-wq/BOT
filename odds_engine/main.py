@@ -43,27 +43,30 @@ def _dedupe_key(entity: str, item) -> str:
     if entity == 'MarketMapping':
         return f"{entity}:{payload.get('event_mapping_id')}:{payload.get('polymarket_market_id')}:{payload.get('external_outcome')}"
     if entity in {'OddsSnapshot', 'PolymarketSnapshot'}:
-        # snapshots are time-series; dedupe only per minute bucket to avoid flooding.
         captured = str(payload.get('captured_at') or now_iso())[:16]
         return f"{entity}:{stable_id(str(payload))}:{captured}"
-    if entity in {'Signal', 'PaperTrade'}:
-        return f"{entity}:{payload.get('signal_id') or payload.get('id') or stable_id(str(payload))}"
+    if entity == 'Signal':
+        return f"{entity}:{payload.get('external_event_id')}:{payload.get('polymarket_market_id')}:{payload.get('outcome')}"
+    if entity == 'PaperTrade':
+        return f"{entity}:{payload.get('signal_id') or stable_id(str(payload))}"
     return f"{entity}:{stable_id(str(payload))}"
 
 
-def _write(entity: str, item, send_base44: bool = True) -> None:
+def _write(entity: str, item, send_base44: bool = True) -> bool:
     store.append(entity.lower(), item)
     if not send_base44 or not settings.base44_write_enabled:
-        return
+        return False
     key = _dedupe_key(entity, item)
     if store.base44_was_sent(key):
-        return
+        return False
     if hasattr(item, 'base44_payload'):
         result = base44.post_record(entity, item.base44_payload())
     else:
         result = base44.post_record(entity, item)
     if result is not None:
         store.mark_base44_sent(key)
+        return True
+    return False
 
 
 def _log_to_base44(level: str, message: str, data: dict) -> None:
@@ -113,6 +116,7 @@ def run_once() -> dict:
     signals_count = 0
     approved_count = 0
     paper_count = 0
+    seen_signals_this_run: set[str] = set()
 
     enabled = bool(bot_cfg.get('enabled', False)) if bot_cfg else False
     if not enabled:
@@ -146,6 +150,10 @@ def run_once() -> dict:
                 continue
             if odds.outcome_name.lower() not in (market.question + ' ' + market.slug).lower():
                 continue
+            signal_key = f"{event.id}:{market.id}:{market.yes_token_id or ''}"
+            if signal_key in seen_signals_this_run:
+                continue
+            seen_signals_this_run.add(signal_key)
             signal = build_buy_signal(mapping, market, odds, fair, risk, runtime)
             _write('Signal', signal)
             signals_count += 1
