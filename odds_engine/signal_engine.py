@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from models import Signal, MappingCandidate, PolymarketMarket, OddsOutcome, stable_id, now_iso
 from risk_manager import RiskManager
-from config import settings
+from config import Settings, settings as default_settings
 
 
 def build_buy_signal(
@@ -11,12 +11,14 @@ def build_buy_signal(
     odds: OddsOutcome,
     fair_value: float,
     risk: RiskManager,
+    cfg: Settings | None = None,
 ) -> Signal:
+    runtime = cfg or default_settings
     token_id = market.yes_token_id or ''
     price = float(market.best_ask or 0.0)
     spread = float(market.spread or 0.0)
     edge = fair_value - price
-    # edge neto simple: descuenta spread completo. Luego podemos agregar slippage/model error.
+    # edge neto simple: descuenta spread completo. Luego agregaremos slippage/model error.
     edge_neto = edge - spread
     result = risk.validate_signal_inputs(mapping, market, odds, fair_value, price, edge)
     action = 'BUY' if result.approved else 'IGNORE'
@@ -43,7 +45,7 @@ def build_buy_signal(
         mapping_status=mapping.status,
         risk_status='approved' if result.approved else 'rejected',
         reject_reason='' if result.approved else result.reason,
-        mode=settings.bot_mode,
+        mode=runtime.bot_mode,
         explanation=explanation,
         created_at=now_iso(),
     )
