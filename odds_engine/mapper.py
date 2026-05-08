@@ -67,26 +67,43 @@ def classify_market_type(question: str) -> str:
     return 'unknown'
 
 
-def _participant_score(event: ExternalEvent, market: PolymarketMarket) -> float:
-    q = normalize_name(market.question + ' ' + market.slug)
-    parts = [normalize_name(event.home_team), normalize_name(event.away_team)]
-    parts = [p for p in parts if p]
-    if not parts:
+def _name_score(name: str, text: str) -> float:
+    n = normalize_name(name)
+    if not n:
         return 0.0
-    scores = []
-    for p in parts:
-        scores.append(max(fuzz.partial_ratio(p, q), fuzz.token_set_ratio(p, q)) / 100.0)
-    if len(scores) == 1:
-        return scores[0]
-    return sum(scores) / len(scores)
+    # Exact token containment is stronger than fuzzy partial ratio.
+    if f' {n} ' in f' {text} ':
+        return 1.0
+    return max(fuzz.partial_ratio(n, text), fuzz.token_set_ratio(n, text)) / 100.0
+
+
+def _participant_breakdown(event: ExternalEvent, market: PolymarketMarket) -> dict:
+    q = normalize_name(market.question + ' ' + market.slug)
+    home_score = _name_score(event.home_team, q)
+    away_score = _name_score(event.away_team, q)
+    both_present = home_score >= 0.78 and away_score >= 0.78
+    # For head-to-head sports, one name is not enough. Use the weaker side as the main score.
+    strict_score = min(home_score, away_score) if event.home_team and event.away_team else max(home_score, away_score)
+    soft_score = (home_score + away_score) / 2.0 if event.home_team and event.away_team else strict_score
+    return {
+        'home_score': round(home_score, 4),
+        'away_score': round(away_score, 4),
+        'both_present': both_present,
+        'strict_score': round(strict_score, 4),
+        'soft_score': round(soft_score, 4),
+    }
+
+
+def _participant_score(event: ExternalEvent, market: PolymarketMarket) -> float:
+    return float(_participant_breakdown(event, market)['strict_score'])
 
 
 def _sport_score(event: ExternalEvent, market: PolymarketMarket) -> float:
     text = normalize_name(' '.join([event.sport_key, event.league, market.category, market.question]))
     if 'mma' in event.sport_key or 'ufc' in text:
-        return 1.0 if any(x in text for x in ['mma', 'ufc', 'fight']) else 0.5
+        return 1.0 if any(x in text for x in ['mma', 'ufc', 'fight']) else 0.55
     if 'soccer' in event.sport_key or 'football' in text:
-        return 1.0 if any(x in text for x in ['soccer', 'football', 'champions', 'premier', 'liga', 'cup']) else 0.5
+        return 1.0 if any(x in text for x in ['soccer', 'football', 'champions', 'premier', 'liga', 'cup']) else 0.55
     if any(x in event.sport_key for x in ['basketball', 'nba', 'americanfootball', 'nfl', 'tennis']):
         return 0.75
     return 0.5
@@ -98,15 +115,24 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
     for ev in events:
         for pm in markets:
             mtype = classify_market_type(pm.question)
+            pbreak = _participant_breakdown(ev, pm)
             sport = _sport_score(ev, pm)
-            participants = _participant_score(ev, pm)
+            participants = float(pbreak['strict_score'])
             timing = _time_score(ev, pm)
-            market_type_score = 0.0 if mtype == 'unsupported_derivative' else (0.85 if mtype in {'moneyline_full_event', 'tournament_winner'} else 0.35)
-            outcome_clarity = 0.8 if pm.yes_token_id and pm.best_ask is not None else 0.3
-            confidence = (0.20 * sport) + (0.35 * participants) + (0.20 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
-            if confidence < 0.50:
-                continue
-            status = 'auto_approved' if confidence >= runtime.min_mapping_confidence else 'needs_review'
+            market_type_score = 0.0 if mtype == 'unsupported_derivative' else (0.95 if mtype == 'moneyline_full_event' else (0.70 if mtype == 'tournament_winner' else 0.25))
+            outcome_clarity = 0.85 if pm.yes_token_id and pm.best_ask is not None else 0.25
+
+            # Hard guard: H2H event mapping requires both named participants. This prevents
+            # false giant edges caused by matching only one fighter/team to an unrelated market.
+            if ev.home_team and ev.away_team and not pbreak['both_present']:
+                confidence = (0.15 * sport) + (0.55 * participants) + (0.10 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
+                if confidence < 0.55:
+                    continue
+                status = 'needs_review'
+            else:
+                confidence = (0.15 * sport) + (0.45 * participants) + (0.15 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
+                status = 'auto_approved' if confidence >= runtime.min_mapping_confidence and mtype == 'moneyline_full_event' else 'needs_review'
+
             candidates.append(MappingCandidate(
                 external_event_id=ev.id,
                 polymarket_market_id=pm.id,
@@ -118,9 +144,19 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                     'no_token_id': pm.no_token_id,
                     'external_outcome': ev.home_team,
                     'polymarket_outcome': pm.outcomes[0] if pm.outcomes else 'YES',
-                    'note': 'YES mapping inferred from market title; review required below threshold',
+                    'note': 'strict two-participant H2H mapping; auto approval only when both sides match',
                 },
-                confidence_breakdown={'sport': sport, 'participants': participants, 'time': timing, 'market_type': market_type_score, 'outcome_clarity': outcome_clarity, 'question': pm.question},
+                confidence_breakdown={
+                    'sport': sport,
+                    'participants': participants,
+                    'home_score': pbreak['home_score'],
+                    'away_score': pbreak['away_score'],
+                    'both_present': pbreak['both_present'],
+                    'time': timing,
+                    'market_type': market_type_score,
+                    'outcome_clarity': outcome_clarity,
+                    'question': pm.question,
+                },
             ))
     candidates.sort(key=lambda x: x.confidence_score, reverse=True)
     return candidates
