@@ -5,7 +5,7 @@ from rapidfuzz import fuzz
 import re
 import unicodedata
 
-from config import settings
+from config import Settings, settings as default_settings
 from models import ExternalEvent, PolymarketMarket, MappingCandidate
 
 ALIASES = {
@@ -15,6 +15,12 @@ ALIASES = {
     'psg': 'paris saint germain',
     'real madrid cf': 'real madrid',
 }
+
+DERIVATIVE_TERMS = [
+    'regular time', 'regulation', 'first half', 'second half', 'spread',
+    'handicap', 'over ', 'under ', 'total', 'score', 'round', 'method',
+    'corner', 'card', 'points', 'goalscorer', 'assist', 'sets', 'map ',
+]
 
 
 def normalize_name(name: str) -> str:
@@ -52,11 +58,11 @@ def _time_score(event: ExternalEvent, market: PolymarketMarket) -> float:
 
 def classify_market_type(question: str) -> str:
     q = normalize_name(question)
-    if any(x in q for x in ['regular time', 'regulation', 'first half', 'second half', 'spread', 'handicap', 'over ', 'under ', 'total', 'score', 'round', 'method']):
+    if any(x in q for x in DERIVATIVE_TERMS):
         return 'unsupported_derivative'
-    if 'win the world cup' in q or 'win ucl' in q or 'win the champions league' in q or 'champion' in q:
+    if any(x in q for x in ['win the world cup', 'win ucl', 'win the champions league', 'champion', 'win the tournament']):
         return 'tournament_winner'
-    if 'beat' in q or 'defeat' in q or 'win?' in q or q.startswith('will'):
+    if any(x in q for x in [' beat ', ' defeat ', ' wins ', ' win ']) or q.startswith('will '):
         return 'moneyline_full_event'
     return 'unknown'
 
@@ -72,7 +78,6 @@ def _participant_score(event: ExternalEvent, market: PolymarketMarket) -> float:
         scores.append(max(fuzz.partial_ratio(p, q), fuzz.token_set_ratio(p, q)) / 100.0)
     if len(scores) == 1:
         return scores[0]
-    # both participants should appear for match markets; outrights may only include one.
     return sum(scores) / len(scores)
 
 
@@ -82,10 +87,13 @@ def _sport_score(event: ExternalEvent, market: PolymarketMarket) -> float:
         return 1.0 if any(x in text for x in ['mma', 'ufc', 'fight']) else 0.5
     if 'soccer' in event.sport_key or 'football' in text:
         return 1.0 if any(x in text for x in ['soccer', 'football', 'champions', 'premier', 'liga', 'cup']) else 0.5
+    if any(x in event.sport_key for x in ['basketball', 'nba', 'americanfootball', 'nfl', 'tennis']):
+        return 0.75
     return 0.5
 
 
-def build_mapping_candidates(events: list[ExternalEvent], markets: list[PolymarketMarket]) -> list[MappingCandidate]:
+def build_mapping_candidates(events: list[ExternalEvent], markets: list[PolymarketMarket], cfg: Settings | None = None) -> list[MappingCandidate]:
+    runtime = cfg or default_settings
     candidates: list[MappingCandidate] = []
     for ev in events:
         for pm in markets:
@@ -98,14 +106,20 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
             confidence = (0.20 * sport) + (0.35 * participants) + (0.20 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
             if confidence < 0.50:
                 continue
-            status = 'auto_approved' if confidence >= settings.min_mapping_confidence else 'needs_review'
+            status = 'auto_approved' if confidence >= runtime.min_mapping_confidence else 'needs_review'
             candidates.append(MappingCandidate(
                 external_event_id=ev.id,
                 polymarket_market_id=pm.id,
                 confidence_score=round(confidence, 4),
                 status=status,
                 market_type=mtype,
-                outcome_mapping={'yes_token_id': pm.yes_token_id, 'no_token_id': pm.no_token_id, 'note': 'YES mapping inferred from market title; review required below threshold'},
+                outcome_mapping={
+                    'yes_token_id': pm.yes_token_id,
+                    'no_token_id': pm.no_token_id,
+                    'external_outcome': ev.home_team,
+                    'polymarket_outcome': pm.outcomes[0] if pm.outcomes else 'YES',
+                    'note': 'YES mapping inferred from market title; review required below threshold',
+                },
                 confidence_breakdown={'sport': sport, 'participants': participants, 'time': timing, 'market_type': market_type_score, 'outcome_clarity': outcome_clarity, 'question': pm.question},
             ))
     candidates.sort(key=lambda x: x.confidence_score, reverse=True)
