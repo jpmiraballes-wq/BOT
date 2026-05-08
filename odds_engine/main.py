@@ -187,6 +187,37 @@ def _emit_no_candidate_diagnostic(event, sport_markets, runtime) -> None:
         )
     else:
         log.info('no_candidate_diagnostic event=%s sport=%s pool=%s no scored candidates', event.id, event.sport_key, len(sport_markets))
+    # --- diagnostics: unified no-candidate logging ---
+    # Additional grep-friendly diagnostic lines: pool size + top-N rejected
+    # candidates with validator label/reason/scores. Pure observability.
+    try:
+        from mapper import debug_score_event_against_markets
+        _pool = sport_markets or []
+        log.info(
+            'mapping_pool_size event=%s sport=%s pool=%d',
+            getattr(event, 'id', ''), getattr(event, 'sport_key', ''), len(_pool),
+        )
+        _rows = debug_score_event_against_markets(event, _pool, top_n=5)
+        for _rank, _r in enumerate(_rows, start=1):
+            _q = (_r.get('question') or '')[:160]
+            _cat = (_r.get('category') or '')[:40]
+            _slug = (_r.get('slug') or '')[:80]
+            log.info(
+                'mapping_candidate_debug event=%s sport=%s rank=%d market=%s '
+                'label=%s reason=%s confidence=%.4f home_score=%.4f away_score=%.4f '
+                'category=%r slug=%r question=%r',
+                getattr(event, 'id', ''), getattr(event, 'sport_key', ''), _rank,
+                _r.get('market_id', ''), _r.get('label', ''), _r.get('reason', ''),
+                float(_r.get('confidence', 0.0)),
+                float(_r.get('home_score', 0.0)),
+                float(_r.get('away_score', 0.0)),
+                _cat, _slug, _q,
+            )
+    except Exception as _diag_exc:  # diagnostic must never break the run
+        log.info(
+            'mapping_candidate_debug_error event=%s sport=%s err=%s',
+            getattr(event, 'id', ''), getattr(event, 'sport_key', ''), _diag_exc,
+        )
 
 
 # ----- Money Hunter V1 helpers ----------------------------------------------
@@ -259,7 +290,7 @@ def _aggregate_blocked_reasons(stats_by_sport: dict) -> dict:
 
 def _money_hunter_decision(stats_by_sport: dict, signals_count: int, approved_count: int,
                             paper_count: int, test_paper_count: int, blocked_global: dict) -> tuple[str, str]:
-    """Return (money_hunter_status, next_action) â pure observation, no thresholds touched."""
+    """Return (money_hunter_status, next_action) Ã¢ÂÂ pure observation, no thresholds touched."""
     if paper_count > 0:
         return 'PAPER_TRADES_CREATED', 'evaluate_paper_pnl_before_live'
     if test_paper_count > 0:
@@ -333,42 +364,6 @@ def _build_money_hunter_report(runtime, stats_by_sport: dict, events, odds_outco
     }
 # ----- end Money Hunter V1 helpers ------------------------------------------
 
-
-
-# --- diagnostics: _emit_no_candidate_diagnostic ---
-def _emit_no_candidate_diagnostic(event, markets) -> None:
-    """Log top-N rejected mapping candidates for one event. Read-only.
-
-    Emits one 'mapping_candidate_debug' INFO log line per candidate so we can
-    grep why discovered Polymarket markets did not become mapping_candidates.
-    Also emits a single 'mapping_pool_size' info line with the global pool size
-    seen by this event. Does NOT create mappings, does NOT change risk.
-    """
-    try:
-        from mapper import debug_score_event_against_markets
-        rows = debug_score_event_against_markets(event, markets, top_n=5)
-    except Exception as exc:
-        log.info('mapping_candidate_debug_error event=%s sport=%s err=%s',
-                 getattr(event, 'id', ''), getattr(event, 'sport_key', ''), exc)
-        return
-    pool_size = len(markets or [])
-    log.info('mapping_pool_size event=%s sport=%s pool=%d',
-             getattr(event, 'id', ''), getattr(event, 'sport_key', ''), pool_size)
-    for rank, r in enumerate(rows, start=1):
-        q = (r.get('question') or '')[:160]
-        cat = (r.get('category') or '')[:40]
-        slug = (r.get('slug') or '')[:80]
-        log.info(
-            'mapping_candidate_debug event=%s sport=%s rank=%d market=%s '
-            'label=%s reason=%s confidence=%.4f home_score=%.4f away_score=%.4f '
-            'category=%r slug=%r question=%r',
-            getattr(event, 'id', ''), getattr(event, 'sport_key', ''), rank,
-            r.get('market_id', ''), r.get('label', ''), r.get('reason', ''),
-            float(r.get('confidence', 0.0)),
-            float(r.get('home_score', 0.0)),
-            float(r.get('away_score', 0.0)),
-            cat, slug, q,
-        )
 
 
 def run_once() -> dict:
