@@ -418,9 +418,21 @@ def run_once() -> dict:
                 _log_edge_below_threshold(signal, event, market, runtime)
             trade = paper.open_from_signal(signal)
             if trade:
-                _write('PaperTrade', trade)
-                paper_count += 1
-                sport_stats['paper_trades_created'] += 1
+                papertrade_path = settings.data_dir / 'papertrade.jsonl'
+                already_open = False
+                if papertrade_path.exists():
+                    for line in papertrade_path.read_text(errors='ignore').splitlines():
+                        if f'"id": "{trade.id}"' in line and '"status": "open"' in line:
+                            already_open = True
+                            break
+
+                if already_open:
+                    log.info('paper_trade_duplicate_skipped id=%s signal=%s market=%s',
+                             trade.id, trade.signal_id, trade.polymarket_market_id)
+                else:
+                    _write('PaperTrade', trade)
+                    paper_count += 1
+                    sport_stats['paper_trades_created'] += 1
             elif test_paper_count == 0 and runtime.paper_force_test_trade:
                 test_trade = paper.force_test_trade_from_signal(signal)
                 if test_trade:
