@@ -12,8 +12,22 @@ from config import Settings, settings as default_settings
 def _norm(value: str) -> str:
     s = unicodedata.normalize('NFKD', value or '').encode('ascii', 'ignore').decode('ascii')
     s = s.lower()
-    s = re.sub(r'[^a-z0-9 ]+', ' ', s)
+    s = re.sub(r'[^a-z0-9 +\-.]+', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
+
+
+def _line(value: str) -> str:
+    m = re.search(r'(?<!\d)([+-]?\d+(?:\.\d+)?|[+-]?\d+pt\d+)(?!\d)', value or '', re.I)
+    if not m:
+        return ''
+    raw = m.group(1).lower().replace('pt', '.')
+    try:
+        x = float(raw)
+        if x.is_integer():
+            return str(int(x))
+        return str(x).rstrip('0').rstrip('.')
+    except Exception:
+        return raw
 
 
 def _similar(a: str, b: str) -> float:
@@ -45,6 +59,44 @@ def _match_outcome_index(market: PolymarketMarket, outcome_name: str) -> int | N
     return best_i if best_score >= 0.84 else None
 
 
+def _binary_side_from_derivative(mapping: MappingCandidate, market: PolymarketMarket, outcome_name: str) -> int | None:
+    """Infer YES/NO side for PAPER-only exact totals/spreads.
+
+    For binary Polymarket questions with outcomes Yes/No:
+    - '... O/U 2.5' maps Over 2.5 to YES, Under 2.5 to NO.
+    - 'Spread: Team (-1.5)' maps Team -1.5 to YES, the opposite side to NO.
+
+    This is intentionally narrow and only runs for mapping.market_type values
+    produced by PAPER_ONLY_DERIVATIVES_V1.
+    """
+    mtype = str(getattr(mapping, 'market_type', '') or '')
+    q = _norm((market.question or '') + ' ' + (market.slug or ''))
+    out = _norm(outcome_name or '')
+    if mtype == 'total_exact':
+        if _line(q) != _line(out):
+            return None
+        if out.startswith('over '):
+            return 0
+        if out.startswith('under '):
+            return 1
+        return None
+
+    if mtype == 'spread_exact':
+        qline = _line(q).lstrip('+')
+        oline = _line(out).lstrip('+')
+        if not qline or qline != oline:
+            return None
+        # If the Odds API outcome team appears in the Polymarket spread question,
+        # buy YES; otherwise buy NO. This handles markets written as a single
+        # spread side like 'Spread: Manchester City FC (-1.5)'.
+        team_part = re.sub(r'\s*[+-]?\d+(?:\.\d+)?\s*$', '', out).strip()
+        if team_part and _similar(team_part, q) >= 0.84:
+            return 0
+        return 1
+
+    return None
+
+
 def _binary_side_from_question(market: PolymarketMarket, outcome_name: str) -> int | None:
     """Infer YES/NO token side for binary H2H questions like 'Team A vs Team B'.
 
@@ -58,7 +110,6 @@ def _binary_side_from_question(market: PolymarketMarket, outcome_name: str) -> i
         return None
     left = parts[0]
     right = parts[1]
-    # Trim odds/market suffixes without being too clever.
     right = re.split(r'\?|\(|\[|\{| - | — |:', right, maxsplit=1)[0]
     left_score = _similar(outcome_name, left)
     right_score = _similar(outcome_name, right)
@@ -89,8 +140,10 @@ def _token_for_index(market: PolymarketMarket, idx: int) -> str:
     return ''
 
 
-def _token_and_price_for_outcome(market: PolymarketMarket, outcome_name: str) -> tuple[str, float, str]:
+def _token_and_price_for_outcome(mapping: MappingCandidate, market: PolymarketMarket, outcome_name: str) -> tuple[str, float, str]:
     idx = _match_outcome_index(market, outcome_name)
+    if idx is None:
+        idx = _binary_side_from_derivative(mapping, market, outcome_name)
     if idx is None:
         idx = _binary_side_from_question(market, outcome_name)
     if idx is None:
@@ -114,7 +167,7 @@ def build_buy_signal(
     cfg: Settings | None = None,
 ) -> Signal:
     runtime = cfg or default_settings
-    token_id, price, outcome_label = _token_and_price_for_outcome(market, odds.outcome_name)
+    token_id, price, outcome_label = _token_and_price_for_outcome(mapping, market, odds.outcome_name)
     spread = float(market.spread or 0.0)
     edge = fair_value - price
     edge_neto = edge - spread
