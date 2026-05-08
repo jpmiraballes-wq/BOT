@@ -7,6 +7,7 @@ import unicodedata
 
 from config import Settings, settings as default_settings
 from models import ExternalEvent, PolymarketMarket, MappingCandidate
+from market_validator import validate_market
 
 ALIASES = {
     'man utd': 'manchester united',
@@ -71,7 +72,6 @@ def _name_score(name: str, text: str) -> float:
     n = normalize_name(name)
     if not n:
         return 0.0
-    # Exact token containment is stronger than fuzzy partial ratio.
     if f' {n} ' in f' {text} ':
         return 1.0
     return max(fuzz.partial_ratio(n, text), fuzz.token_set_ratio(n, text)) / 100.0
@@ -82,7 +82,6 @@ def _participant_breakdown(event: ExternalEvent, market: PolymarketMarket) -> di
     home_score = _name_score(event.home_team, q)
     away_score = _name_score(event.away_team, q)
     both_present = home_score >= 0.78 and away_score >= 0.78
-    # For head-to-head sports, one name is not enough. Use the weaker side as the main score.
     strict_score = min(home_score, away_score) if event.home_team and event.away_team else max(home_score, away_score)
     soft_score = (home_score + away_score) / 2.0 if event.home_team and event.away_team else strict_score
     return {
@@ -92,10 +91,6 @@ def _participant_breakdown(event: ExternalEvent, market: PolymarketMarket) -> di
         'strict_score': round(strict_score, 4),
         'soft_score': round(soft_score, 4),
     }
-
-
-def _participant_score(event: ExternalEvent, market: PolymarketMarket) -> float:
-    return float(_participant_breakdown(event, market)['strict_score'])
 
 
 def _sport_score(event: ExternalEvent, market: PolymarketMarket) -> float:
@@ -114,24 +109,35 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
     candidates: list[MappingCandidate] = []
     for ev in events:
         for pm in markets:
+            validator = validate_market(ev, pm)
             mtype = classify_market_type(pm.question)
             pbreak = _participant_breakdown(ev, pm)
             sport = _sport_score(ev, pm)
-            participants = float(pbreak['strict_score'])
+            participants = max(float(pbreak['strict_score']), min(validator.home_score, validator.away_score))
             timing = _time_score(ev, pm)
-            market_type_score = 0.0 if mtype == 'unsupported_derivative' else (0.95 if mtype == 'moneyline_full_event' else (0.70 if mtype == 'tournament_winner' else 0.25))
             outcome_clarity = 0.85 if pm.yes_token_id and pm.best_ask is not None else 0.25
 
-            # Hard guard: H2H event mapping requires both named participants. This prevents
-            # false giant edges caused by matching only one fighter/team to an unrelated market.
-            if ev.home_team and ev.away_team and not pbreak['both_present']:
-                confidence = (0.15 * sport) + (0.55 * participants) + (0.10 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
+            if validator.label == 'derivative_prop' or mtype == 'unsupported_derivative':
+                market_type_score = 0.0
+                confidence = (0.15 * sport) + (0.45 * participants) + (0.15 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
+                if confidence < 0.70:
+                    continue
+                status = 'needs_review'
+                mtype = 'unsupported_derivative'
+            elif validator.label == 'exact_h2h_moneyline':
+                market_type_score = 1.0
+                confidence = (0.15 * sport) + (0.50 * participants) + (0.15 * timing) + (0.10 * market_type_score) + (0.10 * outcome_clarity)
+                status = 'auto_approved' if confidence >= runtime.min_mapping_confidence else 'needs_review'
+                mtype = 'moneyline_full_event'
+            elif validator.label == 'likely_h2h':
+                market_type_score = 0.65
+                confidence = (0.15 * sport) + (0.48 * participants) + (0.15 * timing) + (0.12 * market_type_score) + (0.10 * outcome_clarity)
+                status = 'needs_review'
+            else:
+                confidence = (0.15 * sport) + (0.55 * participants) + (0.10 * timing) + (0.10 * 0.20) + (0.10 * outcome_clarity)
                 if confidence < 0.55:
                     continue
                 status = 'needs_review'
-            else:
-                confidence = (0.15 * sport) + (0.45 * participants) + (0.15 * timing) + (0.15 * market_type_score) + (0.10 * outcome_clarity)
-                status = 'auto_approved' if confidence >= runtime.min_mapping_confidence and mtype == 'moneyline_full_event' else 'needs_review'
 
             candidates.append(MappingCandidate(
                 external_event_id=ev.id,
@@ -144,17 +150,22 @@ def build_mapping_candidates(events: list[ExternalEvent], markets: list[Polymark
                     'no_token_id': pm.no_token_id,
                     'external_outcome': ev.home_team,
                     'polymarket_outcome': pm.outcomes[0] if pm.outcomes else 'YES',
-                    'note': 'strict two-participant H2H mapping; auto approval only when both sides match',
+                    'validator_label': validator.label,
+                    'validator_reason': validator.reason,
+                    'note': 'strict validator: auto approval only for exact H2H moneyline markets',
                 },
                 confidence_breakdown={
                     'sport': sport,
                     'participants': participants,
-                    'home_score': pbreak['home_score'],
-                    'away_score': pbreak['away_score'],
-                    'both_present': pbreak['both_present'],
+                    'home_score': max(pbreak['home_score'], validator.home_score),
+                    'away_score': max(pbreak['away_score'], validator.away_score),
+                    'both_present': pbreak['both_present'] or validator.both_participants_present,
                     'time': timing,
                     'market_type': market_type_score,
                     'outcome_clarity': outcome_clarity,
+                    'validator_label': validator.label,
+                    'validator_reason': validator.reason,
+                    'derivative_detected': validator.derivative_detected,
                     'question': pm.question,
                 },
             ))
