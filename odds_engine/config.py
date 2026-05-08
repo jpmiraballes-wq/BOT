@@ -49,17 +49,16 @@ class Settings:
     polymarket_gamma_url: str = os.getenv('POLYMARKET_GAMMA_URL', 'https://gamma-api.polymarket.com')
     polymarket_clob_url: str = os.getenv('POLYMARKET_CLOB_URL', 'https://clob.polymarket.com')
 
-    # Base44 app entity API. This intentionally supports the old env names too.
     base44_base_url: str = os.getenv('BASE44_BASE_URL', os.getenv('BASE44_API_URL', 'https://app.base44.com')).strip()
     base44_api_key: str = os.getenv('EXTERNAL_BASE44_API_KEY', os.getenv('BASE44_API_KEY', os.getenv('BASE44_API_TOKEN', ''))).strip()
     base44_app_id: str = os.getenv('EXTERNAL_BASE44_APP_ID', os.getenv('BASE44_APP_ID', '69e1e225a40599eb44ced81e')).strip()
 
-    # Safety throttle for first dashboard runs. Local JSONL still stores everything.
+    # First-run throttle. Local JSONL still stores everything.
     base44_write_enabled: bool = _bool('BASE44_WRITE_ENABLED', True)
-    base44_max_events: int = _int('BASE44_MAX_EVENTS', 60)
-    base44_max_odds_snapshots: int = _int('BASE44_MAX_ODDS_SNAPSHOTS', 120)
-    base44_max_polymarket_markets: int = _int('BASE44_MAX_POLYMARKET_MARKETS', 80)
-    base44_max_mappings: int = _int('BASE44_MAX_MAPPINGS', 150)
+    base44_max_events: int = _int('BASE44_MAX_EVENTS', 20)
+    base44_max_odds_snapshots: int = _int('BASE44_MAX_ODDS_SNAPSHOTS', 40)
+    base44_max_polymarket_markets: int = _int('BASE44_MAX_POLYMARKET_MARKETS', 30)
+    base44_max_mappings: int = _int('BASE44_MAX_MAPPINGS', 50)
 
     starting_capital_usd: float = _float('STARTING_CAPITAL_USD', 500.0)
     paper_trade_usd: float = _float('PAPER_TRADE_USD', 5.0)
@@ -81,11 +80,6 @@ class Settings:
             raise RuntimeError('Missing ODDS_API_KEY in odds_engine/.env')
 
     def with_bot_config(self, config: dict) -> 'Settings':
-        """Return a runtime settings object constrained by Base44 BotConfig.
-
-        Base44 can disable signal/trade creation. Live mode is still blocked in
-        V1 even if the dashboard says live.
-        """
         if not config:
             return self
         mode_raw = str(config.get('mode') or 'paper').upper()
