@@ -6,6 +6,7 @@ import os
 import sys
 
 from main import run_once, _log_to_base44
+import paper_mark
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('odds_engine')
@@ -24,6 +25,15 @@ def main() -> int:
 
         try:
             run_once()
+
+            # Best-effort paper PnL mark-to-market.
+            # Never fail the engine because of PnL marking.
+            try:
+                paper_mark.main()
+            except Exception as mark_exc:
+                log.exception('paper mark failed: %s', mark_exc)
+                _log_to_base44('error', 'paper_mark_failed', {'error': str(mark_exc)})
+
             return 0
         except Exception as exc:
             log.exception('run failed: %s', exc)
