@@ -30,8 +30,12 @@ def _outcomes_by_event(outcomes):
     return out
 
 
-def _write(entity: str, item) -> None:
+def _write(entity: str, item, send_base44: bool = True) -> None:
+    # Local JSONL is the full audit trail. Base44 is intentionally throttled
+    # during first runs so the dashboard does not get flooded.
     store.append(entity.lower(), item)
+    if not send_base44 or not settings.base44_write_enabled:
+        return
     if hasattr(item, 'base44_payload'):
         base44.post_record(entity, item.base44_payload())
     else:
@@ -41,7 +45,8 @@ def _write(entity: str, item) -> None:
 def _log_to_base44(level: str, message: str, data: dict) -> None:
     item = BotLog(level=level, source='odds_engine', message=message, data=data, created_at=now_iso())
     store.append('bot_logs', item)
-    base44.post_record('BotLog', item.base44_payload())
+    if settings.base44_write_enabled:
+        base44.post_record('BotLog', item.base44_payload())
 
 
 def run_once() -> dict:
@@ -62,17 +67,19 @@ def run_once() -> dict:
     markets_by_id = _index_markets(markets)
     outcomes_by_event = _outcomes_by_event(odds_outcomes)
 
-    for e in events:
-        _write('ExternalEvent', e)
-    for o in odds_outcomes:
-        _write('OddsSnapshot', o)
-    for m in markets:
-        _write('PolymarketEvent', m.base44_event_payload())
-        _write('PolymarketMarket', m.base44_market_payload())
-        _write('PolymarketSnapshot', m.base44_snapshot_payload())
-    for c in mappings[:1000]:
-        _write('EventMapping', c.base44_event_mapping_payload())
-        _write('MarketMapping', c.base44_market_mapping_payload())
+    for idx, e in enumerate(events):
+        _write('ExternalEvent', e, send_base44=idx < runtime.base44_max_events)
+    for idx, o in enumerate(odds_outcomes):
+        _write('OddsSnapshot', o, send_base44=idx < runtime.base44_max_odds_snapshots)
+    for idx, m in enumerate(markets):
+        send = idx < runtime.base44_max_polymarket_markets
+        _write('PolymarketEvent', m.base44_event_payload(), send_base44=send)
+        _write('PolymarketMarket', m.base44_market_payload(), send_base44=send)
+        _write('PolymarketSnapshot', m.base44_snapshot_payload(), send_base44=send)
+    for idx, c in enumerate(mappings):
+        send = idx < runtime.base44_max_mappings
+        _write('EventMapping', c.base44_event_mapping_payload(), send_base44=send)
+        _write('MarketMapping', c.base44_market_mapping_payload(), send_base44=send)
 
     signals_count = 0
     approved_count = 0
@@ -91,6 +98,7 @@ def run_once() -> dict:
             'approved_signals': 0,
             'paper_trades': 0,
             'note': 'BotConfig.enabled=false, ingestion only',
+            'base44_write_enabled': settings.base44_write_enabled,
         }
         _log_to_base44('info', 'run_once_ingestion_only', summary)
         log.info('summary: %s', summary)
@@ -129,6 +137,7 @@ def run_once() -> dict:
         'signals': signals_count,
         'approved_signals': approved_count,
         'paper_trades': paper_count,
+        'base44_write_enabled': settings.base44_write_enabled,
     }
     _log_to_base44('info', 'run_once_complete', summary)
     log.info('summary: %s', summary)
