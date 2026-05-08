@@ -221,7 +221,11 @@ _FAST_PATH_TENNIS_TOP_KEYWORDS = (
 # FAST_PATH_MAX_PRICE_80_V1 — bajado max 0.95→0.80. Spread Celtics 97¢ rompió R/R.
 _FAST_PATH_MIN_PRICE = 0.05
 _FAST_PATH_MAX_PRICE = 0.80
-_FAST_PATH_MIN_USDC = 1.0
+# FAST_PATH_MIN_USDC_500_V1 — JP 2026-05-08: solo copiamos tickets de convicción real.
+# <$500 es ruido (~82% del flujo de swisstony son fragmentos $1-$50).
+# Defensa en profundidad: el cloud (executeApprovedProposal) ya tiene
+# MIN_TICKET_500_V1, este floor evita generar proposals que después se rechazan.
+_FAST_PATH_MIN_USDC = 500.0
 # DYNAMIC_TRUSTED_WHALES_V1: lista hardcoded como fallback. La fuente real es la cloud
 # (endpoint getTrustedWhalesList) que se consulta cada 60s. Cuando una shadow
 # promueve a Tier S vía whaleAutoPromoteShadow, el bot la pica solo en el
