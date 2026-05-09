@@ -35,14 +35,7 @@ def _int_env(name: str, default: int) -> int:
 
 
 class GodModePaperMaker(PaperMakerEngine):
-    """Strict paper maker wrapper focused on executable markout quality.
-
-    The base simulator is allowed to create lots of quotes. God mode owns the
-    fill model, because strict executable markout needs small fills that already
-    have an exit-side cushion. Do not delegate accepted strict fills back to the
-    base fill model; the base model uses a different near-touch definition and
-    can reject already-approved strict fills.
-    """
+    """Strict paper maker wrapper focused on executable + queue-realistic quality."""
 
     def __init__(self, cfg: MakerConfig | None = None) -> None:
         super().__init__(cfg)
@@ -55,12 +48,18 @@ class GodModePaperMaker(PaperMakerEngine):
         self.adverse_token_limit = _int_env('PAPER_MAKER_ADVERSE_TOKEN_LIMIT', 50)
         self.adverse_positive_rate_max = _float_env('PAPER_MAKER_ADVERSE_POSITIVE_RATE_MAX', 0.60)
         self.adverse_loss_min_usd = _float_env('PAPER_MAKER_ADVERSE_LOSS_MIN_USD', 0.25)
-        # V6.1: keep toxic fills dead, but allow a measurable sample of small strict fills.
         self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.12)
         self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.0)
         self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.002)
         self.strict_max_order_size_usd = _float_env('PAPER_MAKER_STRICT_MAX_ORDER_SIZE_USD', 10.0)
         self.strict_level0_order_size_usd = _float_env('PAPER_MAKER_STRICT_LEVEL0_ORDER_SIZE_USD', 5.0)
+        # V8.2: paper fills must be queue-plausible, not just price-plausible.
+        self.queue_filter_enabled = _bool_env('PAPER_MAKER_QUEUE_FILL_FILTER_ENABLED', True)
+        self.queue_max_notional_ok = _float_env('PAPER_MAKER_QUEUE_FILL_MAX_AHEAD_USD', 150.0)
+        self.queue_max_multiple_ok = _float_env('PAPER_MAKER_QUEUE_FILL_MAX_MULTIPLE', 20.0)
+        self.queue_min_partial_ok = _float_env('PAPER_MAKER_QUEUE_FILL_MIN_PARTIAL_RATE', 0.08)
+        self.queue_allow_top = _bool_env('PAPER_MAKER_QUEUE_FILL_ALLOW_TOP', True)
+        self._book_cache: dict[str, dict | None] = {}
         self.filtered_stats: dict[str, int] = {}
         self.blocked_token_shorts: set[str] = set()
         self.strict_fill_rejects: dict[str, int] = {}
@@ -108,6 +107,7 @@ class GodModePaperMaker(PaperMakerEngine):
         raw_books = super().discover_books()
         if not self.strict_mode:
             return raw_books
+        self._book_cache.clear()
         self.blocked_token_shorts = self._blocked_tokens_from_markout()
         kept: list[BookTop] = []
         stats: dict[str, int] = {
@@ -144,9 +144,63 @@ class GodModePaperMaker(PaperMakerEngine):
     def _strict_fill_fraction(self, unit: float, threshold: float) -> float:
         if threshold <= 0:
             return 0.0
-        # Small partial fills only. This keeps notional realistic and prevents one
-        # bad synthetic fill from dominating the sample.
         return min(0.45, max(0.08, 0.08 + (unit / threshold) * 0.22))
+
+    def _book_for_token(self, token_id: str) -> dict | None:
+        if token_id not in self._book_cache:
+            self._book_cache[token_id] = self._fetch_book(token_id)
+        return self._book_cache.get(token_id)
+
+    def _book_levels(self, book: dict, side: str) -> list[dict]:
+        levels = book.get('bids') if side == 'BUY' else book.get('asks')
+        levels = [x for x in (levels or []) if isinstance(x, dict)]
+        if side == 'BUY':
+            return sorted(levels, key=lambda x: _float(x.get('price')), reverse=True)
+        return sorted(levels, key=lambda x: _float(x.get('price')))
+
+    def _queue_fill_reason(self, q: dict, b: BookTop) -> str | None:
+        if not self.queue_filter_enabled:
+            return None
+        side = str(q.get('side') or '').upper()
+        price = _float(q.get('price'))
+        size_usd = min(_float(q.get('size_usd')) or (_float(q.get('shares')) * price), self.strict_max_order_size_usd)
+        if price <= 0 or side not in {'BUY', 'SELL'}:
+            return 'reject_queue_bad_quote'
+        book = self._book_for_token(b.token_id)
+        if not book:
+            return 'reject_queue_book_unavailable'
+        levels = self._book_levels(book, side)
+        shares = size_usd / max(price, 0.01)
+        better_shares = 0.0
+        same_level_shares = 0.0
+        for lvl in levels:
+            p = _float(lvl.get('price'))
+            sz = _float(lvl.get('size') or lvl.get('shares') or lvl.get('amount'))
+            if side == 'BUY':
+                if p > price:
+                    better_shares += sz
+                elif abs(p - price) < 1e-9:
+                    same_level_shares += sz
+            else:
+                if p < price:
+                    better_shares += sz
+                elif abs(p - price) < 1e-9:
+                    same_level_shares += sz
+        best_bid, best_ask, _mid, _spread, _last, _tick = self._best_levels(book)
+        at_top = (side == 'BUY' and price >= best_bid) or (side == 'SELL' and price <= best_ask)
+        queue_ahead_shares = better_shares + same_level_shares
+        queue_ahead_notional = queue_ahead_shares * price
+        queue_multiple = queue_ahead_notional / max(size_usd, 0.01)
+        visible_partial = min(1.0, shares / max(queue_ahead_shares + shares, 1e-9))
+        if self.queue_allow_top and at_top:
+            return None
+        if queue_ahead_notional <= self.queue_max_notional_ok:
+            return None
+        if queue_multiple <= self.queue_max_multiple_ok:
+            return None
+        if visible_partial >= self.queue_min_partial_ok:
+            return None
+        return 'reject_queue_not_plausible'
 
     def _apply_strict_fill(self, q: dict, b: BookTop, inv: dict, avg_cost: dict, cash: float, unit: float, threshold: float):
         side = q['side']
@@ -195,7 +249,7 @@ class GodModePaperMaker(PaperMakerEngine):
             'realized_pnl_usd': round(pnl, 6),
             'paper_only': True,
             'strict_god_fill': True,
-            'strict_fill_model': 'v6_1_direct',
+            'strict_fill_model': 'v8_2_queue_plausible',
         }
         return True, cash, pnl, fill
 
@@ -229,7 +283,12 @@ class GodModePaperMaker(PaperMakerEngine):
             self._reject_fill('reject_far_from_executable_touch')
             return False, cash, 0.0, None
 
-        unit = self._stable_unit(f"STRICT6_1:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}:{price}:{size_usd}")
+        queue_reason = self._queue_fill_reason(q, b)
+        if queue_reason:
+            self._reject_fill(queue_reason)
+            return False, cash, 0.0, None
+
+        unit = self._stable_unit(f"STRICT8_2:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}:{price}:{size_usd}")
         threshold = self.strict_fill_threshold_near
         if b.spread > 0.015:
             threshold *= 0.50
@@ -249,13 +308,17 @@ class GodModePaperMaker(PaperMakerEngine):
             summary['strict_fill_rejects'] = dict(self.strict_fill_rejects)
             summary['blocked_adverse_token_shorts'] = sorted(self.blocked_token_shorts)[:50]
             summary['strict_v6_controls'] = {
-                'fill_model': 'v6_1_direct_strict_fill_no_base_recheck',
+                'fill_model': 'v8_2_queue_plausible_strict_fill',
                 'max_executable_spread': self.max_executable_spread,
                 'min_liquidity': self.min_liquidity,
                 'min_exit_edge_ticks': self.min_exit_edge_ticks,
                 'strict_max_order_size_usd': self.strict_max_order_size_usd,
                 'strict_fill_threshold_near': self.strict_fill_threshold_near,
                 'strict_fill_threshold_far': self.strict_fill_threshold_far,
+                'queue_filter_enabled': self.queue_filter_enabled,
+                'queue_max_ahead_usd': self.queue_max_notional_ok,
+                'queue_max_multiple': self.queue_max_multiple_ok,
+                'queue_min_partial_rate': self.queue_min_partial_ok,
             }
             self._persist_summary(summary)
         try:
