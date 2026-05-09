@@ -17,6 +17,7 @@ from storage import store
 from base44_client import base44
 from models import BotLog, now_iso, stable_id
 from multi_sport_probe import controlled_sport_keys, new_stats, bump_blocked, probe_payload
+from paper_maker_engine import run_paper_maker_once
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('odds_engine')
@@ -76,10 +77,6 @@ def _outcome_matches_market(event, odds, market, mapping) -> bool:
             return False
         if not expected_line:
             return False
-        # Odds API canonical outcome is 'Team -1.5' / 'Team +1.5'. Polymarket
-        # question usually names only one spread side. Only pass matching line.
-        # Team-side matching remains intentionally lenient; token selection in
-        # signal_engine decides the YES/NO side and risk still gates execution.
         return _extract_line(outcome).lstrip('+') == expected_line.lstrip('+')
 
     return outcome in question
@@ -200,9 +197,6 @@ def _emit_sport_probe_logs(stats_by_sport: dict[str, dict]) -> None:
 
 
 def _emit_no_candidate_diagnostic(event, sport_markets, runtime) -> None:
-    """When an event ends up with no mapping candidate, log the top-3 closest
-    Polymarket markets and the concrete reason each one was rejected.
-    Pure observability: no logic change, no trades created here."""
     if not sport_markets:
         payload = {
             'event_id': event.id,
@@ -238,39 +232,8 @@ def _emit_no_candidate_diagnostic(event, sport_markets, runtime) -> None:
             float(best.get('away_score', 0.0)),
             bool(best.get('both_present')),
         )
-    else:
-        log.info('no_candidate_diagnostic event=%s sport=%s pool=%s no scored candidates', event.id, event.sport_key, len(sport_markets))
-    try:
-        from mapper import debug_score_event_against_markets
-        _pool = sport_markets or []
-        log.info(
-            'mapping_pool_size event=%s sport=%s pool=%d',
-            getattr(event, 'id', ''), getattr(event, 'sport_key', ''), len(_pool),
-        )
-        _rows = debug_score_event_against_markets(event, _pool, top_n=5)
-        for _rank, _r in enumerate(_rows, start=1):
-            _q = (_r.get('question') or '')[:160]
-            _cat = (_r.get('category') or '')[:40]
-            _slug = (_r.get('slug') or '')[:80]
-            log.info(
-                'mapping_candidate_debug event=%s sport=%s rank=%d market=%s '
-                'label=%s reason=%s confidence=%.4f home_score=%.4f away_score=%.4f '
-                'category=%r slug=%r question=%r',
-                getattr(event, 'id', ''), getattr(event, 'sport_key', ''), _rank,
-                _r.get('market_id', ''), _r.get('label', ''), _r.get('reason', ''),
-                float(_r.get('confidence', 0.0)),
-                float(_r.get('home_score', 0.0)),
-                float(_r.get('away_score', 0.0)),
-                _cat, _slug, _q,
-            )
-    except Exception as _diag_exc:
-        log.info(
-            'mapping_candidate_debug_error event=%s sport=%s err=%s',
-            getattr(event, 'id', ''), getattr(event, 'sport_key', ''), _diag_exc,
-        )
 
 
-# ----- Money Hunter V1 helpers ----------------------------------------------
 def _top_signal_dict(signal, event, market, mapping, runtime) -> dict:
     min_edge = float(getattr(runtime, 'min_edge', 0.0) or 0.0)
     min_liq = float(getattr(runtime, 'min_liquidity', 0.0) or 0.0)
@@ -318,14 +281,10 @@ def _log_edge_below_threshold(signal, event, market, runtime) -> None:
     min_edge = float(getattr(runtime, 'min_edge', 0.0) or 0.0)
     edge_bruto = float(getattr(signal, 'edge_bruto', 0.0) or 0.0)
     log.info(
-        'edge_below_threshold sport=%s event=%s outcome=%s question=%r '
-        'fair=%.4f polymarket_price=%.4f edge=%.4f min_edge=%.4f gap=%.4f',
-        getattr(event, 'sport_key', 'unknown'),
-        signal.external_event_id, signal.outcome,
-        getattr(market, 'question', '') or '',
-        float(signal.fair_value or 0.0),
-        float(signal.polymarket_price or 0.0),
-        edge_bruto, min_edge, round(min_edge - edge_bruto, 6),
+        'edge_below_threshold sport=%s event=%s outcome=%s question=%r fair=%.4f polymarket_price=%.4f edge=%.4f min_edge=%.4f gap=%.4f',
+        getattr(event, 'sport_key', 'unknown'), signal.external_event_id, signal.outcome,
+        getattr(market, 'question', '') or '', float(signal.fair_value or 0.0),
+        float(signal.polymarket_price or 0.0), edge_bruto, min_edge, round(min_edge - edge_bruto, 6),
     )
 
 
@@ -343,18 +302,12 @@ def _money_hunter_decision(stats_by_sport: dict, signals_count: int, approved_co
         return 'PAPER_TRADES_CREATED', 'evaluate_paper_pnl_before_live'
     if test_paper_count > 0:
         return 'ONLY_TEST_TRADES', 'disable_test_mode_and_wait_for_real_edge'
-
     edge_block = int(blocked_global.get('edge_below_threshold', 0))
     no_cand = int(blocked_global.get('no_candidate_after_validator', 0))
     miss_token = int(blocked_global.get('missing_matched_outcome_token', 0))
     spread_block = int(blocked_global.get('spread_too_wide', 0))
     liq_block = int(blocked_global.get('liquidity_too_low', 0))
-
-    sports_no_match = sum(
-        1 for s in stats_by_sport.values()
-        if int(s.get('mapping_candidates', 0)) == 0 and int(s.get('events', 0)) > 0
-    )
-
+    sports_no_match = sum(1 for s in stats_by_sport.values() if int(s.get('mapping_candidates', 0)) == 0 and int(s.get('events', 0)) > 0)
     if signals_count > 0 and approved_count == 0 and edge_block > 0:
         return 'PIPELINE_OK_NO_EDGE', 'watch_more_or_lower_threshold_in_paper_only'
     if miss_token > 0 and signals_count > 0:
@@ -391,7 +344,6 @@ def _build_money_hunter_report(runtime, stats_by_sport: dict, events, odds_outco
             'top_blocked_reason': top_reason,
             'blocked_reasons': dict(blocked),
         })
-    top_diags = top_signal_diagnostics[:10]
     return {
         'mode': runtime.bot_mode,
         'paper_force_test_trade': bool(getattr(runtime, 'paper_force_test_trade', False)),
@@ -405,12 +357,19 @@ def _build_money_hunter_report(runtime, stats_by_sport: dict, events, odds_outco
         'test_paper_trades': int(test_paper_count),
         'blocked_reasons': blocked_global,
         'by_sport': by_sport,
-        'top_signal_diagnostics_sample': top_diags,
+        'top_signal_diagnostics_sample': top_signal_diagnostics[:10],
         'money_hunter_status': money_hunter_status,
         'next_action': next_action,
     }
-# ----- end Money Hunter V1 helpers ------------------------------------------
 
+
+def _run_paper_maker_safely() -> dict:
+    try:
+        return run_paper_maker_once()
+    except Exception as exc:
+        log.exception('paper_maker_failed err=%s', exc)
+        _log_to_base44('error', 'paper_maker_failed', {'error': str(exc)})
+        return {'mode': 'PAPER_MAKER', 'enabled': False, 'error': str(exc)}
 
 
 def run_once() -> dict:
@@ -418,12 +377,7 @@ def run_once() -> dict:
     bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
     runtime = settings.with_bot_config(bot_cfg)
     runtime = replace(runtime, odds_sport_keys=controlled_sport_keys(runtime.odds_sport_keys))
-    log.info(
-        'starting odds_engine run_once mode=%s sports=%s base44_write=%s',
-        runtime.bot_mode,
-        runtime.odds_sport_keys,
-        settings.base44_write_enabled,
-    )
+    log.info('starting odds_engine run_once mode=%s sports=%s base44_write=%s', runtime.bot_mode, runtime.odds_sport_keys, settings.base44_write_enabled)
 
     odds_client = OddsApiClient(runtime)
     poly_client = PolymarketPublicClient(runtime)
@@ -439,7 +393,7 @@ def run_once() -> dict:
     _emit_mapping_debug(events, markets_by_id, mappings)
     markets_by_sport: dict[str, list] = {}
     for ev in events:
-        bucket = markets_by_sport.setdefault(ev.sport_key, [])
+        markets_by_sport.setdefault(ev.sport_key, [])
     _all_markets = list(markets)
     for sport_key in list(markets_by_sport.keys()):
         markets_by_sport[sport_key] = _all_markets
@@ -486,98 +440,71 @@ def run_once() -> dict:
     seen_signals_this_run: set[str] = set()
 
     enabled = bool(bot_cfg.get('enabled', False)) if bot_cfg else False
-    if not enabled:
-        _emit_sport_probe_logs(stats_by_sport)
-        summary = {
-            'mode': runtime.bot_mode,
-            'enabled': False,
-            'sports': runtime.odds_sport_keys,
-            'events': len(events),
-            'odds_outcomes': len(odds_outcomes),
-            'polymarket_markets': len(markets),
-            'mapping_candidates': len(mappings),
-            'signals': 0,
-            'approved_signals': 0,
-            'paper_trades': 0,
-            'note': 'BotConfig.enabled=false or Base44 writes disabled, ingestion only',
-            'base44_write_enabled': settings.base44_write_enabled,
-        }
-        _log_to_base44('info', 'run_once_ingestion_only', summary)
-        log.info('summary: %s', summary)
-        return summary
-
-    for event in events:
-        sport_stats = _sport_stats_for(stats_by_sport, event.sport_key)
-        mapping = best_candidate_for_event(event.id, mappings)
-        if not mapping:
-            bump_blocked(sport_stats, 'no_candidate_after_validator')
-            try:
-                _emit_no_candidate_diagnostic(event, markets_by_sport.get(event.sport_key, []), runtime)
-            except Exception as exc:
-                log.debug('no_candidate_diagnostic failed event=%s err=%s', event.id, exc)
-            continue
-        market = markets_by_id.get(mapping.polymarket_market_id)
-        if not market:
-            bump_blocked(sport_stats, 'missing_polymarket_market')
-            continue
-        for odds in outcomes_by_event.get(event.id, []):
-            fair = event_fair_value_for_name(event.id, odds.outcome_name, fair_values)
-            if fair is None:
-                bump_blocked(sport_stats, 'missing_fair_value')
+    if enabled:
+        for event in events:
+            sport_stats = _sport_stats_for(stats_by_sport, event.sport_key)
+            mapping = best_candidate_for_event(event.id, mappings)
+            if not mapping:
+                bump_blocked(sport_stats, 'no_candidate_after_validator')
+                try:
+                    _emit_no_candidate_diagnostic(event, markets_by_sport.get(event.sport_key, []), runtime)
+                except Exception as exc:
+                    log.debug('no_candidate_diagnostic failed event=%s err=%s', event.id, exc)
                 continue
-            if not _outcome_matches_market(event, odds, market, mapping):
-                bump_blocked(sport_stats, 'outcome_not_in_polymarket_question')
+            market = markets_by_id.get(mapping.polymarket_market_id)
+            if not market:
+                bump_blocked(sport_stats, 'missing_polymarket_market')
                 continue
-            signal_key = f"{event.id}:{market.id}:{market.yes_token_id or ''}:{odds.outcome_name}"
-            if signal_key in seen_signals_this_run:
-                continue
-            seen_signals_this_run.add(signal_key)
-            signal = build_buy_signal(mapping, market, odds, fair, risk, runtime)
-            _write('Signal', signal)
-            signals_count += 1
-            sport_stats['signals'] += 1
-            if signal.edge_neto > 0:
-                sport_stats['positive_net_edge_signals'] += 1
-            if signal.risk_status == 'approved':
-                approved_count += 1
-                sport_stats['approved_signals'] += 1
-            else:
-                bump_blocked(sport_stats, signal.reject_reason or 'rejected')
-            _emit_top_signal_diagnostic(signal, event, market, mapping, runtime)
-            top_signal_diagnostics.append(_top_signal_dict(signal, event, market, mapping, runtime))
-            if signal.reject_reason == 'edge_below_threshold':
-                _log_edge_below_threshold(signal, event, market, runtime)
-            trade = paper.open_from_signal(signal)
-            if trade:
-                papertrade_path = settings.data_dir / 'papertrade.jsonl'
-                already_open = False
-                if papertrade_path.exists():
-                    for line in papertrade_path.read_text(errors='ignore').splitlines():
-                        if f'"id": "{trade.id}"' in line and '"status": "open"' in line:
-                            already_open = True
-                            break
-
-                if already_open:
-                    log.info('paper_trade_duplicate_skipped id=%s signal=%s market=%s',
-                             trade.id, trade.signal_id, trade.polymarket_market_id)
+            for odds in outcomes_by_event.get(event.id, []):
+                fair = event_fair_value_for_name(event.id, odds.outcome_name, fair_values)
+                if fair is None:
+                    bump_blocked(sport_stats, 'missing_fair_value')
+                    continue
+                if not _outcome_matches_market(event, odds, market, mapping):
+                    bump_blocked(sport_stats, 'outcome_not_in_polymarket_question')
+                    continue
+                signal_key = f"{event.id}:{market.id}:{market.yes_token_id or ''}:{odds.outcome_name}"
+                if signal_key in seen_signals_this_run:
+                    continue
+                seen_signals_this_run.add(signal_key)
+                signal = build_buy_signal(mapping, market, odds, fair, risk, runtime)
+                _write('Signal', signal)
+                signals_count += 1
+                sport_stats['signals'] += 1
+                if signal.edge_neto > 0:
+                    sport_stats['positive_net_edge_signals'] += 1
+                if signal.risk_status == 'approved':
+                    approved_count += 1
+                    sport_stats['approved_signals'] += 1
                 else:
-                    _write('PaperTrade', trade)
-                    paper_count += 1
-                    sport_stats['paper_trades_created'] += 1
-            elif test_paper_count == 0 and runtime.paper_force_test_trade:
-                test_trade = paper.force_test_trade_from_signal(signal)
-                if test_trade:
-                    _write('PaperTrade', test_trade)
-                    test_paper_count += 1
-                    sport_stats['paper_trades_created'] = sport_stats.get('paper_trades_created', 0) + 1
-                    _log_to_base44('info', 'paper_trade_test_created', {
-                        'event': signal.external_event_id,
-                        'market': signal.polymarket_market_id,
-                        'edge_neto': signal.edge_neto,
-                        'reason': 'forced_paper_pipeline_test',
-                    })
-                    log.info('paper_trade_test_created event=%s market=%s edge_neto=%s',
-                             signal.external_event_id, signal.polymarket_market_id, signal.edge_neto)
+                    bump_blocked(sport_stats, signal.reject_reason or 'rejected')
+                _emit_top_signal_diagnostic(signal, event, market, mapping, runtime)
+                top_signal_diagnostics.append(_top_signal_dict(signal, event, market, mapping, runtime))
+                if signal.reject_reason == 'edge_below_threshold':
+                    _log_edge_below_threshold(signal, event, market, runtime)
+                trade = paper.open_from_signal(signal)
+                if trade:
+                    papertrade_path = settings.data_dir / 'papertrade.jsonl'
+                    already_open = False
+                    if papertrade_path.exists():
+                        for line in papertrade_path.read_text(errors='ignore').splitlines():
+                            if f'"id": "{trade.id}"' in line and '"status": "open"' in line:
+                                already_open = True
+                                break
+                    if already_open:
+                        log.info('paper_trade_duplicate_skipped id=%s signal=%s market=%s', trade.id, trade.signal_id, trade.polymarket_market_id)
+                    else:
+                        _write('PaperTrade', trade)
+                        paper_count += 1
+                        sport_stats['paper_trades_created'] += 1
+                elif test_paper_count == 0 and runtime.paper_force_test_trade:
+                    test_trade = paper.force_test_trade_from_signal(signal)
+                    if test_trade:
+                        _write('PaperTrade', test_trade)
+                        test_paper_count += 1
+                        sport_stats['paper_trades_created'] = sport_stats.get('paper_trades_created', 0) + 1
+                        _log_to_base44('info', 'paper_trade_test_created', {'event': signal.external_event_id, 'market': signal.polymarket_market_id, 'edge_neto': signal.edge_neto, 'reason': 'forced_paper_pipeline_test'})
+                        log.info('paper_trade_test_created event=%s market=%s edge_neto=%s', signal.external_event_id, signal.polymarket_market_id, signal.edge_neto)
 
     _emit_sport_probe_logs(stats_by_sport)
     summary = {
@@ -596,17 +523,19 @@ def run_once() -> dict:
         'base44_write_enabled': settings.base44_write_enabled,
     }
     blocked_global = _aggregate_blocked_reasons(stats_by_sport)
-    money_hunter_status, next_action = _money_hunter_decision(
-        stats_by_sport, signals_count, approved_count,
-        paper_count, test_paper_count, blocked_global,
-    )
+    money_hunter_status, next_action = _money_hunter_decision(stats_by_sport, signals_count, approved_count, paper_count, test_paper_count, blocked_global)
     summary['money_hunter_status'] = money_hunter_status
     summary['next_action'] = next_action
-    money_hunter_report = _build_money_hunter_report(
-        runtime, stats_by_sport, events, odds_outcomes, markets, mappings,
-        signals_count, approved_count, paper_count, test_paper_count,
-        top_signal_diagnostics, money_hunter_status, next_action,
-    )
+    maker_summary = _run_paper_maker_safely()
+    summary['paper_maker'] = {
+        'enabled': maker_summary.get('enabled'),
+        'orders_today': maker_summary.get('orders_simulated_today'),
+        'fills_today': maker_summary.get('fills_simulated_today'),
+        'maker_total_pnl_usd': maker_summary.get('maker_total_pnl_usd'),
+        'inventory_exposure_usd': maker_summary.get('inventory_exposure_usd'),
+    }
+    money_hunter_report = _build_money_hunter_report(runtime, stats_by_sport, events, odds_outcomes, markets, mappings, signals_count, approved_count, paper_count, test_paper_count, top_signal_diagnostics, money_hunter_status, next_action)
+    money_hunter_report['paper_maker'] = maker_summary
     _log_to_base44('info', 'money_hunter_report', money_hunter_report)
     log.info('money_hunter_status=%s next_action=%s', money_hunter_status, next_action)
     _log_to_base44('info', 'run_once_complete', summary)
@@ -615,11 +544,6 @@ def run_once() -> dict:
 
 
 def main() -> int:
-    """Run exactly one scan.
-
-    launchd already schedules this job with StartInterval=60. Keeping an
-    internal while/sleep loop here creates overlapping engines and stale runs.
-    """
     try:
         run_once()
         return 0
