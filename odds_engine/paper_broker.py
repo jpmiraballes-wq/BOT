@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
+
 from config import Settings, settings as default_settings
 from models import Signal, PaperTrade, stable_id, now_iso
 from risk_manager import RiskManager
+
+log = logging.getLogger(__name__)
 
 
 class PaperBroker:
@@ -10,12 +15,45 @@ class PaperBroker:
         self.risk = risk
         self.cfg = cfg or default_settings
 
+    def _has_open_position(self, token_id: str, side: str = 'YES') -> bool:
+        """Return True when the paper book already has an open position on this token/side.
+
+        Signal IDs can legitimately differ across scans for the same Polymarket token.
+        The paper broker must dedupe by position identity, not only by trade ID.
+        """
+        if not token_id:
+            return False
+        path = self.cfg.data_dir / 'papertrade.jsonl'
+        if not path.exists():
+            return False
+        try:
+            for line in path.read_text(errors='ignore').splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get('status') != 'open':
+                    continue
+                if str(row.get('token_id') or '') == str(token_id) and str(row.get('side') or 'YES') == side:
+                    return True
+        except Exception as exc:
+            log.warning('paper_open_position_check_failed token=%s err=%s', str(token_id)[:10], exc)
+        return False
+
     def open_from_signal(self, signal: Signal) -> PaperTrade | None:
         if self.cfg.bot_mode != 'PAPER':
             return None
         if signal.action != 'BUY' or signal.risk_status != 'approved':
             return None
         if not signal.token_id or signal.polymarket_price <= 0:
+            return None
+        if self._has_open_position(signal.token_id, 'YES'):
+            log.info(
+                'paper_trade_duplicate_token_skipped token=%s signal=%s market=%s',
+                str(signal.token_id)[:10], signal.id, signal.polymarket_market_id,
+            )
             return None
         size_usd = float(self.cfg.paper_trade_usd)
         qty = size_usd / signal.polymarket_price
@@ -56,6 +94,12 @@ class PaperBroker:
         if getattr(signal, 'mapping_status', None) != 'auto_approved':
             return None
         if not signal.token_id or signal.polymarket_price <= 0:
+            return None
+        if self._has_open_position(signal.token_id, 'YES'):
+            log.info(
+                'paper_test_trade_duplicate_token_skipped token=%s signal=%s market=%s',
+                str(signal.token_id)[:10], signal.id, signal.polymarket_market_id,
+            )
             return None
         size_usd = float(self.cfg.test_trade_size_usd)
         qty = size_usd / signal.polymarket_price
