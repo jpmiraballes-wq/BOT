@@ -187,11 +187,25 @@ class LiveMakerExecutor:
             seen_markets.add(str(r.get("question") or r.get("token_id_short") or token_id[:10]))
             for side, px_key in sides:
                 price = round(_float(r.get(px_key)), 4)
+
+                # BUY placement:
+                # - default to current best_bid, not stale/generated bid_quote
+                # - if spread is >= 2 cents, improve by 1 cent inside the spread
+                # - never cross/touch best_ask, so post-only remains maker
+                best_bid = _float(r.get("best_bid"))
+                best_ask = _float(r.get("best_ask"))
+                spread = best_ask - best_bid
+
+                if side == "BUY" and best_bid > 0 and best_ask > 0:
+                    price = round(best_bid, 4)
+                    if spread >= 0.019:
+                        price = round(min(best_bid + 0.01, best_ask - 0.01), 4)
+
                 if price <= 0.01 or price >= 0.99:
                     continue
-                if side == "BUY" and price >= _float(r.get("best_ask")):
+                if side == "BUY" and price >= best_ask:
                     continue
-                if side == "SELL" and price <= _float(r.get("best_bid")):
+                if side == "SELL" and price <= best_bid:
                     continue
                 usd = min(self.limits.max_order_usd, self.limits.max_cycle_notional_usd - cycle_notional)
                 if usd < 0.5:
