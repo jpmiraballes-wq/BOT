@@ -160,7 +160,9 @@ def _last_name(name: str) -> str:
 
 def _team_tokens(name: str) -> list[str]:
     text = _normalize(name)
-    stop = {'fc', 'cf', 'club', 'the', 'de', 'la', 'los', 'las', 'real'}
+    # # DISCOVERY_EXPANSION_V1: extra stopwords for La Liga / soccer ES suffixes
+    stop = {'fc', 'cf', 'club', 'the', 'de', 'la', 'los', 'las', 'real',
+            'balompie', 'sc', 'cd', 'ud', 'rcd'}
     return [p for p in text.split() if len(p) >= 3 and p not in stop]
 
 
@@ -243,7 +245,7 @@ def _contains_aliases(name: str, text: str) -> bool:
 def _market_relevant_to_event(event: ExternalEvent, market: PolymarketMarket) -> bool:
     # DISCOVERY_WIDEN_V1: at discovery time keep markets that mention EITHER
     # team. Auto-approval still requires both participants (market_validator.py),
-    # so this only widens the pool — no false positives reach paper trading.
+    # so this only widens the pool â no false positives reach paper trading.
     text = _normalize(' '.join([market.question, market.slug, market.category, ' '.join(market.outcomes or [])]))
     return _contains_aliases(event.home_team, text) or _contains_aliases(event.away_team, text)
 
@@ -327,8 +329,15 @@ class PolymarketPublicClient:
         return [m for m in parsed if m.id and m.question]
 
     def fetch_markets_for_events(self, events: list[ExternalEvent], broad_limit: int | None = None) -> list[PolymarketMarket]:
+        # # DISCOVERY_EXPANSION_V1: per-cycle query cache + multi-key dedup + per-sport metrics.
+        # Behavior change: NONE. Same buckets (broad/league/targeted), same
+        # filters, same _market_relevant_to_event semantics. Pure observability
+        # plus avoiding redundant Gamma calls within the same cycle.
         broad_limit = int(broad_limit or self.cfg.polymarket_broad_limit)
         by_id: dict[str, PolymarketMarket] = {}
+        seen_condition_ids: set[str] = set()
+        seen_question_norm: set[str] = set()
+        query_cache: dict[tuple, list[PolymarketMarket]] = {}
         calls = 0
         targeted_raw = 0
         targeted_kept = 0
@@ -337,15 +346,63 @@ class PolymarketPublicClient:
         league_raw = 0
         league_kept = 0
         targeted_events = 0
-        per_sport_hits: dict[str, dict[str, int]] = defaultdict(lambda: {'targeted_raw': 0, 'targeted_kept': 0, 'league_raw': 0, 'league_kept': 0})
+        per_sport_hits: dict[str, dict[str, int]] = defaultdict(lambda: {
+            'targeted_raw': 0, 'targeted_kept': 0,
+            'league_raw': 0, 'league_kept': 0,
+            'discovery_queries_count': 0,
+            'raw_polymarket_results': 0,
+            'deduped_polymarket_markets': 0,
+            'markets_with_both_teams': 0,
+        })
 
-        def add_many(items: list[PolymarketMarket]) -> None:
+        def _condition_id_of(m: PolymarketMarket) -> str:
+            cid = getattr(m, 'condition_id', None)
+            if not cid:
+                raw = getattr(m, 'raw_payload', None) or getattr(m, 'raw', None) or {}
+                if isinstance(raw, dict):
+                    cid = raw.get('conditionId')
+            return str(cid or '').strip()
+
+        def _question_norm_of(m: PolymarketMarket) -> str:
+            return _normalize(getattr(m, 'question', '') or '')
+
+        def add_many(items: list[PolymarketMarket], sport_key: str | None = None) -> int:
+            """Multi-key dedup. Returns count of NEW markets actually added."""
+            added = 0
             for m in items:
-                by_id.setdefault(m.id, m)
+                if not getattr(m, 'id', None):
+                    continue
+                if m.id in by_id:
+                    continue
+                cid = _condition_id_of(m)
+                if cid and cid in seen_condition_ids:
+                    continue
+                qn = _question_norm_of(m)
+                if qn and qn in seen_question_norm:
+                    continue
+                by_id[m.id] = m
+                if cid:
+                    seen_condition_ids.add(cid)
+                if qn:
+                    seen_question_norm.add(qn)
+                added += 1
+            if sport_key is not None:
+                per_sport_hits[sport_key]['deduped_polymarket_markets'] += added
+            return added
 
+        def _cached_fetch(search: str | None, offset: int, limit: int) -> list[PolymarketMarket]:
+            key = (search or '', int(offset), int(limit))
+            cached = query_cache.get(key)
+            if cached is not None:
+                return cached
+            items = self.fetch_active_markets(limit=limit, offset=offset, search=search)
+            query_cache[key] = items
+            return items
+
+        # Broad pages (no sport_key context here -> not attributed per sport).
         for page in range(max(1, int(self.cfg.polymarket_broad_pages))):
             try:
-                items = self.fetch_active_markets(limit=broad_limit, offset=page * broad_limit)
+                items = _cached_fetch(None, page * broad_limit, broad_limit)
                 calls += 1
                 broad_raw += len(items)
                 filtered = [m for m in items if _looks_like_sports_market(m)]
@@ -362,60 +419,59 @@ class PolymarketPublicClient:
         for sport_key in events_by_sport.keys():
             for query in SPORT_DISCOVERY_QUERIES.get(sport_key, [])[:4]:
                 try:
-                    items = self.fetch_active_markets(
-                        limit=int(self.cfg.polymarket_search_results_per_query),
-                        offset=0,
-                        search=query,
-                    )
+                    items = _cached_fetch(query, 0, int(self.cfg.polymarket_search_results_per_query))
                     calls += 1
                     league_raw += len(items)
                     per_sport_hits[sport_key]['league_raw'] += len(items)
+                    per_sport_hits[sport_key]['discovery_queries_count'] += 1
+                    per_sport_hits[sport_key]['raw_polymarket_results'] += len(items)
                     filtered = [m for m in items if _looks_like_sports_market(m)]
                     league_kept += len(filtered)
                     per_sport_hits[sport_key]['league_kept'] += len(filtered)
-                    add_many(filtered)
+                    add_many(filtered, sport_key=sport_key)
                 except Exception as exc:
                     log.debug('polymarket league fetch failed sport=%s query=%s err=%s', sport_key, query, exc)
 
-        # A-discovery: query ALL events of each sport, capped per sport (not per slice)
-        # to keep API call volume bounded. The cap default is much higher now (24).
-        _TARGETED_EVENTS_CAP = max(1, int(self.cfg.polymarket_target_events_per_sport))
         for sport_key, sport_events in events_by_sport.items():
-            count_for_sport = 0
-            for event in sport_events:
-                if count_for_sport >= _TARGETED_EVENTS_CAP:
-                    break
-                count_for_sport += 1
+            for event in sport_events[: max(1, int(self.cfg.polymarket_target_events_per_sport))]:
                 targeted_events += 1
                 for query in _event_queries(event):
                     try:
-                        items = self.fetch_active_markets(
-                            limit=int(self.cfg.polymarket_search_results_per_query),
-                            offset=0,
-                            search=query,
-                        )
+                        items = _cached_fetch(query, 0, int(self.cfg.polymarket_search_results_per_query))
                         calls += 1
                         targeted_raw += len(items)
                         per_sport_hits[sport_key]['targeted_raw'] += len(items)
+                        per_sport_hits[sport_key]['discovery_queries_count'] += 1
+                        per_sport_hits[sport_key]['raw_polymarket_results'] += len(items)
                         filtered = [m for m in items if _market_relevant_to_event(event, m)]
                         targeted_kept += len(filtered)
                         per_sport_hits[sport_key]['targeted_kept'] += len(filtered)
-                        add_many(filtered)
+                        # markets_with_both_teams = items that pass the strict
+                        # both-teams relevance filter (validator-independent).
+                        per_sport_hits[sport_key]['markets_with_both_teams'] += len(filtered)
+                        add_many(filtered, sport_key=sport_key)
                     except Exception as exc:
                         log.debug('polymarket targeted fetch failed sport=%s query=%s err=%s', sport_key, query, exc)
+
+        # Expose per-sport discovery counts for main.py to combine with mapper
+        # metrics into the unified discovery_per_sport log. Read-only attribute.
+        self.last_discovery_per_sport = {
+            k: dict(v) for k, v in per_sport_hits.items()
+        }
 
         log.info(
             'polymarket_discovery markets=%s api_calls=%s targeted_events=%s broad_raw=%s broad_kept=%s league_raw=%s league_kept=%s targeted_raw=%s targeted_kept=%s by_sport=%s',
             len(by_id), calls, targeted_events, broad_raw, broad_kept, league_raw, league_kept,
             targeted_raw, targeted_kept, dict(per_sport_hits),
         )
-        # DISCOVERY_WIDEN_V1: per-sport observability (no logic change).
-        for sport_key, hits in per_sport_hits.items():
-            kept_total = int(hits.get('targeted_kept', 0)) + int(hits.get('league_kept', 0))
-            raw_total = int(hits.get('targeted_raw', 0)) + int(hits.get('league_raw', 0))
+        for sk, m in per_sport_hits.items():
             log.info(
-                'polymarket_discovery_per_sport sport=%s raw=%s kept=%s rejected=%s detail=%s',
-                sport_key, raw_total, kept_total, max(0, raw_total - kept_total), dict(hits),
+                'polymarket_discovery_per_sport sport=%s discovery_queries_count=%d raw_polymarket_results=%d deduped_polymarket_markets=%d markets_with_both_teams=%d',
+                sk,
+                int(m.get('discovery_queries_count', 0)),
+                int(m.get('raw_polymarket_results', 0)),
+                int(m.get('deduped_polymarket_markets', 0)),
+                int(m.get('markets_with_both_teams', 0)),
             )
         return list(by_id.values())
 
