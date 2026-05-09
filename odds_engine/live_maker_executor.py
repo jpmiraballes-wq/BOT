@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -109,13 +108,14 @@ class LiveMakerExecutor:
         confirm = os.getenv("LIVE_CONFIRM_TEXT", "").strip()
         if confirm != "I_ACCEPT_REAL_MONEY_RISK":
             raise RuntimeError("LIVE_CONFIRM_TEXT must be exactly I_ACCEPT_REAL_MONEY_RISK")
-        required = ["PRIVATE_KEY", "FUNDER_ADDRESS"]
-        missing = [k for k in required if not os.getenv(k)]
-        if missing:
-            raise RuntimeError("Missing live env vars: " + ", ".join(missing))
-        has_l2 = all(os.getenv(k) for k in ["POLYMARKET_API_KEY", "POLYMARKET_API_SECRET", "POLYMARKET_API_PASSPHRASE"])
-        if not has_l2 and not _bool_env("LIVE_DERIVE_API_CREDS", False):
-            raise RuntimeError("Missing L2 creds. Set POLYMARKET_API_KEY/SECRET/PASSPHRASE or LIVE_DERIVE_API_CREDS=true")
+        if not self.limits.dry_run:
+            required = ["PRIVATE_KEY", "FUNDER_ADDRESS"]
+            missing = [k for k in required if not os.getenv(k)]
+            if missing:
+                raise RuntimeError("Missing live env vars: " + ", ".join(missing))
+            has_l2 = all(os.getenv(k) for k in ["POLYMARKET_API_KEY", "POLYMARKET_API_SECRET", "POLYMARKET_API_PASSPHRASE"])
+            if not has_l2 and not _bool_env("LIVE_DERIVE_API_CREDS", False):
+                raise RuntimeError("Missing L2 creds. Set POLYMARKET_API_KEY/SECRET/PASSPHRASE or LIVE_DERIVE_API_CREDS=true")
         if self.limits.max_order_usd > 5:
             raise RuntimeError("LIVE_MAX_ORDER_USD > 5 blocked in V1")
         if self.limits.max_cycle_notional_usd > 50:
@@ -251,13 +251,13 @@ class LiveMakerExecutor:
 
     def run_once(self) -> dict:
         self._assert_armed()
-        client = self._client()
+        client = None if self.limits.dry_run else self._client()
         orders = self._candidate_orders()
         result: dict[str, Any] = {
             "generated_at": _now_iso(),
             "mode": "LIVE_MAKER_V1",
             "dry_run": self.limits.dry_run,
-            "live_orders_enabled": True,
+            "live_orders_enabled": not self.limits.dry_run,
             "orders_planned": len(orders),
             "orders_submitted": 0,
             "orders_failed": 0,
