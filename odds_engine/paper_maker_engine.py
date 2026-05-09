@@ -59,7 +59,10 @@ class MakerConfig:
     paper_bankroll_usd: float = _float_env('PAPER_MAKER_BANKROLL_USD', 1_000_000.0)
     target_orders_per_day: int = _int_env('PAPER_MAKER_TARGET_ORDERS_PER_DAY', 5_000)
     min_orders_per_cycle: int = _int_env('PAPER_MAKER_MIN_ORDERS_PER_CYCLE', 1_000)
-    max_markets: int = _int_env('PAPER_MAKER_MAX_MARKETS', 80)
+    max_markets: int = _int_env('PAPER_MAKER_MAX_MARKETS', 40)
+    book_fetch_limit: int = _int_env('PAPER_MAKER_BOOK_FETCH_LIMIT', 80)
+    market_fetch_limit: int = _int_env('PAPER_MAKER_MARKET_FETCH_LIMIT', 150)
+    book_timeout_seconds: float = _float_env('PAPER_MAKER_BOOK_TIMEOUT_SECONDS', 2.0)
     quote_levels: int = _int_env('PAPER_MAKER_QUOTE_LEVELS', 6)
     micro_cycles: int = _int_env('PAPER_MAKER_MICRO_CYCLES', 4)
     max_order_size_usd: float = _float_env('PAPER_MAKER_MAX_ORDER_SIZE_USD', 250.0)
@@ -157,7 +160,7 @@ class PaperMakerEngine:
 
     def _fetch_book(self, token_id: str) -> dict | None:
         try:
-            resp = requests.get(f'{self.clob_url}/book', params={'token_id': token_id}, timeout=8)
+            resp = requests.get(f'{self.clob_url}/book', params={'token_id': token_id}, timeout=self.cfg.book_timeout_seconds)
             if resp.status_code >= 400:
                 return None
             data = resp.json()
@@ -189,23 +192,34 @@ class PaperMakerEngine:
         return eligible, min_size, max_spread
 
     def discover_books(self) -> list[BookTop]:
-        markets = self.poly.fetch_active_markets(limit=500, offset=0, search=None)
+        cfg = self.cfg
+        markets = self.poly.fetch_active_markets(limit=cfg.market_fetch_limit, offset=0, search=None)
         candidates: list[BookTop] = []
+        attempted_books = 0
+        target_candidates = max(1, cfg.max_markets)
+        max_attempts = max(target_candidates * 2, cfg.book_fetch_limit)
         for m in markets:
+            if attempted_books >= max_attempts or len(candidates) >= target_candidates:
+                break
             if not m.token_ids:
                 continue
             raw = m.raw_payload or {}
             reward_eligible, min_inc_size, max_inc_spread = self._reward_fields(raw)
             for i, token_id in enumerate(m.token_ids[:2]):
+                if attempted_books >= max_attempts or len(candidates) >= target_candidates:
+                    break
                 if not token_id:
                     continue
+                attempted_books += 1
+                if attempted_books % 20 == 0:
+                    log.info('paper_maker_discovery_progress attempted_books=%s candidates=%s', attempted_books, len(candidates))
                 book = self._fetch_book(str(token_id))
                 if not book:
                     continue
                 bid, ask, mid, spread, last, tick = self._best_levels(book)
                 if mid <= 0 or spread <= 0:
                     continue
-                if spread < self.cfg.min_spread or spread > self.cfg.max_spread:
+                if spread < cfg.min_spread or spread > cfg.max_spread:
                     continue
                 outcome = m.outcomes[i] if i < len(m.outcomes) else ('YES' if i == 0 else 'NO')
                 candidates.append(BookTop(
@@ -216,7 +230,8 @@ class PaperMakerEngine:
                     reward_eligible=reward_eligible, min_incentive_size=min_inc_size, max_incentive_spread=max_inc_spread,
                 ))
         candidates.sort(key=lambda x: (1 if x.reward_eligible else 0, x.liquidity, x.spread), reverse=True)
-        return candidates[: max(1, self.cfg.max_markets)]
+        log.info('paper_maker_discovery_done markets=%s attempted_books=%s candidates=%s', len(markets), attempted_books, len(candidates))
+        return candidates[:target_candidates]
 
     def _round_price(self, price: float, tick: float) -> float:
         tick = tick if tick > 0 else 0.01
@@ -231,7 +246,6 @@ class PaperMakerEngine:
         wobble = (micro % 3) * tick
         offset = (self.cfg.quote_margin_ticks + level) * tick + wobble
         if side == 'BUY':
-            # Join/improve bid but do not cross ask in maker simulation.
             px = min(b.best_bid + tick + wobble, b.midpoint - offset)
             return self._round_price(min(px, b.best_ask - tick), tick)
         px = max(b.best_ask - tick - wobble, b.midpoint + offset)
@@ -255,9 +269,6 @@ class PaperMakerEngine:
         side = q['side']
         price = _float(q['price'])
         shares = _float(q['shares'])
-        size_usd = _float(q.get('size_usd'))
-        # Deterministic fill model: top-of-book/near-touch quotes fill sometimes;
-        # deeper ladder quotes fill rarely. This is PAPER, not a promise of live fills.
         near_touch = (side == 'BUY' and price >= b.best_bid) or (side == 'SELL' and price <= b.best_ask)
         unit = self._stable_unit(f"{q['quote_id']}:{b.best_bid}:{b.best_ask}")
         fill_threshold = 0.18 if near_touch else 0.035
@@ -304,7 +315,20 @@ class PaperMakerEngine:
             return {'mode': 'PAPER_MAKER', 'enabled': False, 'reason': 'PAPER_MAKER_ENABLED=false'}
 
         books = self.discover_books()
-        books_by_token = {b.token_id: b for b in books}
+        if not books:
+            summary = {
+                'mode': 'PAPER_MAKER', 'enabled': True, 'live_orders_enabled': False,
+                'generated_at': _now_iso(), 'runtime_seconds': round(time.time() - started, 3),
+                'paper_bankroll_usd': cfg.paper_bankroll_usd, 'markets_scanned': 0, 'markets_quoted': 0,
+                'orders_simulated_this_cycle': 0, 'cancels_simulated_this_cycle': 0,
+                'fills_simulated_this_cycle': 0, 'orders_simulated_today': int(state.get('day_totals', {}).get('orders_simulated', 0)),
+                'target_orders_per_day': cfg.target_orders_per_day, 'target_progress_pct': 0,
+                'maker_total_pnl_usd': 0, 'inventory_exposure_usd': 0,
+                'error': 'no_orderbooks_available_for_paper_maker',
+            }
+            self._persist_summary(summary)
+            return summary
+
         inv = state.setdefault('inventory', {})
         avg_cost = state.setdefault('avg_cost', {})
         open_quotes = state.setdefault('open_quotes', {})
@@ -315,7 +339,6 @@ class PaperMakerEngine:
         quote_rows: list[dict] = []
         fill_rows: list[dict] = []
 
-        # Cancel previous working quotes: paper maker is intentionally active.
         if open_quotes:
             cancels += len(open_quotes)
             requotes += len(open_quotes)
@@ -331,8 +354,6 @@ class PaperMakerEngine:
                 if current_total_inventory >= cfg.max_total_inventory_usd:
                     continue
                 for level in range(max(1, cfg.quote_levels)):
-                    # Always quote BUY if inventory limit allows; quote SELL when holding inventory,
-                    # and also simulate tiny opposite-side quotes to model two-sided book presence.
                     sides = ['BUY']
                     if _float(inv.get(b.token_id)) > 0 or (level <= 1 and quote_index % 3 == 0):
                         sides.append('SELL')
@@ -346,8 +367,6 @@ class PaperMakerEngine:
                         if side == 'SELL':
                             have = _float(inv.get(b.token_id))
                             if have <= 0:
-                                # Synthetic two-sided presence, tiny sell quote. It can be cancelled,
-                                # but cannot fill without inventory.
                                 size_usd = min(size_usd, cfg.small_order_size_usd)
                             else:
                                 size_usd = min(size_usd, have * price)
@@ -364,7 +383,6 @@ class PaperMakerEngine:
                         quote_rows.append(q)
                         orders += 1
                         per_token_order_counts[b.token_id] = per_token_order_counts.get(b.token_id, 0) + 1
-
                         did_fill, cash, pnl, fill = self._try_virtual_fill(q, b, inv, avg_cost, cash)
                         if did_fill:
                             fills += 1
@@ -373,18 +391,13 @@ class PaperMakerEngine:
                                 fill_rows.append(fill)
                             open_quotes.pop(qid, None)
 
-        # If real books are too few, still reach paper activity target by re-quoting the best books.
-        # This models intra-day cancel/replace churn; it is marked as PAPER_ONLY churn.
         churn_books = books[: max(1, min(len(books), 20))]
-        while books and orders < cfg.min_orders_per_cycle and churn_books:
+        while orders < cfg.min_orders_per_cycle and churn_books:
             b = churn_books[orders % len(churn_books)]
             side = 'BUY' if orders % 2 == 0 else 'SELL'
             level = orders % max(1, cfg.quote_levels)
             price = self._quote_price(b, side, level, orders % max(1, cfg.micro_cycles))
             size_usd = min(cfg.small_order_size_usd, cfg.max_order_size_usd)
-            if side == 'SELL' and _float(inv.get(b.token_id)) <= 0:
-                # no fake fill possible without inventory, but quote/cancel activity is counted.
-                pass
             shares = size_usd / max(price, 0.01)
             qid = f"{b.token_id}:{side}:CHURN:{orders}:{int(time.time())}"
             q = {
@@ -461,6 +474,8 @@ class PaperMakerEngine:
             'min_orders_per_cycle': cfg.min_orders_per_cycle,
             'quote_levels': cfg.quote_levels,
             'micro_cycles': cfg.micro_cycles,
+            'book_fetch_limit': cfg.book_fetch_limit,
+            'market_fetch_limit': cfg.market_fetch_limit,
             'best_markets': market_rows[:20],
             'state_path': str(self.state_path), 'summary_path': str(self.summary_path),
             'paper_only_note': 'High-frequency paper maker simulation. No live orders are sent.',
@@ -483,7 +498,6 @@ class PaperMakerEngine:
             max_spread = _float(r.get('max_incentive_spread')) or self.cfg.max_spread
             if spread <= max_spread:
                 quality += min(1.0, max_spread / max(spread, 0.001))
-        # PAPER estimate only: small credit for eligible tight quoting activity.
         return round(min(250.0, quality * max(1, orders) * 0.0005), 6)
 
     def _persist_summary(self, summary: dict) -> None:
