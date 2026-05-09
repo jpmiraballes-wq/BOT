@@ -48,9 +48,10 @@ class GodModePaperMaker(PaperMakerEngine):
         self.adverse_token_limit = _int_env('PAPER_MAKER_ADVERSE_TOKEN_LIMIT', 30)
         self.adverse_positive_rate_max = _float_env('PAPER_MAKER_ADVERSE_POSITIVE_RATE_MAX', 0.50)
         self.adverse_loss_min_usd = _float_env('PAPER_MAKER_ADVERSE_LOSS_MIN_USD', 0.001)
-        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.025)
-        self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.001)
-        self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.001)
+        # V5 defaults: permit break-even executable fills, not midpoint-only fake fills.
+        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.20)
+        self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.01)
+        self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.0)
         self.filtered_stats: dict[str, int] = {}
         self.blocked_token_shorts: set[str] = set()
         self.strict_fill_rejects: dict[str, int] = {}
@@ -134,8 +135,9 @@ class GodModePaperMaker(PaperMakerEngine):
             price = _float(q['price'])
 
             # Critical realism rule: a simulated fill is not allowed unless the
-            # position could be exited immediately on the executable side with at
-            # least a tiny non-negative edge. This kills midpoint-only fake PnL.
+            # position could be exited immediately on the executable side at
+            # break-even or better. This kills midpoint-only fake PnL while still
+            # allowing real maker-style passive fills.
             if side == 'BUY':
                 executable_exit_edge = b.best_bid - price
                 near_touch = price <= b.best_bid
