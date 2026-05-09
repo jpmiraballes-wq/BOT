@@ -17,7 +17,7 @@ from storage import store
 from base44_client import base44
 from models import BotLog, now_iso, stable_id
 from multi_sport_probe import controlled_sport_keys, new_stats, bump_blocked, probe_payload
-from paper_maker_engine import run_paper_maker_once
+from paper_maker_god import run_paper_maker_once
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('odds_engine')
