@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+
 from config import settings
 
 log = logging.getLogger("live_maker_executor")
