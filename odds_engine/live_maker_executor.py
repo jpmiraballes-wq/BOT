@@ -196,7 +196,15 @@ class LiveMakerExecutor:
                 usd = min(self.limits.max_order_usd, self.limits.max_cycle_notional_usd - cycle_notional)
                 if usd < 0.5:
                     break
+                min_order_shares = _float_env("LIVE_MIN_ORDER_SHARES", 5.0)
+                min_usd_for_shares = price * min_order_shares
+                if usd < min_usd_for_shares:
+                    usd = min_usd_for_shares
+                if cycle_notional + usd > self.limits.max_cycle_notional_usd:
+                    continue
                 size_shares = round(usd / price, 4)
+                if size_shares < min_order_shares:
+                    continue
                 cycle_notional += usd
                 orders.append({
                     "token_id": token_id,
@@ -239,7 +247,7 @@ class LiveMakerExecutor:
             size=order["size_shares"],
             side=side_value,
         )
-        opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=False)
+        opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=None)
         fn = getattr(client, "create_and_post_order", None) or getattr(client, "createAndPostOrder", None)
         if fn:
             try:
