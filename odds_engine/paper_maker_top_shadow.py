@@ -6,6 +6,7 @@ import logging
 from paper_maker_engine import BookTop, MakerConfig
 from paper_maker_god import GodModePaperMaker
 from paper_maker_execution_audit import run_execution_audit
+from paper_maker_queue_audit import run_queue_audit
 from paper_maker_live_shadow import run_live_shadow_audit
 
 log = logging.getLogger('paper_maker_top_shadow')
@@ -58,6 +59,7 @@ class TopNearQuotePaperMaker(GodModePaperMaker):
 def run_top_near_shadow_cycle() -> dict:
     maker = TopNearQuotePaperMaker().run_once()
     execution = run_execution_audit()
+    queue = run_queue_audit()
     shadow = run_live_shadow_audit()
     return {
         'mode': 'V9_1_TOP_NEAR_SHADOW_CYCLE',
@@ -76,6 +78,15 @@ def run_top_near_shadow_cycle() -> dict:
             'verdict': execution.get('verdict'),
             'execution_ok_rate': execution.get('execution_ok_rate'),
             'avg_execution_risk_score': execution.get('avg_execution_risk_score'),
+        },
+        'queue': {
+            'verdict': queue.get('verdict'),
+            'fills_measured_for_queue': queue.get('fills_measured_for_queue'),
+            'quote_at_top_or_better_rate': queue.get('quote_at_top_or_better_rate'),
+            'fill_at_top_or_better_rate': queue.get('fill_at_top_or_better_rate'),
+            'quote_queue_risk_rate': queue.get('quote_queue_risk_rate'),
+            'fill_queue_risk_rate': queue.get('fill_queue_risk_rate'),
+            'queue_adjusted_executable_markout_usd': queue.get('queue_adjusted_executable_markout_usd'),
         },
         'live_shadow_v9': {
             'verdict': shadow.get('verdict'),
