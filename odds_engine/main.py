@@ -379,6 +379,17 @@ def run_once() -> dict:
     runtime = replace(runtime, odds_sport_keys=controlled_sport_keys(runtime.odds_sport_keys))
     log.info('starting odds_engine run_once mode=%s sports=%s base44_write=%s', runtime.bot_mode, runtime.odds_sport_keys, settings.base44_write_enabled)
 
+    # PAPER_MAKER is the priority path. Run it first so the dashboard gets a fast
+    # high-frequency maker snapshot before the slower value/discovery scan.
+    maker_summary = _run_paper_maker_safely()
+    log.info(
+        'paper_maker_first orders_today=%s fills_today=%s open_quotes=%s pnl=%s',
+        maker_summary.get('orders_simulated_today'),
+        maker_summary.get('fills_simulated_today'),
+        maker_summary.get('open_quotes'),
+        maker_summary.get('maker_total_pnl_usd'),
+    )
+
     odds_client = OddsApiClient(runtime)
     poly_client = PolymarketPublicClient(runtime)
     risk = RiskManager(runtime)
@@ -526,7 +537,6 @@ def run_once() -> dict:
     money_hunter_status, next_action = _money_hunter_decision(stats_by_sport, signals_count, approved_count, paper_count, test_paper_count, blocked_global)
     summary['money_hunter_status'] = money_hunter_status
     summary['next_action'] = next_action
-    maker_summary = _run_paper_maker_safely()
     summary['paper_maker'] = {
         'enabled': maker_summary.get('enabled'),
         'orders_today': maker_summary.get('orders_simulated_today'),
