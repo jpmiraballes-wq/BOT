@@ -78,6 +78,7 @@ class LiveLimits:
     cycle_seconds: float
     cancel_before_post: bool
     dry_run: bool
+    allow_sell: bool
 
 
 class LiveMakerExecutor:
@@ -105,6 +106,7 @@ class LiveMakerExecutor:
             cycle_seconds=_float_env("LIVE_CYCLE_SECONDS", 2.0),
             cancel_before_post=_bool_env("LIVE_CANCEL_BEFORE_POST", True),
             dry_run=_bool_env("LIVE_DRY_RUN", False),
+            allow_sell=_bool_env("LIVE_ALLOW_SELL", False),
         )
 
     def _assert_armed(self) -> None:
@@ -172,6 +174,9 @@ class LiveMakerExecutor:
         orders: list[dict] = []
         seen_markets = set()
         cycle_notional = 0.0
+        sides = [("BUY", "bid_quote")]
+        if self.limits.allow_sell:
+            sides.append(("SELL", "ask_quote"))
         for r in rows:
             if len(seen_markets) >= self.limits.max_markets:
                 break
@@ -180,7 +185,7 @@ class LiveMakerExecutor:
             if not token_id:
                 continue
             seen_markets.add(str(r.get("question") or r.get("token_id_short") or token_id[:10]))
-            for side, px_key in [("BUY", "bid_quote"), ("SELL", "ask_quote")]:
+            for side, px_key in sides:
                 price = round(_float(r.get(px_key)), 4)
                 if price <= 0.01 or price >= 0.99:
                     continue
@@ -268,6 +273,7 @@ class LiveMakerExecutor:
             "orders_failed": 0,
             "max_order_usd": self.limits.max_order_usd,
             "max_cycle_notional_usd": self.limits.max_cycle_notional_usd,
+            "allow_sell": self.limits.allow_sell,
             "planned_notional_usd": round(sum(_float(o.get("size_usd")) for o in orders), 6),
             "cancel_before_post": self.limits.cancel_before_post,
             "cancel_result": None,
@@ -287,7 +293,7 @@ class LiveMakerExecutor:
             result["orders"].append(row)
             _append_jsonl(self.live_log_path, row)
         self.live_summary_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-        log.info("live_maker_v1 planned=%s submitted=%s failed=%s notional=%.4f dry_run=%s", result["orders_planned"], result["orders_submitted"], result["orders_failed"], result["planned_notional_usd"], result["dry_run"])
+        log.info("live_maker_v1 planned=%s submitted=%s failed=%s notional=%.4f dry_run=%s allow_sell=%s", result["orders_planned"], result["orders_submitted"], result["orders_failed"], result["planned_notional_usd"], result["dry_run"], result["allow_sell"])
         return result
 
 
