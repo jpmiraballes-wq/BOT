@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from config import settings
-from paper_maker_engine import BookTop, MakerConfig, PaperMakerEngine, _float
+from paper_maker_engine import BookTop, MakerConfig, PaperMakerEngine, _float, _now_iso
 from paper_maker_markout import run_markout_audit
 
 log = logging.getLogger('paper_maker_god')
@@ -37,16 +37,16 @@ def _int_env(name: str, default: int) -> int:
 class GodModePaperMaker(PaperMakerEngine):
     """Strict paper maker wrapper focused on executable markout quality.
 
-    V6 goal: keep quote/cancel/order volume high, but make fills small and
-    conservative. The previous wrapper still inherited large block fills from the
-    base simulator, which made raw PnL look good while strict executable markout
-    exposed adverse selection.
+    The base simulator is allowed to create lots of quotes. God mode owns the
+    fill model, because strict executable markout needs small fills that already
+    have an exit-side cushion. Do not delegate accepted strict fills back to the
+    base fill model; the base model uses a different near-touch definition and
+    can reject already-approved strict fills.
     """
 
     def __init__(self, cfg: MakerConfig | None = None) -> None:
         super().__init__(cfg)
         self.strict_mode = _bool_env('PAPER_MAKER_GOD_MODE', True)
-        # V6: tighter executable books only. Wider spreads produce midpoint PnL illusions.
         self.max_executable_spread = _float_env('PAPER_MAKER_MAX_EXECUTABLE_SPREAD', 0.025)
         self.min_best_bid = _float_env('PAPER_MAKER_MIN_BEST_BID', 0.025)
         self.min_best_ask = _float_env('PAPER_MAKER_MIN_BEST_ASK', 0.035)
@@ -55,11 +55,10 @@ class GodModePaperMaker(PaperMakerEngine):
         self.adverse_token_limit = _int_env('PAPER_MAKER_ADVERSE_TOKEN_LIMIT', 50)
         self.adverse_positive_rate_max = _float_env('PAPER_MAKER_ADVERSE_POSITIVE_RATE_MAX', 0.60)
         self.adverse_loss_min_usd = _float_env('PAPER_MAKER_ADVERSE_LOSS_MIN_USD', 0.25)
-        # V6: fewer fills, but no toxic block fills. Quotes can stay high-volume.
-        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.04)
+        # V6.1: keep toxic fills dead, but allow a measurable sample of small strict fills.
+        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.12)
         self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.0)
-        # Require at least half-cent executable edge before accepting a simulated fill.
-        self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.005)
+        self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.002)
         self.strict_max_order_size_usd = _float_env('PAPER_MAKER_STRICT_MAX_ORDER_SIZE_USD', 10.0)
         self.strict_level0_order_size_usd = _float_env('PAPER_MAKER_STRICT_LEVEL0_ORDER_SIZE_USD', 5.0)
         self.filtered_stats: dict[str, int] = {}
@@ -135,8 +134,6 @@ class GodModePaperMaker(PaperMakerEngine):
     def _order_size(self, quote_index: int, level: int) -> float:
         if not self.strict_mode:
             return super()._order_size(quote_index, level)
-        # No simulated whale/block fills in strict paper mode. We still place many
-        # quotes, but fills must be small enough for markout to be meaningful.
         if level == 0:
             return min(self.strict_level0_order_size_usd, self.strict_max_order_size_usd)
         return min(self.strict_max_order_size_usd, max(1.0, 2.0 + level * 0.75))
@@ -144,45 +141,105 @@ class GodModePaperMaker(PaperMakerEngine):
     def _reject_fill(self, reason: str):
         self.strict_fill_rejects[reason] = self.strict_fill_rejects.get(reason, 0) + 1
 
+    def _strict_fill_fraction(self, unit: float, threshold: float) -> float:
+        if threshold <= 0:
+            return 0.0
+        # Small partial fills only. This keeps notional realistic and prevents one
+        # bad synthetic fill from dominating the sample.
+        return min(0.45, max(0.08, 0.08 + (unit / threshold) * 0.22))
+
+    def _apply_strict_fill(self, q: dict, b: BookTop, inv: dict, avg_cost: dict, cash: float, unit: float, threshold: float):
+        side = q['side']
+        price = _float(q['price'])
+        shares = _float(q.get('shares'))
+        size_usd = min(_float(q.get('size_usd')) or shares * price, self.strict_max_order_size_usd)
+        max_shares = size_usd / max(price, 0.01)
+        fill_shares = min(shares, max_shares) * self._strict_fill_fraction(unit, threshold)
+        if fill_shares <= 0:
+            return False, cash, 0.0, None
+
+        pnl = 0.0
+        token = q['token_id']
+        if side == 'BUY':
+            cost = fill_shares * price
+            if cash < cost:
+                self._reject_fill('reject_insufficient_paper_cash')
+                return False, cash, 0.0, None
+            old_shares = _float(inv.get(token))
+            old_avg = _float(avg_cost.get(token))
+            new_shares = old_shares + fill_shares
+            avg_cost[token] = ((old_shares * old_avg) + cost) / new_shares if new_shares > 0 else 0.0
+            inv[token] = new_shares
+            cash -= cost
+        else:
+            have = _float(inv.get(token))
+            fill_shares = min(have, fill_shares)
+            if fill_shares <= 0:
+                self._reject_fill('reject_no_inventory_to_sell')
+                return False, cash, 0.0, None
+            proceeds = fill_shares * price
+            pnl = proceeds - (fill_shares * _float(avg_cost.get(token)))
+            inv[token] = max(0.0, have - fill_shares)
+            cash += proceeds
+
+        fill = {
+            'filled_at': _now_iso(),
+            'quote_id': q['quote_id'],
+            'token_id': token,
+            'token_id_short': token[:10],
+            'market_id': q['market_id'],
+            'side': side,
+            'price': round(price, 6),
+            'shares': round(fill_shares, 6),
+            'notional_usd': round(fill_shares * price, 6),
+            'realized_pnl_usd': round(pnl, 6),
+            'paper_only': True,
+            'strict_god_fill': True,
+            'strict_fill_model': 'v6_1_direct',
+        }
+        return True, cash, pnl, fill
+
     def _try_virtual_fill(self, q: dict, b: BookTop, inv: dict, avg_cost: dict, cash: float):
-        if self.strict_mode:
-            reason = self._quality_reason(b)
-            if reason:
-                self._reject_fill(reason)
-                return False, cash, 0.0, None
-            side = q['side']
-            price = _float(q['price'])
-            size_usd = _float(q.get('size_usd')) or (_float(q.get('shares')) * price)
-            if size_usd > self.strict_max_order_size_usd:
-                self._reject_fill('reject_strict_order_size_too_large')
-                return False, cash, 0.0, None
+        if not self.strict_mode:
+            return super()._try_virtual_fill(q, b, inv, avg_cost, cash)
 
-            # Critical realism rule: a simulated fill is not allowed unless the
-            # position could be exited immediately on the executable side with a
-            # positive cushion. This kills midpoint-only fake PnL.
-            if side == 'BUY':
-                executable_exit_edge = b.best_bid - price
-                near_touch = price <= b.best_bid
-            else:
-                executable_exit_edge = price - b.best_ask
-                near_touch = price >= b.best_ask
-            if executable_exit_edge < self.min_exit_edge_ticks:
-                self._reject_fill('reject_no_immediate_executable_exit_edge')
-                return False, cash, 0.0, None
-            if not near_touch:
-                self._reject_fill('reject_far_from_executable_touch')
-                return False, cash, 0.0, None
+        reason = self._quality_reason(b)
+        if reason:
+            self._reject_fill(reason)
+            return False, cash, 0.0, None
 
-            unit = self._stable_unit(f"STRICT6:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}:{price}:{size_usd}")
-            threshold = self.strict_fill_threshold_near
-            if b.spread > 0.015:
-                threshold *= 0.50
-            if b.best_bid < 0.06 or b.best_ask > 0.94:
-                threshold *= 0.35
-            if unit > threshold:
-                self._reject_fill('reject_fill_probability')
-                return False, cash, 0.0, None
-        return super()._try_virtual_fill(q, b, inv, avg_cost, cash)
+        side = q['side']
+        price = _float(q['price'])
+        size_usd = _float(q.get('size_usd')) or (_float(q.get('shares')) * price)
+        if size_usd > self.strict_max_order_size_usd:
+            self._reject_fill('reject_strict_order_size_too_large')
+            return False, cash, 0.0, None
+
+        if side == 'BUY':
+            executable_exit_edge = b.best_bid - price
+            near_touch = price <= b.best_bid
+        else:
+            executable_exit_edge = price - b.best_ask
+            near_touch = price >= b.best_ask
+
+        if executable_exit_edge < self.min_exit_edge_ticks:
+            self._reject_fill('reject_no_immediate_executable_exit_edge')
+            return False, cash, 0.0, None
+        if not near_touch:
+            self._reject_fill('reject_far_from_executable_touch')
+            return False, cash, 0.0, None
+
+        unit = self._stable_unit(f"STRICT6_1:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}:{price}:{size_usd}")
+        threshold = self.strict_fill_threshold_near
+        if b.spread > 0.015:
+            threshold *= 0.50
+        if b.best_bid < 0.06 or b.best_ask > 0.94:
+            threshold *= 0.35
+        if unit > threshold:
+            self._reject_fill('reject_fill_probability')
+            return False, cash, 0.0, None
+
+        return self._apply_strict_fill(q, b, inv, avg_cost, cash, unit, threshold)
 
     def run_once(self) -> dict:
         summary = super().run_once()
@@ -192,6 +249,7 @@ class GodModePaperMaker(PaperMakerEngine):
             summary['strict_fill_rejects'] = dict(self.strict_fill_rejects)
             summary['blocked_adverse_token_shorts'] = sorted(self.blocked_token_shorts)[:50]
             summary['strict_v6_controls'] = {
+                'fill_model': 'v6_1_direct_strict_fill_no_base_recheck',
                 'max_executable_spread': self.max_executable_spread,
                 'min_liquidity': self.min_liquidity,
                 'min_exit_edge_ticks': self.min_exit_edge_ticks,
