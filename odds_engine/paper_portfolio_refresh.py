@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -77,12 +78,69 @@ def _duplicate_count(rows: list[dict[str, Any]], trade_id: str) -> int:
     return sum(1 for row in rows if str(row.get('id') or '') == trade_id)
 
 
+def _duplicate_open_token_count(open_trades: list[dict[str, Any]]) -> int:
+    """Count token/side buckets that still have more than one open position."""
+    by_token_side: dict[tuple[str, str], int] = defaultdict(int)
+    for row in open_trades:
+        token_id = str(row.get('token_id') or '').strip()
+        side = str(row.get('side') or 'YES').strip().upper()
+        if token_id:
+            by_token_side[(token_id, side)] += 1
+    return sum(1 for count in by_token_side.values() if count > 1)
+
+
+def _snapshot_payload(summary: dict[str, Any]) -> dict[str, Any]:
+    counts = summary.get('counts') or {}
+    portfolio = summary.get('portfolio') or {}
+    positions = summary.get('positions') or []
+    return {
+        'generated_at': summary.get('generated_at'),
+        'mode': 'PAPER',
+        'paper_active': True,
+        'status': 'active',
+        'open_positions': counts.get('open_unique_positions', 0),
+        'total_exposure_usd': portfolio.get('total_exposure_usd', 0.0),
+        'total_unrealized_pnl_usd': portfolio.get('total_unrealized_pnl_usd', 0.0),
+        'total_unrealized_pnl_pct': portfolio.get('total_unrealized_pnl_pct_on_exposure', 0.0),
+        'duplicate_open_tokens': counts.get('duplicate_open_tokens', 0),
+        'positions': positions,
+    }
+
+
+def _publish_snapshot_to_base44(summary: dict[str, Any], cfg: Settings) -> None:
+    """Best-effort publish of the portfolio snapshot for the Base44 dashboard.
+
+    Base44 cannot read paper_portfolio_summary.json from the local Mac, so the
+    worker posts one PaperPortfolioSnapshot entity after each local refresh.
+    This never creates trades and never raises into the trading loop.
+    """
+    if not getattr(cfg, 'base44_write_enabled', False):
+        return
+    try:
+        from base44_client import base44
+        payload = _snapshot_payload(summary)
+        result = base44.post_record('PaperPortfolioSnapshot', payload)
+        if result is not None:
+            log.info(
+                'paper_portfolio_snapshot_posted open_positions=%s exposure=%s pnl_usd=%s duplicate_open_tokens=%s generated_at=%s',
+                payload.get('open_positions'),
+                payload.get('total_exposure_usd'),
+                payload.get('total_unrealized_pnl_usd'),
+                payload.get('duplicate_open_tokens'),
+                payload.get('generated_at'),
+            )
+        else:
+            log.info('paper_portfolio_snapshot_post_skipped_or_failed generated_at=%s', payload.get('generated_at'))
+    except Exception as exc:
+        log.exception('paper_portfolio_snapshot_post_failed err=%s', exc)
+
+
 def refresh_paper_portfolio(cfg: Settings | None = None) -> dict[str, Any]:
     """Mark all open paper trades and regenerate paper_portfolio_summary.json.
 
-    This is intentionally local-file only. It never creates trades, never changes
-    risk, and never touches Base44. It just keeps the paper portfolio current
-    immediately after a papertrade.jsonl write.
+    This updates the local paper portfolio and best-effort publishes a
+    PaperPortfolioSnapshot record to Base44 so the dashboard can read the same
+    calculated marks/PnL without inventing data client-side.
     """
     cfg = cfg or default_settings
     data_dir = cfg.data_dir
@@ -94,6 +152,7 @@ def refresh_paper_portfolio(cfg: Settings | None = None) -> dict[str, Any]:
 
     trade_rows = _load_jsonl(trades_path)
     open_trades = _open_unique_trades(trade_rows)
+    duplicate_open_tokens = _duplicate_open_token_count(open_trades)
     marked_at = _utc_now()
     marks: list[dict[str, Any]] = []
     ok = 0
@@ -119,6 +178,7 @@ def refresh_paper_portfolio(cfg: Settings | None = None) -> dict[str, Any]:
             'external_event_id': trade.get('external_event_id'),
             'polymarket_market_id': trade.get('polymarket_market_id'),
             'token_id': token_id,
+            'token_id_short': token_id[:10],
             'side': trade.get('side') or 'YES',
             'status': 'open_marked',
             'entry_price': entry,
@@ -157,6 +217,7 @@ def refresh_paper_portfolio(cfg: Settings | None = None) -> dict[str, Any]:
             'raw_mark_rows': len(_load_jsonl(marks_path)),
             'open_unique_positions': len(open_trades),
             'duplicate_open_rows_extra': max(0, len([r for r in trade_rows if str(r.get('status') or '').lower() == 'open']) - len(open_trades)),
+            'duplicate_open_tokens': duplicate_open_tokens,
         },
         'portfolio': {
             'total_exposure_usd': total_exposure,
@@ -168,8 +229,9 @@ def refresh_paper_portfolio(cfg: Settings | None = None) -> dict[str, Any]:
         'positions': positions,
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    _publish_snapshot_to_base44(summary, cfg)
     log.info(
-        'paper_portfolio_refresh_complete open_unique=%s marks=%s ok=%s failed=%s summary_path=%s marks_path=%s',
-        len(open_trades), len(marks), ok, failed, summary_path, marks_path,
+        'paper_portfolio_refresh_complete open_unique=%s marks=%s ok=%s failed=%s duplicate_open_tokens=%s summary_path=%s marks_path=%s',
+        len(open_trades), len(marks), ok, failed, duplicate_open_tokens, summary_path, marks_path,
     )
     return summary
