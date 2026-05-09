@@ -47,11 +47,13 @@ class GodModePaperMaker(PaperMakerEngine):
         self.reject_high_yes_no_extreme = _bool_env('PAPER_MAKER_REJECT_EXTREME_99C', True)
         self.adverse_token_limit = _int_env('PAPER_MAKER_ADVERSE_TOKEN_LIMIT', 30)
         self.adverse_positive_rate_max = _float_env('PAPER_MAKER_ADVERSE_POSITIVE_RATE_MAX', 0.50)
-        self.adverse_loss_min_usd = _float_env('PAPER_MAKER_ADVERSE_LOSS_MIN_USD', 0.05)
-        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.035)
-        self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.003)
+        self.adverse_loss_min_usd = _float_env('PAPER_MAKER_ADVERSE_LOSS_MIN_USD', 0.001)
+        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.025)
+        self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.001)
+        self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.001)
         self.filtered_stats: dict[str, int] = {}
         self.blocked_token_shorts: set[str] = set()
+        self.strict_fill_rejects: dict[str, int] = {}
 
     def _load_latest_markout(self) -> dict[str, Any]:
         path = Path(settings.data_dir) / 'paper_maker_markout.json'
@@ -72,8 +74,6 @@ class GodModePaperMaker(PaperMakerEngine):
             token = str(row.get('token') or '').strip()
             exec_loss = _float(row.get('executable_markout_usd'))
             positive_rate = _float(row.get('positive_rate'))
-            # God mode learns fast: even small negative executable markout matters,
-            # because the whole point is to avoid midpoint-profitable but unexit-able fills.
             if token and exec_loss <= -abs(self.adverse_loss_min_usd) and positive_rate <= self.adverse_positive_rate_max:
                 blocked.add(token)
         return blocked
@@ -119,27 +119,41 @@ class GodModePaperMaker(PaperMakerEngine):
         stats['kept'] = len(kept)
         self.filtered_stats = stats
         log.info('paper_maker_god_filter %s', stats)
-        # No dirty fallback that reintroduces adverse/penny traps. If too few
-        # markets pass strict mode, that is a useful signal.
         return kept
+
+    def _reject_fill(self, reason: str):
+        self.strict_fill_rejects[reason] = self.strict_fill_rejects.get(reason, 0) + 1
 
     def _try_virtual_fill(self, q: dict, b: BookTop, inv: dict, avg_cost: dict, cash: float):
         if self.strict_mode:
             reason = self._quality_reason(b)
             if reason:
+                self._reject_fill(reason)
                 return False, cash, 0.0, None
             side = q['side']
             price = _float(q['price'])
-            # Stricter fill realism: paper fills only get easy when quoting at the
-            # executable touch. Midpoint-only edge is not enough.
-            near_touch = (side == 'BUY' and price >= b.best_bid) or (side == 'SELL' and price <= b.best_ask)
-            unit = self._stable_unit(f"STRICT2:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}")
+
+            # Critical realism rule: a simulated fill is not allowed unless the
+            # position could be exited immediately on the executable side with at
+            # least a tiny non-negative edge. This kills midpoint-only fake PnL.
+            if side == 'BUY':
+                executable_exit_edge = b.best_bid - price
+                near_touch = price <= b.best_bid
+            else:
+                executable_exit_edge = price - b.best_ask
+                near_touch = price >= b.best_ask
+            if executable_exit_edge < self.min_exit_edge_ticks:
+                self._reject_fill('reject_no_immediate_executable_exit_edge')
+                return False, cash, 0.0, None
+
+            unit = self._stable_unit(f"STRICT3:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}:{price}")
             threshold = self.strict_fill_threshold_near if near_touch else self.strict_fill_threshold_far
             if b.spread > 0.03:
-                threshold *= 0.40
+                threshold *= 0.35
             if b.best_bid < 0.04 or b.best_ask > 0.96:
-                threshold *= 0.50
+                threshold *= 0.40
             if unit > threshold:
+                self._reject_fill('reject_fill_probability')
                 return False, cash, 0.0, None
         return super()._try_virtual_fill(q, b, inv, avg_cost, cash)
 
@@ -148,6 +162,7 @@ class GodModePaperMaker(PaperMakerEngine):
         if isinstance(summary, dict):
             summary['god_mode_enabled'] = bool(self.strict_mode)
             summary['strict_quality_filter'] = dict(self.filtered_stats)
+            summary['strict_fill_rejects'] = dict(self.strict_fill_rejects)
             summary['blocked_adverse_token_shorts'] = sorted(self.blocked_token_shorts)[:50]
             self._persist_summary(summary)
         try:
