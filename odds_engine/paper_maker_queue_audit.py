@@ -69,10 +69,10 @@ def _read_jsonl_tail(path: Path, limit: int) -> list[dict]:
 
 
 def _book_levels(book: dict, side: str) -> list[dict]:
+    levels = book.get('bids') if side == 'BUY' else book.get('asks')
+    levels = levels or []
     if side == 'BUY':
-        levels = book.get('bids') or []
         return sorted([x for x in levels if isinstance(x, dict)], key=lambda x: _float(x.get('price')), reverse=True)
-    levels = book.get('asks') or []
     return sorted([x for x in levels if isinstance(x, dict)], key=lambda x: _float(x.get('price')))
 
 
@@ -89,11 +89,16 @@ def _best_bid_ask(book: dict) -> tuple[float, float, float]:
     return bid, ask, spread
 
 
+def _safe_rate(num: float, den: float) -> float:
+    return num / den if den else 0.0
+
+
 class QueuePartialFillAuditor:
     """Paper-only queue and partial-fill realism auditor.
 
-    This does not send orders. It estimates whether our paper quotes/fills are
-    plausible after accounting for visible top-of-book depth and queue pressure.
+    V8.1 separates quote realism from fill realism. Quote risk can be high for
+    deep passive churn levels, but the critical test is whether actual simulated
+    fills look plausible after visible queue/depth pressure.
     """
 
     def __init__(self) -> None:
@@ -108,7 +113,7 @@ class QueuePartialFillAuditor:
         self.clob_url = settings.polymarket_clob_url.rstrip('/')
         self.quote_tail = _int_env('PAPER_MAKER_QUEUE_AUDIT_QUOTE_TAIL', 1500)
         self.fill_tail = _int_env('PAPER_MAKER_QUEUE_AUDIT_FILL_TAIL', 1500)
-        self.max_tokens = _int_env('PAPER_MAKER_QUEUE_AUDIT_MAX_TOKENS', 80)
+        self.max_tokens = _int_env('PAPER_MAKER_QUEUE_AUDIT_MAX_TOKENS', 100)
         self.timeout = _float_env('PAPER_MAKER_QUEUE_AUDIT_BOOK_TIMEOUT', 2.0)
         self.max_queue_notional_ok = _float_env('PAPER_MAKER_QUEUE_MAX_NOTIONAL_OK', 75.0)
         self.max_queue_multiple_ok = _float_env('PAPER_MAKER_QUEUE_MAX_MULTIPLE_OK', 12.0)
@@ -125,20 +130,22 @@ class QueuePartialFillAuditor:
         except Exception:
             return None
 
-    def _quote_queue_row(self, quote: dict, book: dict | None) -> dict:
-        token_short = quote.get('token_id_short') or str(quote.get('token_id', ''))[:10]
-        side = str(quote.get('side') or '').upper()
-        price = _float(quote.get('price'))
-        size_usd = _float(quote.get('size_usd')) or (_float(quote.get('shares')) * max(price, 0.01))
-        age = max(0.0, time.time() - _parse_ts(quote.get('created_at')))
+    def _queue_row(self, obj: dict, book: dict | None, kind: str) -> dict:
+        token_short = obj.get('token_id_short') or str(obj.get('token_id', ''))[:10]
+        side = str(obj.get('side') or '').upper()
+        price = _float(obj.get('price') if obj.get('price') is not None else obj.get('fill_price'))
+        size_usd = _float(obj.get('size_usd')) or _float(obj.get('notional_usd')) or (_float(obj.get('shares')) * max(price, 0.01))
+        ts_key = 'filled_at' if kind == 'fill' else 'created_at'
+        age = max(0.0, time.time() - _parse_ts(obj.get(ts_key)))
         row: dict[str, Any] = {
-            'quote_id': quote.get('quote_id'),
+            'kind': kind,
+            'quote_id': obj.get('quote_id'),
             'token_id_short': token_short,
-            'market_id': quote.get('market_id'),
+            'market_id': obj.get('market_id'),
             'side': side,
-            'quote_price': round(price, 6),
-            'quote_size_usd': round(size_usd, 6),
-            'quote_age_seconds': round(age, 2),
+            'price': round(price, 6),
+            'size_usd': round(size_usd, 6),
+            'age_seconds': round(age, 2),
             'book_available': bool(book),
         }
         if not book or side not in {'BUY', 'SELL'} or price <= 0:
@@ -165,8 +172,7 @@ class QueuePartialFillAuditor:
         queue_ahead_shares = better_shares + same_level_shares
         queue_ahead_notional = queue_ahead_shares * price
         queue_multiple = queue_ahead_notional / max(size_usd, 0.01)
-        visible_partial_fill_rate = min(1.0, shares / max(queue_ahead_shares + shares, 1e-9))
-        at_top = False
+        visible_partial = min(1.0, shares / max(queue_ahead_shares + shares, 1e-9))
         if side == 'BUY':
             at_top = abs(price - best_bid) < 1e-9 or price > best_bid
             executable_edge = best_bid - price
@@ -180,7 +186,7 @@ class QueuePartialFillAuditor:
             risk += 20
         if queue_multiple > self.max_queue_multiple_ok:
             risk += 20
-        if visible_partial_fill_rate < self.min_partial_fill_rate_ok:
+        if visible_partial < self.min_partial_fill_rate_ok:
             risk += 20
         if spread > 0.025:
             risk += 10
@@ -202,10 +208,61 @@ class QueuePartialFillAuditor:
             'at_top_or_better': at_top,
             'executable_edge': round(executable_edge, 6),
             'queue_ahead_notional_usd': round(queue_ahead_notional, 6),
-            'queue_multiple_of_quote': round(queue_multiple, 6),
-            'visible_partial_fill_rate_estimate': round(visible_partial_fill_rate, 6),
+            'queue_multiple_of_order': round(queue_multiple, 6),
+            'visible_partial_fill_rate_estimate': round(visible_partial, 6),
         })
         return row
+
+    def _summarize_rows(self, rows: list[dict]) -> dict:
+        total = len(rows)
+        ok = sum(1 for r in rows if r.get('queue_status') == 'QUEUE_REALISM_OK')
+        watch = sum(1 for r in rows if r.get('queue_status') == 'QUEUE_REALISM_WATCH')
+        risk = sum(1 for r in rows if r.get('queue_status') == 'QUEUE_REALISM_RISK')
+        unavailable = sum(1 for r in rows if r.get('queue_status') == 'BOOK_UNAVAILABLE')
+        return {
+            'measured': total,
+            'ok': ok,
+            'watch': watch,
+            'risk': risk,
+            'unavailable': unavailable,
+            'ok_rate': round(_safe_rate(ok, total), 6),
+            'watch_rate': round(_safe_rate(watch, total), 6),
+            'risk_rate': round(_safe_rate(risk, total), 6),
+            'avg_risk_score': round(sum(_float(r.get('queue_risk_score')) for r in rows) / max(1, total), 4),
+            'avg_queue_ahead_notional_usd': round(sum(_float(r.get('queue_ahead_notional_usd')) for r in rows) / max(1, total), 6),
+            'avg_visible_partial_fill_rate_estimate': round(sum(_float(r.get('visible_partial_fill_rate_estimate')) for r in rows) / max(1, total), 6),
+            'at_top_or_better_rate': round(_safe_rate(sum(1 for r in rows if r.get('at_top_or_better')), total), 6),
+        }
+
+    def _token_summary(self, rows: list[dict]) -> list[dict]:
+        by_token = defaultdict(lambda: {'n': 0, 'risk_sum': 0.0, 'ok': 0, 'watch': 0, 'risk': 0, 'queue': 0.0, 'partial': 0.0})
+        for r in rows:
+            t = str(r.get('token_id_short') or '')
+            by_token[t]['n'] += 1
+            by_token[t]['risk_sum'] += _float(r.get('queue_risk_score'))
+            by_token[t]['queue'] += _float(r.get('queue_ahead_notional_usd'))
+            by_token[t]['partial'] += _float(r.get('visible_partial_fill_rate_estimate'))
+            if r.get('queue_status') == 'QUEUE_REALISM_OK':
+                by_token[t]['ok'] += 1
+            elif r.get('queue_status') == 'QUEUE_REALISM_WATCH':
+                by_token[t]['watch'] += 1
+            elif r.get('queue_status') == 'QUEUE_REALISM_RISK':
+                by_token[t]['risk'] += 1
+        out = []
+        for token, v in by_token.items():
+            n = max(1, int(v['n']))
+            out.append({
+                'token': token,
+                'rows': int(v['n']),
+                'avg_queue_risk_score': round(v['risk_sum'] / n, 4),
+                'ok_rate': round(v['ok'] / n, 6),
+                'watch_rate': round(v['watch'] / n, 6),
+                'risk_rate': round(v['risk'] / n, 6),
+                'avg_queue_ahead_notional_usd': round(v['queue'] / n, 6),
+                'avg_partial_fill_rate_estimate': round(v['partial'] / n, 6),
+            })
+        out.sort(key=lambda x: (x['avg_queue_risk_score'], -x['rows']), reverse=True)
+        return out[:20]
 
     def run(self) -> dict:
         quotes = _read_jsonl_tail(self.quotes_path, self.quote_tail)
@@ -220,102 +277,77 @@ class QueuePartialFillAuditor:
                 except Exception:
                     pass
         token_ids: list[str] = []
-        for q in reversed(quotes):
-            token = str(q.get('token_id') or '')
-            if token and token not in token_ids:
-                token_ids.append(token)
+        for source in (reversed(fills), reversed(quotes)):
+            for row in source:
+                token = str(row.get('token_id') or '')
+                if token and token not in token_ids:
+                    token_ids.append(token)
+                if len(token_ids) >= self.max_tokens:
+                    break
             if len(token_ids) >= self.max_tokens:
                 break
         books = {t: self._fetch_book(t) for t in token_ids}
-        rows = [self._quote_queue_row(q, books.get(str(q.get('token_id') or ''))) for q in quotes[-500:]]
-        total = len(rows)
-        ok = sum(1 for r in rows if r.get('queue_status') == 'QUEUE_REALISM_OK')
-        watch = sum(1 for r in rows if r.get('queue_status') == 'QUEUE_REALISM_WATCH')
-        risk = sum(1 for r in rows if r.get('queue_status') == 'QUEUE_REALISM_RISK')
-        unavailable = sum(1 for r in rows if r.get('queue_status') == 'BOOK_UNAVAILABLE')
-        avg_risk = sum(_float(r.get('queue_risk_score')) for r in rows) / max(1, total)
-        ok_rate = ok / max(1, total)
-        watch_rate = watch / max(1, total)
-        risk_rate = risk / max(1, total)
-        avg_queue_notional = sum(_float(r.get('queue_ahead_notional_usd')) for r in rows) / max(1, total)
-        avg_partial = sum(_float(r.get('visible_partial_fill_rate_estimate')) for r in rows) / max(1, total)
-        at_top_rate = sum(1 for r in rows if r.get('at_top_or_better')) / max(1, total)
+        quote_rows = [self._queue_row(q, books.get(str(q.get('token_id') or '')), 'quote') for q in quotes[-500:]]
+        fill_rows = [self._queue_row(f, books.get(str(f.get('token_id') or '')), 'fill') for f in fills[-500:]]
+        quote_stats = self._summarize_rows(quote_rows)
+        fill_stats = self._summarize_rows(fill_rows)
 
-        by_token = defaultdict(lambda: {'quotes': 0, 'risk_sum': 0.0, 'ok': 0, 'watch': 0, 'risk': 0, 'queue_notional': 0.0, 'partial_sum': 0.0})
-        for r in rows:
-            t = str(r.get('token_id_short') or '')
-            by_token[t]['quotes'] += 1
-            by_token[t]['risk_sum'] += _float(r.get('queue_risk_score'))
-            by_token[t]['queue_notional'] += _float(r.get('queue_ahead_notional_usd'))
-            by_token[t]['partial_sum'] += _float(r.get('visible_partial_fill_rate_estimate'))
-            if r.get('queue_status') == 'QUEUE_REALISM_OK':
-                by_token[t]['ok'] += 1
-            elif r.get('queue_status') == 'QUEUE_REALISM_WATCH':
-                by_token[t]['watch'] += 1
-            elif r.get('queue_status') == 'QUEUE_REALISM_RISK':
-                by_token[t]['risk'] += 1
-        token_rows = []
-        for token, v in by_token.items():
-            n = max(1, int(v['quotes']))
-            token_rows.append({
-                'token': token,
-                'quotes': int(v['quotes']),
-                'avg_queue_risk_score': round(v['risk_sum'] / n, 4),
-                'ok_rate': round(v['ok'] / n, 6),
-                'watch_rate': round(v['watch'] / n, 6),
-                'risk_rate': round(v['risk'] / n, 6),
-                'avg_queue_ahead_notional_usd': round(v['queue_notional'] / n, 6),
-                'avg_partial_fill_rate_estimate': round(v['partial_sum'] / n, 6),
-            })
-        token_rows.sort(key=lambda x: (x['avg_queue_risk_score'], -x['quotes']), reverse=True)
-
+        fill_adjusted_exec_pnl = _float(markout.get('executable_markout_usd')) * max(0.0, fill_stats['ok_rate'] + 0.5 * fill_stats['watch_rate'])
         verdict = 'QUEUE_PARTIAL_NEEDS_MORE_DATA'
-        if total >= 100 and ok_rate >= 0.55 and avg_risk <= 40 and risk_rate <= 0.15:
-            verdict = 'QUEUE_PARTIAL_OK'
-        if avg_risk > 60 or risk_rate > 0.30 or avg_partial < 0.05:
-            verdict = 'QUEUE_PARTIAL_RISK'
+        if fill_stats['measured'] >= 100 and fill_stats['risk_rate'] <= 0.30 and fill_stats['avg_risk_score'] <= 55:
+            verdict = 'FILL_QUEUE_PLAUSIBLE'
+        if fill_stats['measured'] >= 100 and (fill_stats['risk_rate'] > 0.60 or fill_stats['avg_visible_partial_fill_rate_estimate'] < 0.05):
+            verdict = 'FILL_QUEUE_RISK'
+        if fill_stats['measured'] < 100 and quote_stats['risk_rate'] > 0.75:
+            verdict = 'QUOTE_QUEUE_RISK_NEEDS_FILL_SAMPLE'
 
         audit = {
             'generated_at': _now_iso(),
-            'mode': 'PAPER_QUEUE_PARTIAL_AUDIT',
+            'mode': 'PAPER_QUEUE_PARTIAL_AUDIT_V8_1',
             'paper_only': True,
             'live_orders_enabled': False,
             'verdict': verdict,
-            'quotes_measured': total,
+            'quotes_measured': quote_stats['measured'],
+            'fills_measured_for_queue': fill_stats['measured'],
             'fills_seen_tail': len(fills),
             'tokens_checked': len(token_ids),
             'books_available': sum(1 for b in books.values() if b),
-            'queue_ok_quotes': ok,
-            'queue_watch_quotes': watch,
-            'queue_risk_quotes': risk,
-            'book_unavailable_quotes': unavailable,
-            'queue_ok_rate': round(ok_rate, 6),
-            'queue_watch_rate': round(watch_rate, 6),
-            'queue_risk_rate': round(risk_rate, 6),
-            'avg_queue_risk_score': round(avg_risk, 4),
-            'avg_queue_ahead_notional_usd': round(avg_queue_notional, 6),
-            'avg_visible_partial_fill_rate_estimate': round(avg_partial, 6),
-            'at_top_or_better_rate': round(at_top_rate, 6),
+            'quote_queue_ok_rate': quote_stats['ok_rate'],
+            'quote_queue_watch_rate': quote_stats['watch_rate'],
+            'quote_queue_risk_rate': quote_stats['risk_rate'],
+            'quote_avg_queue_risk_score': quote_stats['avg_risk_score'],
+            'quote_avg_visible_partial_fill_rate_estimate': quote_stats['avg_visible_partial_fill_rate_estimate'],
+            'quote_at_top_or_better_rate': quote_stats['at_top_or_better_rate'],
+            'fill_queue_ok_rate': fill_stats['ok_rate'],
+            'fill_queue_watch_rate': fill_stats['watch_rate'],
+            'fill_queue_risk_rate': fill_stats['risk_rate'],
+            'fill_avg_queue_risk_score': fill_stats['avg_risk_score'],
+            'fill_avg_queue_ahead_notional_usd': fill_stats['avg_queue_ahead_notional_usd'],
+            'fill_avg_visible_partial_fill_rate_estimate': fill_stats['avg_visible_partial_fill_rate_estimate'],
+            'fill_at_top_or_better_rate': fill_stats['at_top_or_better_rate'],
             'strict_markout_verdict': markout.get('verdict'),
             'strict_measured_fills': markout.get('measured_fills'),
             'strict_executable_markout_usd': markout.get('executable_markout_usd'),
             'strict_positive_executable_markout_rate': markout.get('positive_executable_markout_rate'),
+            'queue_adjusted_executable_markout_usd': round(fill_adjusted_exec_pnl, 6),
             'execution_dry_run_verdict': execution.get('verdict'),
             'execution_ok_rate': execution.get('execution_ok_rate'),
             'avg_execution_risk_score': execution.get('avg_execution_risk_score'),
             'orders_simulated_today': summary.get('orders_simulated_today'),
             'fills_simulated_today': summary.get('fills_simulated_today'),
             'inventory_exposure_usd': summary.get('inventory_exposure_usd'),
-            'top_queue_risk_tokens': token_rows[:20],
-            'recent_queue_rows_sample': sorted(rows, key=lambda x: _float(x.get('queue_risk_score')), reverse=True)[:50],
-            'paper_only_note': 'Queue/partial-fill audit only. It estimates queue pressure from public CLOB depth and never submits orders.',
+            'top_quote_queue_risk_tokens': self._token_summary(quote_rows),
+            'top_fill_queue_risk_tokens': self._token_summary(fill_rows),
+            'recent_quote_queue_rows_sample': sorted(quote_rows, key=lambda x: _float(x.get('queue_risk_score')), reverse=True)[:25],
+            'recent_fill_queue_rows_sample': sorted(fill_rows, key=lambda x: _float(x.get('queue_risk_score')), reverse=True)[:25],
+            'paper_only_note': 'V8.1 queue/partial-fill audit. It separates quote queue risk from actual paper fill queue plausibility and never submits orders.',
         }
         self.audit_path.write_text(json.dumps(audit, ensure_ascii=False, indent=2, default=str))
         with self.runs_path.open('a', encoding='utf-8') as f:
             f.write(json.dumps(audit, ensure_ascii=False, default=str) + '\n')
         if self.post_base44 and settings.base44_write_enabled:
             base44.post_record('MakerQueueAudit', audit)
-        log.info('paper_maker_queue_audit verdict=%s quotes=%s ok_rate=%.4f avg_risk=%.2f avg_partial=%.4f risk_rate=%.4f', verdict, total, ok_rate, avg_risk, avg_partial, risk_rate)
+        log.info('paper_maker_queue_audit_v8_1 verdict=%s quotes=%s quote_risk=%.4f fills=%s fill_risk=%.4f fill_avg_risk=%.2f adjusted_exec=%s', verdict, quote_stats['measured'], quote_stats['risk_rate'], fill_stats['measured'], fill_stats['risk_rate'], fill_stats['avg_risk_score'], audit['queue_adjusted_executable_markout_usd'])
         return audit
 
 
