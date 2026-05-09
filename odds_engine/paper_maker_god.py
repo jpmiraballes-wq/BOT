@@ -35,23 +35,33 @@ def _int_env(name: str, default: int) -> int:
 
 
 class GodModePaperMaker(PaperMakerEngine):
-    """Strict paper maker wrapper focused on executable markout quality."""
+    """Strict paper maker wrapper focused on executable markout quality.
+
+    V6 goal: keep quote/cancel/order volume high, but make fills small and
+    conservative. The previous wrapper still inherited large block fills from the
+    base simulator, which made raw PnL look good while strict executable markout
+    exposed adverse selection.
+    """
 
     def __init__(self, cfg: MakerConfig | None = None) -> None:
         super().__init__(cfg)
         self.strict_mode = _bool_env('PAPER_MAKER_GOD_MODE', True)
-        self.max_executable_spread = _float_env('PAPER_MAKER_MAX_EXECUTABLE_SPREAD', 0.055)
-        self.min_best_bid = _float_env('PAPER_MAKER_MIN_BEST_BID', 0.015)
-        self.min_best_ask = _float_env('PAPER_MAKER_MIN_BEST_ASK', 0.025)
-        self.min_liquidity = _float_env('PAPER_MAKER_MIN_LIQUIDITY', 2500.0)
+        # V6: tighter executable books only. Wider spreads produce midpoint PnL illusions.
+        self.max_executable_spread = _float_env('PAPER_MAKER_MAX_EXECUTABLE_SPREAD', 0.025)
+        self.min_best_bid = _float_env('PAPER_MAKER_MIN_BEST_BID', 0.025)
+        self.min_best_ask = _float_env('PAPER_MAKER_MIN_BEST_ASK', 0.035)
+        self.min_liquidity = _float_env('PAPER_MAKER_MIN_LIQUIDITY', 5000.0)
         self.reject_high_yes_no_extreme = _bool_env('PAPER_MAKER_REJECT_EXTREME_99C', True)
-        self.adverse_token_limit = _int_env('PAPER_MAKER_ADVERSE_TOKEN_LIMIT', 30)
-        self.adverse_positive_rate_max = _float_env('PAPER_MAKER_ADVERSE_POSITIVE_RATE_MAX', 0.50)
-        self.adverse_loss_min_usd = _float_env('PAPER_MAKER_ADVERSE_LOSS_MIN_USD', 0.001)
-        # V5 defaults: permit break-even executable fills, not midpoint-only fake fills.
-        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.20)
-        self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.01)
-        self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.0)
+        self.adverse_token_limit = _int_env('PAPER_MAKER_ADVERSE_TOKEN_LIMIT', 50)
+        self.adverse_positive_rate_max = _float_env('PAPER_MAKER_ADVERSE_POSITIVE_RATE_MAX', 0.60)
+        self.adverse_loss_min_usd = _float_env('PAPER_MAKER_ADVERSE_LOSS_MIN_USD', 0.25)
+        # V6: fewer fills, but no toxic block fills. Quotes can stay high-volume.
+        self.strict_fill_threshold_near = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_NEAR', 0.04)
+        self.strict_fill_threshold_far = _float_env('PAPER_MAKER_STRICT_FILL_THRESHOLD_FAR', 0.0)
+        # Require at least half-cent executable edge before accepting a simulated fill.
+        self.min_exit_edge_ticks = _float_env('PAPER_MAKER_MIN_EXIT_EDGE_TICKS', 0.005)
+        self.strict_max_order_size_usd = _float_env('PAPER_MAKER_STRICT_MAX_ORDER_SIZE_USD', 10.0)
+        self.strict_level0_order_size_usd = _float_env('PAPER_MAKER_STRICT_LEVEL0_ORDER_SIZE_USD', 5.0)
         self.filtered_stats: dict[str, int] = {}
         self.blocked_token_shorts: set[str] = set()
         self.strict_fill_rejects: dict[str, int] = {}
@@ -89,7 +99,7 @@ class GodModePaperMaker(PaperMakerEngine):
             return 'penny_trap_best_bid_too_low'
         if b.best_ask < self.min_best_ask:
             return 'penny_trap_best_ask_too_low'
-        if self.reject_high_yes_no_extreme and (b.best_bid >= 0.985 or b.best_ask >= 0.995):
+        if self.reject_high_yes_no_extreme and (b.best_bid >= 0.975 or b.best_ask >= 0.985):
             return 'extreme_99c_tail_risk'
         if b.spread > self.max_executable_spread:
             return 'spread_too_wide_for_executable_markout'
@@ -122,6 +132,15 @@ class GodModePaperMaker(PaperMakerEngine):
         log.info('paper_maker_god_filter %s', stats)
         return kept
 
+    def _order_size(self, quote_index: int, level: int) -> float:
+        if not self.strict_mode:
+            return super()._order_size(quote_index, level)
+        # No simulated whale/block fills in strict paper mode. We still place many
+        # quotes, but fills must be small enough for markout to be meaningful.
+        if level == 0:
+            return min(self.strict_level0_order_size_usd, self.strict_max_order_size_usd)
+        return min(self.strict_max_order_size_usd, max(1.0, 2.0 + level * 0.75))
+
     def _reject_fill(self, reason: str):
         self.strict_fill_rejects[reason] = self.strict_fill_rejects.get(reason, 0) + 1
 
@@ -133,11 +152,14 @@ class GodModePaperMaker(PaperMakerEngine):
                 return False, cash, 0.0, None
             side = q['side']
             price = _float(q['price'])
+            size_usd = _float(q.get('size_usd')) or (_float(q.get('shares')) * price)
+            if size_usd > self.strict_max_order_size_usd:
+                self._reject_fill('reject_strict_order_size_too_large')
+                return False, cash, 0.0, None
 
             # Critical realism rule: a simulated fill is not allowed unless the
-            # position could be exited immediately on the executable side at
-            # break-even or better. This kills midpoint-only fake PnL while still
-            # allowing real maker-style passive fills.
+            # position could be exited immediately on the executable side with a
+            # positive cushion. This kills midpoint-only fake PnL.
             if side == 'BUY':
                 executable_exit_edge = b.best_bid - price
                 near_touch = price <= b.best_bid
@@ -147,13 +169,16 @@ class GodModePaperMaker(PaperMakerEngine):
             if executable_exit_edge < self.min_exit_edge_ticks:
                 self._reject_fill('reject_no_immediate_executable_exit_edge')
                 return False, cash, 0.0, None
+            if not near_touch:
+                self._reject_fill('reject_far_from_executable_touch')
+                return False, cash, 0.0, None
 
-            unit = self._stable_unit(f"STRICT3:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}:{price}")
-            threshold = self.strict_fill_threshold_near if near_touch else self.strict_fill_threshold_far
-            if b.spread > 0.03:
+            unit = self._stable_unit(f"STRICT6:{q['quote_id']}:{b.best_bid}:{b.best_ask}:{b.spread}:{price}:{size_usd}")
+            threshold = self.strict_fill_threshold_near
+            if b.spread > 0.015:
+                threshold *= 0.50
+            if b.best_bid < 0.06 or b.best_ask > 0.94:
                 threshold *= 0.35
-            if b.best_bid < 0.04 or b.best_ask > 0.96:
-                threshold *= 0.40
             if unit > threshold:
                 self._reject_fill('reject_fill_probability')
                 return False, cash, 0.0, None
@@ -166,6 +191,14 @@ class GodModePaperMaker(PaperMakerEngine):
             summary['strict_quality_filter'] = dict(self.filtered_stats)
             summary['strict_fill_rejects'] = dict(self.strict_fill_rejects)
             summary['blocked_adverse_token_shorts'] = sorted(self.blocked_token_shorts)[:50]
+            summary['strict_v6_controls'] = {
+                'max_executable_spread': self.max_executable_spread,
+                'min_liquidity': self.min_liquidity,
+                'min_exit_edge_ticks': self.min_exit_edge_ticks,
+                'strict_max_order_size_usd': self.strict_max_order_size_usd,
+                'strict_fill_threshold_near': self.strict_fill_threshold_near,
+                'strict_fill_threshold_far': self.strict_fill_threshold_far,
+            }
             self._persist_summary(summary)
         try:
             markout = run_markout_audit()
@@ -174,6 +207,11 @@ class GodModePaperMaker(PaperMakerEngine):
                 summary['strict_markout_score'] = markout.get('markout_score')
                 summary['strict_executable_markout_usd'] = markout.get('executable_markout_usd')
                 summary['strict_positive_executable_markout_rate'] = markout.get('positive_executable_markout_rate')
+                log.info(
+                    'paper_maker_markout_after_cycle verdict=%s measured_fills=%s executable=%s positive_rate=%s',
+                    markout.get('verdict'), markout.get('measured_fills'),
+                    markout.get('executable_markout_usd'), markout.get('positive_executable_markout_rate'),
+                )
                 self._persist_summary(summary)
         except Exception as exc:
             log.warning('paper_maker_markout_after_cycle_failed err=%s', exc)
