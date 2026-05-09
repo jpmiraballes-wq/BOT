@@ -372,6 +372,26 @@ def _run_paper_maker_safely() -> dict:
         return {'mode': 'PAPER_MAKER', 'enabled': False, 'error': str(exc)}
 
 
+def _run_execution_audit_safely() -> dict:
+    try:
+        from paper_maker_execution_audit import run_execution_audit
+        audit = run_execution_audit()
+        log.info(
+            'execution_audit_after_maker verdict=%s quotes=%s ok_rate=%s avg_risk=%s strict_fills=%s strict_exec=%s',
+            audit.get('verdict'),
+            audit.get('quotes_measured'),
+            audit.get('execution_ok_rate'),
+            audit.get('avg_execution_risk_score'),
+            audit.get('strict_measured_fills'),
+            audit.get('strict_executable_markout_usd'),
+        )
+        return audit
+    except Exception as exc:
+        log.warning('execution_audit_after_maker_failed err=%s', exc)
+        _log_to_base44('warning', 'execution_audit_after_maker_failed', {'error': str(exc)})
+        return {'mode': 'PAPER_EXECUTION_DRY_RUN', 'error': str(exc)}
+
+
 def run_once() -> dict:
     settings.validate()
     bot_cfg = base44.fetch_bot_config() if settings.base44_write_enabled else {}
@@ -389,6 +409,7 @@ def run_once() -> dict:
         maker_summary.get('open_quotes'),
         maker_summary.get('maker_total_pnl_usd'),
     )
+    execution_audit = _run_execution_audit_safely()
 
     odds_client = OddsApiClient(runtime)
     poly_client = PolymarketPublicClient(runtime)
@@ -544,8 +565,15 @@ def run_once() -> dict:
         'maker_total_pnl_usd': maker_summary.get('maker_total_pnl_usd'),
         'inventory_exposure_usd': maker_summary.get('inventory_exposure_usd'),
     }
+    summary['paper_execution_audit'] = {
+        'verdict': execution_audit.get('verdict'),
+        'quotes_measured': execution_audit.get('quotes_measured'),
+        'execution_ok_rate': execution_audit.get('execution_ok_rate'),
+        'avg_execution_risk_score': execution_audit.get('avg_execution_risk_score'),
+    }
     money_hunter_report = _build_money_hunter_report(runtime, stats_by_sport, events, odds_outcomes, markets, mappings, signals_count, approved_count, paper_count, test_paper_count, top_signal_diagnostics, money_hunter_status, next_action)
     money_hunter_report['paper_maker'] = maker_summary
+    money_hunter_report['paper_execution_audit'] = execution_audit
     _log_to_base44('info', 'money_hunter_report', money_hunter_report)
     log.info('money_hunter_status=%s next_action=%s', money_hunter_status, next_action)
     _log_to_base44('info', 'run_once_complete', summary)
