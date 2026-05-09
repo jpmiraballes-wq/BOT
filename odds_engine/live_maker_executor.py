@@ -255,6 +255,79 @@ class LiveMakerExecutor:
             raise RuntimeError("SDK order classes not found") from exc
 
         side_value = BUY if order["side"] == "BUY" else SELL
+
+        # Final pre-post book refresh.
+        # The book can move between candidate selection and order post.
+        # We recalculate a safe maker price immediately before signing.
+        try:
+            book = client.get_order_book(order["token_id"])
+            bids = book.get("bids") or []
+            asks = book.get("asks") or []
+
+            live_best_bid = max(float(x["price"]) for x in bids) if bids else 0.0
+            live_best_ask = min(float(x["price"]) for x in asks) if asks else 0.0
+            live_spread = live_best_ask - live_best_bid if live_best_bid and live_best_ask else 0.0
+
+            if order["side"] == "BUY" and live_best_bid > 0 and live_best_ask > 0:
+                live_price = live_best_bid
+                if live_spread >= 0.019:
+                    live_price = min(live_best_bid + 0.01, live_best_ask - 0.01)
+
+                live_price = round(live_price, 4)
+
+                # Safety: never touch/cross ask with post_only.
+                if live_price >= live_best_ask:
+                    live_price = round(live_best_bid, 4)
+
+                if live_price <= 0 or live_price >= live_best_ask:
+                    return {
+                        "skipped": True,
+                        "reason": "no_safe_maker_buy_price",
+                        "live_best_bid": live_best_bid,
+                        "live_best_ask": live_best_ask,
+                        "order": order,
+                    }
+
+                order["price"] = live_price
+                order["best_bid"] = live_best_bid
+                order["best_ask"] = live_best_ask
+                order["spread"] = round(live_spread, 4)
+                order["size_usd"] = round(order["size_shares"] * live_price, 4)
+
+            elif order["side"] == "SELL" and live_best_bid > 0 and live_best_ask > 0:
+                live_price = live_best_ask
+                if live_spread >= 0.019:
+                    live_price = max(live_best_ask - 0.01, live_best_bid + 0.01)
+
+                live_price = round(live_price, 4)
+
+                # Safety: never touch/cross bid with post_only.
+                if live_price <= live_best_bid:
+                    live_price = round(live_best_ask, 4)
+
+                if live_price <= live_best_bid or live_price >= 1:
+                    return {
+                        "skipped": True,
+                        "reason": "no_safe_maker_sell_price",
+                        "live_best_bid": live_best_bid,
+                        "live_best_ask": live_best_ask,
+                        "order": order,
+                    }
+
+                order["price"] = live_price
+                order["best_bid"] = live_best_bid
+                order["best_ask"] = live_best_ask
+                order["spread"] = round(live_spread, 4)
+                order["size_usd"] = round(order["size_shares"] * live_price, 4)
+
+        except Exception as exc:
+            return {
+                "skipped": True,
+                "reason": "book_refresh_failed",
+                "error": repr(exc),
+                "order": order,
+            }
+
         args = OrderArgs(
             token_id=order["token_id"],
             price=order["price"],
