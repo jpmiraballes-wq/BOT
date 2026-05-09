@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from models import to_dict, BotLog, now_iso
 from config import settings
+
+log = logging.getLogger(__name__)
 
 
 class JsonlStore:
@@ -20,6 +23,20 @@ class JsonlStore:
         record = to_dict(item)
         with path.open('a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
+        if stream == 'papertrade':
+            self._refresh_paper_portfolio_after_trade()
+
+    def _refresh_paper_portfolio_after_trade(self) -> None:
+        """Best-effort local portfolio refresh after each paper trade append.
+
+        This intentionally does not raise: a failed mark/summary must never
+        prevent storing the trade itself or crash the odds worker.
+        """
+        try:
+            from paper_portfolio_refresh import refresh_paper_portfolio
+            refresh_paper_portfolio(settings)
+        except Exception as exc:
+            log.exception('paper_portfolio_refresh_failed err=%s', exc)
 
     def _load_sent(self) -> set[str]:
         if self._sent_cache is not None:
