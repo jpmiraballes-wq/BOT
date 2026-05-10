@@ -13,6 +13,15 @@ mkdir -p data logs
 
 export PYTHONUNBUFFERED=1
 
+# Critical maker hotfix: do NOT block all repeated/known markets.
+# Previous live logs showed: CCC_CANDIDATE_FILTER in=0 out=0 blocked_known=411.
+export LIVE_NO_REPEAT_MARKET="0"
+export CCC_NO_REPEAT_MARKET="0"
+export LIVE_ALLOW_REPEAT_MARKET="1"
+export CCC_ALLOW_REPEAT_MARKET="1"
+export CCC_ALLOW_KNOWN_MARKETS="1"
+export CCC_DISABLE_KNOWN_BLOCK="1"
+
 # Keep disaster stop wide for sports volatility.
 export DATA_EXIT_STOP_LIVE_PCT="${DATA_EXIT_STOP_LIVE_PCT:--35}"
 export DATA_EXIT_STOP_UNKNOWN_PCT="${DATA_EXIT_STOP_UNKNOWN_PCT:--30}"
@@ -41,6 +50,11 @@ LOG="logs/ccc_live_autopilot_${STAMP}.log"
 
 echo "CCC_LIVE_AUTOPILOT_LAUNCH log=$LOG"
 echo "Risk caps: max_order=$MAX_ORDER_USD max_cycle=$MAX_CYCLE_NOTIONAL_USD max_session=$MAX_SESSION_NOTIONAL_USD max_markets=$MAX_MARKETS order_ttl=$ORDER_TTL"
+
+# Run local/runtime hotfix before autopilot compiles maker scripts.
+if [ -f ccc_patch_allow_known_markets.py ]; then
+  .venv/bin/python -u ccc_patch_allow_known_markets.py
+fi
 
 exec .venv/bin/python -u ccc_live_autopilot.py \
   --real \
