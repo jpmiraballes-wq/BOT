@@ -14,6 +14,7 @@ This patch is intentionally local/runtime-safe:
 - injects permissive env defaults
 - bypasses obvious known/repeat/seen continue-blocks
 - patches the autopilot so it does not re-force LIVE_NO_REPEAT_MARKET=1
+- patches the autopilot so it prefers ccc_simple_live_maker.py first
 - keeps risk caps, spread caps, balance checks and real/dry behavior intact
 """
 from __future__ import annotations
@@ -96,6 +97,28 @@ def patch_env_defaults(src: str) -> str:
     return src
 
 
+def patch_autopilot_prefer_simple_maker(src: str) -> str:
+    # Add the new maker to compile checks.
+    if '"ccc_simple_live_maker.py"' not in src:
+        src = src.replace(
+            '    "ccc_live_autopilot.py",\n',
+            '    "ccc_live_autopilot.py",\n    "ccc_simple_live_maker.py",\n',
+        )
+
+    # Prefer the new clean maker before older local makers that may be over-hardened.
+    src = src.replace(
+        '    for name in ["stable_maker_no_cancel.py", "live_sports_maker.py"]:',
+        '    for name in ["ccc_simple_live_maker.py", "stable_maker_no_cancel.py", "live_sports_maker.py"]:',
+    )
+
+    # If it was already patched but only in compile list, force a robust fallback replacement.
+    src = src.replace(
+        'for name in ["stable_maker_no_cancel.py", "live_sports_maker.py"]:',
+        'for name in ["ccc_simple_live_maker.py", "stable_maker_no_cancel.py", "live_sports_maker.py"]:',
+    )
+    return src
+
+
 def patch_file(path: Path) -> bool:
     if not path.exists():
         print(f"ALLOW_KNOWN_PATCH_SKIP missing={path.name}", flush=True)
@@ -103,6 +126,8 @@ def patch_file(path: Path) -> bool:
     src = path.read_text()
     original = src
     src = patch_env_defaults(src)
+    if path.name == "ccc_live_autopilot.py":
+        src = patch_autopilot_prefer_simple_maker(src)
     if path.name in {"live_sports_maker.py", "stable_maker_no_cancel.py"}:
         src = inject_after_imports(src)
         src = patch_known_continue_blocks(src)
@@ -126,9 +151,14 @@ def main() -> None:
     os.environ["CCC_ALLOW_REPEAT_MARKET"] = "1"
     os.environ["CCC_ALLOW_KNOWN_MARKETS"] = "1"
     os.environ["CCC_DISABLE_KNOWN_BLOCK"] = "1"
+    os.environ["CCC_SIMPLE_POST_ONLY"] = os.environ.get("CCC_SIMPLE_POST_ONLY", "0")
     changed = 0
     for target in TARGETS:
         changed += int(patch_file(target))
+    simple = ROOT / "ccc_simple_live_maker.py"
+    if simple.exists():
+        py_compile.compile(str(simple), doraise=True)
+        print("ALLOW_KNOWN_SIMPLE_MAKER_COMPILE_OK ccc_simple_live_maker.py", flush=True)
     print(f"ALLOW_KNOWN_PATCH_DONE changed={changed}", flush=True)
 
 
