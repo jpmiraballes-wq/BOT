@@ -13,7 +13,8 @@ This patch is intentionally local/runtime-safe:
 - backs up each target file once per timestamp
 - injects permissive env defaults
 - bypasses obvious known/repeat/seen continue-blocks
-- keeps all risk caps, spread caps, balance checks and real/dry behavior intact
+- patches the autopilot so it does not re-force LIVE_NO_REPEAT_MARKET=1
+- keeps risk caps, spread caps, balance checks and real/dry behavior intact
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 TARGETS = [
+    ROOT / "ccc_live_autopilot.py",
     ROOT / "live_sports_maker.py",
     ROOT / "stable_maker_no_cancel.py",
 ]
@@ -33,21 +35,20 @@ ENV_INJECT = '''
 # CCC AUTO PATCH: allow live maker to reuse known markets.
 # The previous hardening layer could block every candidate as blocked_known.
 import os as _ccc_allow_known_os
-_ccc_allow_known_os.environ.setdefault("LIVE_NO_REPEAT_MARKET", "0")
-_ccc_allow_known_os.environ.setdefault("CCC_NO_REPEAT_MARKET", "0")
-_ccc_allow_known_os.environ.setdefault("LIVE_ALLOW_REPEAT_MARKET", "1")
-_ccc_allow_known_os.environ.setdefault("CCC_ALLOW_REPEAT_MARKET", "1")
-_ccc_allow_known_os.environ.setdefault("CCC_ALLOW_KNOWN_MARKETS", "1")
-_ccc_allow_known_os.environ.setdefault("CCC_DISABLE_KNOWN_BLOCK", "1")
-_ccc_allow_known_os.environ.setdefault("CCC_IGNORE_KNOWN_MARKETS", "1")
-_ccc_allow_known_os.environ.setdefault("CCC_BYPASS_KNOWN_FILTER", "1")
+_ccc_allow_known_os.environ["LIVE_NO_REPEAT_MARKET"] = "0"
+_ccc_allow_known_os.environ["CCC_NO_REPEAT_MARKET"] = "0"
+_ccc_allow_known_os.environ["LIVE_ALLOW_REPEAT_MARKET"] = "1"
+_ccc_allow_known_os.environ["CCC_ALLOW_REPEAT_MARKET"] = "1"
+_ccc_allow_known_os.environ["CCC_ALLOW_KNOWN_MARKETS"] = "1"
+_ccc_allow_known_os.environ["CCC_DISABLE_KNOWN_BLOCK"] = "1"
+_ccc_allow_known_os.environ["CCC_IGNORE_KNOWN_MARKETS"] = "1"
+_ccc_allow_known_os.environ["CCC_BYPASS_KNOWN_FILTER"] = "1"
 '''
 
 
 def inject_after_imports(src: str) -> str:
     if "CCC AUTO PATCH: allow live maker to reuse known markets" in src:
         return src
-    # Preserve shebang and module docstring/imports as much as possible.
     m = re.search(r"((?:#!.*\n)?(?:\"\"\".*?\"\"\"\s*)?(?:from __future__ import .*?\n)?(?:import .*?\n|from .*? import .*?\n)+)", src, re.S)
     if m:
         return src[: m.end()] + ENV_INJECT + src[m.end() :]
@@ -55,10 +56,6 @@ def inject_after_imports(src: str) -> str:
 
 
 def patch_known_continue_blocks(src: str) -> str:
-    # Bypass common block style:
-    # if <known/repeat/seen/already/...>:
-    #     blocked_known += 1
-    #     continue
     terms = r"known|repeat|repeated|seen|already|duplicate|dedupe|no_repeat|blocked_known"
     patterns = [
         rf"if\s+[^\n]*(?:{terms})[^\n]*:\s*\n(?P<i>\s+)(?:[^\n]*\n){{0,8}}?\s*blocked_known\s*\+=\s*1\s*\n\s*continue",
@@ -70,7 +67,6 @@ def patch_known_continue_blocks(src: str) -> str:
             return "if False:  # CCC patched: do not block all known/repeated markets\n" + indent + "pass"
         src = re.sub(pat, repl, src, flags=re.I)
 
-    # Bypass helper functions that explicitly return True for known/repeat blocks.
     src = re.sub(
         rf"(def\s+[^\n]*(?:{terms})[^\n]*\([^\n]*\):\s*\n)(?P<body>(?:\s+[^\n]*\n)+?)",
         lambda m: m.group(1) + re.match(r"\s*", m.group("body")).group(0) + "return False  # CCC patched\n" if "return True" in m.group("body") else m.group(0),
@@ -82,6 +78,10 @@ def patch_known_continue_blocks(src: str) -> str:
 
 def patch_env_defaults(src: str) -> str:
     replacements = {
+        '"LIVE_NO_REPEAT_MARKET": "1"': '"LIVE_NO_REPEAT_MARKET": "0"',
+        "'LIVE_NO_REPEAT_MARKET': '1'": "'LIVE_NO_REPEAT_MARKET': '0'",
+        '"CCC_NO_REPEAT_MARKET": "1"': '"CCC_NO_REPEAT_MARKET": "0"',
+        "'CCC_NO_REPEAT_MARKET': '1'": "'CCC_NO_REPEAT_MARKET': '0'",
         'os.environ.get("LIVE_NO_REPEAT_MARKET", "1")': 'os.environ.get("LIVE_NO_REPEAT_MARKET", "0")',
         "os.environ.get('LIVE_NO_REPEAT_MARKET', '1')": "os.environ.get('LIVE_NO_REPEAT_MARKET', '0')",
         'os.getenv("LIVE_NO_REPEAT_MARKET", "1")': 'os.getenv("LIVE_NO_REPEAT_MARKET", "0")',
@@ -102,9 +102,10 @@ def patch_file(path: Path) -> bool:
         return False
     src = path.read_text()
     original = src
-    src = inject_after_imports(src)
     src = patch_env_defaults(src)
-    src = patch_known_continue_blocks(src)
+    if path.name in {"live_sports_maker.py", "stable_maker_no_cancel.py"}:
+        src = inject_after_imports(src)
+        src = patch_known_continue_blocks(src)
     if src == original:
         print(f"ALLOW_KNOWN_PATCH_NOOP {path.name}", flush=True)
         py_compile.compile(str(path), doraise=True)
