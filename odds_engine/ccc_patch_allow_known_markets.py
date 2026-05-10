@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-CCC live maker hotfix.
+CCC live maker hotfix — SAFE VERSION.
 
-Problem seen in live logs:
-    CCC_CANDIDATE_FILTER in= 0 out= 0 skipped= 0 blocked_known= 411
-    orders_planned=0
+What this does:
+- Keeps the useful fix: known/repeated markets must not block every candidate.
+- Restores the old signed maker path: stable_maker_no_cancel.py / live_sports_maker.py.
+- Explicitly removes the emergency simple maker from autopilot priority.
 
-That means the maker is alive, authenticated, and scanning, but a local hardening
-filter is blocking every known/repeated market before order planning.
-
-This patch is intentionally local/runtime-safe:
-- backs up each target file once per timestamp
-- injects permissive env defaults
-- bypasses obvious known/repeat/seen continue-blocks
-- patches the autopilot so it does not re-force LIVE_NO_REPEAT_MARKET=1
-- patches the autopilot so it prefers ccc_simple_live_maker.py first
-- keeps risk caps, spread caps, balance checks and real/dry behavior intact
+Why:
+The simple maker was introduced only to bypass the blocked_known=411 situation, but live logs showed
+it creates orders with an incompatible signature/order version for the wallet/client setup:
+    order_version_mismatch
+    invalid signature
+The old maker/client path was the one that already bought/sold/cancelled correctly.
 """
 from __future__ import annotations
 
@@ -67,13 +64,6 @@ def patch_known_continue_blocks(src: str) -> str:
             indent = m.group("i")
             return "if False:  # CCC patched: do not block all known/repeated markets\n" + indent + "pass"
         src = re.sub(pat, repl, src, flags=re.I)
-
-    src = re.sub(
-        rf"(def\s+[^\n]*(?:{terms})[^\n]*\([^\n]*\):\s*\n)(?P<body>(?:\s+[^\n]*\n)+?)",
-        lambda m: m.group(1) + re.match(r"\s*", m.group("body")).group(0) + "return False  # CCC patched\n" if "return True" in m.group("body") else m.group(0),
-        src,
-        flags=re.I,
-    )
     return src
 
 
@@ -97,25 +87,19 @@ def patch_env_defaults(src: str) -> str:
     return src
 
 
-def patch_autopilot_prefer_simple_maker(src: str) -> str:
-    # Add the new maker to compile checks.
-    if '"ccc_simple_live_maker.py"' not in src:
-        src = src.replace(
-            '    "ccc_live_autopilot.py",\n',
-            '    "ccc_live_autopilot.py",\n    "ccc_simple_live_maker.py",\n',
-        )
-
-    # Prefer the new clean maker before older local makers that may be over-hardened.
+def restore_autopilot_signed_maker(src: str) -> str:
+    # Do not let autopilot prefer ccc_simple_live_maker.py. That path caused order_version_mismatch / invalid signature.
     src = src.replace(
-        '    for name in ["stable_maker_no_cancel.py", "live_sports_maker.py"]:',
-        '    for name in ["ccc_simple_live_maker.py", "stable_maker_no_cancel.py", "live_sports_maker.py"]:',
-    )
-
-    # If it was already patched but only in compile list, force a robust fallback replacement.
-    src = src.replace(
-        'for name in ["stable_maker_no_cancel.py", "live_sports_maker.py"]:',
         'for name in ["ccc_simple_live_maker.py", "stable_maker_no_cancel.py", "live_sports_maker.py"]:',
+        'for name in ["stable_maker_no_cancel.py", "live_sports_maker.py"]:',
     )
+    src = src.replace(
+        '    for name in ["ccc_simple_live_maker.py", "stable_maker_no_cancel.py", "live_sports_maker.py"]:',
+        '    for name in ["stable_maker_no_cancel.py", "live_sports_maker.py"]:',
+    )
+
+    # Remove simple maker from compile list if present. It can remain on disk, but must not be in the live path.
+    src = src.replace('    "ccc_simple_live_maker.py",\n', '')
     return src
 
 
@@ -123,18 +107,24 @@ def patch_file(path: Path) -> bool:
     if not path.exists():
         print(f"ALLOW_KNOWN_PATCH_SKIP missing={path.name}", flush=True)
         return False
+
     src = path.read_text()
     original = src
+
     src = patch_env_defaults(src)
+
     if path.name == "ccc_live_autopilot.py":
-        src = patch_autopilot_prefer_simple_maker(src)
+        src = restore_autopilot_signed_maker(src)
+
     if path.name in {"live_sports_maker.py", "stable_maker_no_cancel.py"}:
         src = inject_after_imports(src)
         src = patch_known_continue_blocks(src)
+
     if src == original:
         print(f"ALLOW_KNOWN_PATCH_NOOP {path.name}", flush=True)
         py_compile.compile(str(path), doraise=True)
         return False
+
     stamp = int(time.time())
     bak = path.with_suffix(path.suffix + f".bak_allow_known_{stamp}")
     bak.write_text(original)
@@ -151,14 +141,11 @@ def main() -> None:
     os.environ["CCC_ALLOW_REPEAT_MARKET"] = "1"
     os.environ["CCC_ALLOW_KNOWN_MARKETS"] = "1"
     os.environ["CCC_DISABLE_KNOWN_BLOCK"] = "1"
-    os.environ["CCC_SIMPLE_POST_ONLY"] = os.environ.get("CCC_SIMPLE_POST_ONLY", "0")
+
     changed = 0
     for target in TARGETS:
         changed += int(patch_file(target))
-    simple = ROOT / "ccc_simple_live_maker.py"
-    if simple.exists():
-        py_compile.compile(str(simple), doraise=True)
-        print("ALLOW_KNOWN_SIMPLE_MAKER_COMPILE_OK ccc_simple_live_maker.py", flush=True)
+
     print(f"ALLOW_KNOWN_PATCH_DONE changed={changed}", flush=True)
 
 
