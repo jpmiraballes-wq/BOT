@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Patch live_exit_data_api.py with defensive exposure exits.
+Patch live_exit_data_api.py with defensive exposure exits + cooldown.
 
-Design decision:
-- Keep wide sports stop-loss defaults (-35 live / -30 unknown / -45 season).
+Design decisions:
+- Keep wide sports disaster stop-loss defaults (-35 live / -30 unknown / -45 season).
 - Do NOT panic-sell normal sports volatility.
-- Add a separate defensive-exposure exit that bypasses profit-only guards when:
-  large position + meaningful drawdown + valid bid + not an insanely wide/no-book market.
+- Add separate defensive-exposure exit for large concentrated losers only.
+- Add cooldown so the same asset is not repeatedly defensive-sold every cycle.
 
 This patcher modifies only plan_exit(), writes a timestamped backup, and py_compile-checks.
+It is idempotent: running it again replaces the existing plan_exit with this version.
 """
 from __future__ import annotations
 
@@ -21,6 +22,10 @@ ROOT = Path(__file__).resolve().parent
 TARGET = ROOT / "live_exit_data_api.py"
 
 NEW_FUNC = r'''def plan_exit(client, pos):
+    import json
+    import time as _time
+    from pathlib import Path as _Path
+
     title = pos["title"] or ""
     kind = classify_market(title)
 
@@ -40,8 +45,9 @@ NEW_FUNC = r'''def plan_exit(client, pos):
     initial_value = pos.get("initial_value")
     raw = pos.get("raw") or {}
     redeemable = bool(raw.get("redeemable"))
+    asset_id = pos.get("asset_id")
 
-    snap = book_prices(client, pos["asset_id"])
+    snap = book_prices(client, asset_id)
     best_bid = snap.get("best_bid")
     best_ask = snap.get("best_ask")
 
@@ -58,7 +64,7 @@ NEW_FUNC = r'''def plan_exit(client, pos):
         "expected_pnl_vs_initial": None,
     }
 
-    if not pos["asset_id"] or size <= 0:
+    if not asset_id or size <= 0:
         plan["reason"] = "NO_SIZE_OR_ASSET"
         return plan
 
@@ -66,6 +72,43 @@ NEW_FUNC = r'''def plan_exit(client, pos):
     if redeemable and best_bid is None:
         plan["reason"] = "REDEEMABLE_NO_LIVE_BID"
         return plan
+
+    def _cooldown_path():
+        return _Path(__file__).resolve().parent / "data" / "live_exit_cooldown.json"
+
+    def _load_cooldowns():
+        path = _cooldown_path()
+        try:
+            if path.exists():
+                data = json.loads(path.read_text())
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
+    def _save_cooldowns(data):
+        path = _cooldown_path()
+        try:
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps(data, indent=2, sort_keys=True))
+        except Exception:
+            pass
+
+    def _cooldown_active(key, seconds):
+        if seconds <= 0:
+            return False, 0
+        data = _load_cooldowns()
+        last = float(data.get(key, 0) or 0)
+        left = seconds - (_time.time() - last)
+        return left > 0, max(0, int(left))
+
+    def _mark_cooldown(key):
+        data = _load_cooldowns()
+        data[key] = _time.time()
+        # Keep file compact.
+        cutoff = _time.time() - 86400
+        data = {k: v for k, v in data.items() if float(v or 0) >= cutoff}
+        _save_cooldowns(data)
 
     def set_sell(price, reason):
         sell_price = round(max(0.01, min(0.99, float(price))), 2)
@@ -75,6 +118,8 @@ NEW_FUNC = r'''def plan_exit(client, pos):
         plan["expected_gross"] = round(size * sell_price, 6)
         if initial_value is not None:
             plan["expected_pnl_vs_initial"] = round(size * sell_price - initial_value, 6)
+        if reason.startswith("DEFENSIVE_EXPOSURE_"):
+            _mark_cooldown(f"defensive:{asset_id}")
         return plan
 
     # CTO WIDE STOP LOSS: keep the sports-volatility philosophy.
@@ -120,6 +165,7 @@ NEW_FUNC = r'''def plan_exit(client, pos):
     defensive_loss_season = fenv("DATA_EXIT_DEFENSIVE_LOSS_SEASON_PCT", -35.0)
     defensive_min_bid = fenv("DATA_EXIT_DEFENSIVE_MIN_BID", 0.05)
     defensive_max_spread = fenv("DATA_EXIT_DEFENSIVE_MAX_SPREAD", 0.15)
+    defensive_cooldown_seconds = fenv("DATA_EXIT_DEFENSIVE_COOLDOWN_SECONDS", 900.0)
 
     if kind == "SEASON":
         defensive_min_exposure = defensive_min_exposure_season
@@ -132,6 +178,10 @@ NEW_FUNC = r'''def plan_exit(client, pos):
         defensive_loss = defensive_loss_unknown
 
     if pct <= defensive_loss and exposure_usd >= defensive_min_exposure:
+        active, left = _cooldown_active(f"defensive:{asset_id}", defensive_cooldown_seconds)
+        if active:
+            plan["reason"] = f"DEFENSIVE_COOLDOWN_ACTIVE_{left}s"
+            return plan
         if not bid_ok:
             plan["reason"] = "DEFENSIVE_EXIT_NO_VALID_BID"
             return plan
@@ -209,6 +259,7 @@ def main() -> None:
     print("DEFENSIVE_EXIT_PATCH_OK")
     print("DEFAULTS: live defensive exit only if pnl<=-15%, exposure>=25 USD, bid>=0.05, spread<=0.15")
     print("DEFAULTS: original disaster stop kept at LIVE -35 / UNKNOWN -30 / SEASON -45")
+    print("DEFAULTS: defensive cooldown 900 seconds per asset")
 
 
 if __name__ == "__main__":
