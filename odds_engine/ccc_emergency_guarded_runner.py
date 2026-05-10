@@ -14,9 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Sequence
@@ -77,13 +75,20 @@ def run(cmd: Sequence[str], *, timeout: int | None = None, env: dict[str, str] |
 
 
 def quiet_kill_old() -> None:
-    # Best-effort only. The user can also run pkill outside. Avoid killing this runner by not matching its filename.
+    # Best-effort only. Avoid killing this runner by not matching its filename.
     for pat in KILL_PATTERNS:
         subprocess.run(["pkill", "-f", pat], cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def cancel_all() -> None:
     run([str(PY), "-u", "ccc_cancel_open_orders.py", "--real"], timeout=90, allow_fail=True)
+
+
+def guarded_cancel_after_delay(delay: float, label: str) -> None:
+    if delay > 0:
+        log("POST_ORDER_CANCEL_DELAY", label, delay)
+        time.sleep(delay)
+    cancel_all()
 
 
 def exit_once(hold: float) -> None:
@@ -132,6 +137,8 @@ def main() -> None:
     ap.add_argument("--sleep", type=float, default=20.0)
     ap.add_argument("--exit-hold", type=float, default=2.0)
     ap.add_argument("--maker-timeout", type=int, default=90)
+    ap.add_argument("--post-exit-cancel-delay", type=float, default=8.0)
+    ap.add_argument("--post-maker-cancel-delay", type=float, default=8.0)
     ap.add_argument("--kill-old", action="store_true")
     ap.add_argument("--compile", action="store_true")
     args = ap.parse_args()
@@ -154,17 +161,20 @@ def main() -> None:
         # Always give exit a chance first. This is portfolio defense.
         exit_once(args.exit_hold)
 
+        # Critical guard: exit may create a delayed/GTC sell order. Give it a few seconds, then clear anything unfilled.
+        guarded_cancel_after_delay(args.post_exit_cancel_delay, "after_exit")
+
         if args.mode in {"micro-dry", "micro-real"}:
             maker_once(real=(args.mode == "micro-real"), timeout=args.maker_timeout)
 
-            # Critical guard: maker may create GTC orders. Clear them immediately after the micro attempt.
-            cancel_all()
+            # Critical guard: maker may create GTC orders. Give it a few seconds, then clear anything unfilled.
+            guarded_cancel_after_delay(args.post_maker_cancel_delay, "after_maker")
 
             # Then run exit again, because a fill may have happened.
             exit_once(args.exit_hold)
 
             # Final clear: do not leave GTC orders open.
-            cancel_all()
+            guarded_cancel_after_delay(args.post_exit_cancel_delay, "final_after_exit")
 
         if i < args.cycles:
             log("SLEEP", args.sleep)
