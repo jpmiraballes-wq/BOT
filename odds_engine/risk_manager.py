@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from config import Settings, settings as default_settings
+from models import MappingCandidate, PolymarketMarket, OddsOutcome
+
+
+@dataclass
+class RiskResult:
+    approved: bool
+    reason: str
+
+
+class RiskManager:
+    def __init__(self, cfg: Settings | None = None) -> None:
+        self.cfg = cfg or default_settings
+        self.open_exposure_usd = 0.0
+
+    def _age_seconds(self, ts: str | None) -> float | None:
+        if not ts:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00')).astimezone(timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds()
+        except Exception:
+            return None
+
+    def odds_freshness_debug(self, outcome: OddsOutcome) -> dict:
+        """Return ages used by Money Hunter diagnostics.
+
+        `provider_last_update` can be older than the actual API capture. For this
+        V1 PAPER engine, the hard stale guard should block stale local/API data,
+        not valid odds that were freshly received but whose bookmaker timestamp is
+        a few minutes old.
+        """
+        received_age = self._age_seconds(outcome.received_at)
+        provider_age = self._age_seconds(outcome.provider_last_update)
+        return {
+            'received_age_seconds': received_age,
+            'provider_age_seconds': provider_age,
+            'ttl_seconds': self.cfg.default_odds_ttl_seconds,
+            'fresh_by_received_at': received_age is not None and received_age <= self.cfg.default_odds_ttl_seconds,
+            'fresh_by_provider_last_update': provider_age is not None and provider_age <= self.cfg.default_odds_ttl_seconds,
+        }
+
+    def odds_are_fresh(self, outcome: OddsOutcome) -> bool:
+        debug = self.odds_freshness_debug(outcome)
+        return bool(debug['fresh_by_received_at'])
+
+    def validate_signal_inputs(
+        self,
+        mapping: MappingCandidate,
+        market: PolymarketMarket,
+        odds: OddsOutcome,
+        fair_value: float,
+        polymarket_price: float,
+        edge: float,
+    ) -> RiskResult:
+        if self.cfg.bot_mode not in {'OBSERVE', 'PAPER'}:
+            return RiskResult(False, 'live_modes_blocked_in_v1')
+        if mapping.status != 'auto_approved':
+            return RiskResult(False, 'mapping_not_auto_approved')
+        if mapping.confidence_score < self.cfg.min_mapping_confidence:
+            return RiskResult(False, 'mapping_confidence_below_threshold')
+        if mapping.market_type == 'unsupported_derivative':
+            return RiskResult(False, 'unsupported_market_type')
+        if not self.odds_are_fresh(odds):
+            return RiskResult(False, 'stale_odds')
+        if market.best_ask is None or market.best_bid is None:
+            return RiskResult(False, 'missing_polymarket_prices')
+        if market.spread is None or market.spread > self.cfg.max_spread:
+            return RiskResult(False, 'spread_too_wide')
+        if market.liquidity < self.cfg.min_liquidity:
+            return RiskResult(False, 'liquidity_too_low')
+        if not (0.01 <= polymarket_price <= 0.99):
+            return RiskResult(False, 'bad_polymarket_price')
+        if not (0.01 <= fair_value <= 0.99):
+            return RiskResult(False, 'bad_fair_value')
+        if edge < self.cfg.min_edge:
+            return RiskResult(False, 'edge_below_threshold')
+        if self.open_exposure_usd + self.cfg.paper_trade_usd > self.cfg.max_total_exposure_usd:
+            return RiskResult(False, 'paper_exposure_cap_reached')
+        return RiskResult(True, 'approved')
+
+    def reserve_paper_exposure(self, size_usd: float) -> None:
+        self.open_exposure_usd += max(0.0, float(size_usd))
